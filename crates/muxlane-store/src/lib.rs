@@ -40,7 +40,7 @@ fn cleanup_temporary_files(path: &Path) {
     }
 }
 
-pub const STORE_VERSION: u32 = 2;
+pub const STORE_VERSION: u32 = 3;
 const SECRETS_VERSION: u32 = 1;
 
 fn default_sidebar_visible() -> bool {
@@ -146,6 +146,8 @@ pub struct PersistedApp {
     pub remote_configs: Vec<PersistedRemote>,
     #[serde(default)]
     pub sessions: Vec<PersistedAgent>,
+    #[serde(default)]
+    pub acp_threads: Vec<PersistedAcpThread>,
     #[serde(default = "PaneNode::empty")]
     pub pane_tree: PaneNode,
     #[serde(default)]
@@ -232,6 +234,7 @@ impl PersistedApp {
         self.shortcut_bindings = previous.shortcut_bindings.clone();
         self.shortcut_bindings.migrate_legacy_defaults();
         self.project_order = previous.project_order.clone();
+        self.acp_threads = previous.acp_threads.clone();
         self
     }
 }
@@ -245,6 +248,7 @@ impl Default for PersistedApp {
             remotes: vec![],
             remote_configs: vec![],
             sessions: vec![],
+            acp_threads: vec![],
             pane_tree: PaneNode::empty(),
             active_pane: None,
             maximized_pane: None,
@@ -317,6 +321,82 @@ pub struct PersistedAgent {
     pub tmux_session: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PersistedAcpThread {
+    #[serde(default)]
+    pub ui_id: AgentId,
+    #[serde(default)]
+    pub project_id: ProjectId,
+    #[serde(default)]
+    pub profile_id: String,
+    #[serde(default)]
+    pub protocol_session_id: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub parent_ui_id: Option<AgentId>,
+    #[serde(default)]
+    pub draft: String,
+}
+
+pub const ACP_THREAD_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpThreadSaveOutcome {
+    Written,
+    SkippedStale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpThreadDeleteOutcome {
+    Deleted,
+    SkippedNewer,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PersistedAcpThreadData {
+    pub schema_version: u32,
+    pub metadata: PersistedAcpThread,
+    #[serde(default)]
+    pub snapshot: muxlane_acp::ThreadSnapshot,
+    #[serde(default)]
+    pub queued_prompts: Vec<muxlane_acp::PromptSubmission>,
+    #[serde(default)]
+    pub queue_paused: bool,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub updated_at: u64,
+    #[serde(default)]
+    pub write_revision: u64,
+}
+
+impl PersistedAcpThreadData {
+    pub fn new(metadata: PersistedAcpThread) -> Self {
+        let now = muxlane_core::model::now_secs();
+        Self {
+            schema_version: ACP_THREAD_SCHEMA_VERSION,
+            metadata,
+            snapshot: muxlane_acp::ThreadSnapshot::default(),
+            queued_prompts: Vec::new(),
+            queue_paused: false,
+            archived: false,
+            created_at: now,
+            updated_at: now,
+            write_revision: 1,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AcpThreadLoad {
+    pub records: Vec<PersistedAcpThreadData>,
+    pub errors: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct WindowGeometry {
     pub x: f32,
@@ -356,9 +436,7 @@ pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
         restore_passwords(&mut app, &secrets);
         Ok(app)
     })();
-    if result.is_err() {
-        cleanup_temporary_files(path);
-    }
+    cleanup_temporary_files(path);
     result
 }
 
@@ -379,6 +457,130 @@ pub fn save(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
     }
     write_secrets(&secrets_path(path), &secrets)?;
     write_state(path, &state)
+}
+
+pub fn save_acp_thread(state_path: &Path, record: &PersistedAcpThreadData) -> anyhow::Result<()> {
+    save_acp_thread_if_newer(state_path, record).map(|_| ())
+}
+
+pub fn save_acp_thread_if_newer(
+    state_path: &Path,
+    record: &PersistedAcpThreadData,
+) -> anyhow::Result<AcpThreadSaveOutcome> {
+    validate_thread_id(&record.metadata.ui_id)?;
+    validate_thread_schema(record.schema_version)?;
+    let mut record = record.clone();
+    record.schema_version = ACP_THREAD_SCHEMA_VERSION;
+    let path = acp_thread_path(state_path, &record.metadata.ui_id);
+    if let Some(existing) = read_acp_thread_file(&path)? {
+        if existing.write_revision >= record.write_revision {
+            return Ok(AcpThreadSaveOutcome::SkippedStale);
+        }
+    }
+    write_atomic(&path, &serde_json::to_vec_pretty(&record)?, Some(0o600))?;
+    Ok(AcpThreadSaveOutcome::Written)
+}
+
+pub fn delete_acp_thread(state_path: &Path, ui_id: &str) -> anyhow::Result<()> {
+    delete_acp_thread_if_not_newer(state_path, ui_id, u64::MAX).map(|_| ())
+}
+
+pub fn delete_acp_thread_if_not_newer(
+    state_path: &Path,
+    ui_id: &str,
+    delete_revision: u64,
+) -> anyhow::Result<AcpThreadDeleteOutcome> {
+    validate_thread_id(ui_id)?;
+    let path = acp_thread_path(state_path, ui_id);
+    let Some(existing) = read_acp_thread_file(&path)? else {
+        return Ok(AcpThreadDeleteOutcome::NotFound);
+    };
+    if existing.write_revision > delete_revision {
+        return Ok(AcpThreadDeleteOutcome::SkippedNewer);
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(AcpThreadDeleteOutcome::Deleted),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(AcpThreadDeleteOutcome::NotFound)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn load_acp_threads(state_path: &Path) -> AcpThreadLoad {
+    let directory = acp_threads_dir(state_path);
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return AcpThreadLoad::default();
+    };
+    let mut result = AcpThreadLoad::default();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let loaded = read_acp_thread_file(&path);
+        match loaded {
+            Ok(Some(record)) => result.records.push(record),
+            Ok(None) => {}
+            Err(error) => result.errors.push(format!("{}: {error}", path.display())),
+        }
+    }
+    result.records.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.metadata.ui_id.cmp(&right.metadata.ui_id))
+    });
+    result
+}
+
+fn acp_threads_dir(state_path: &Path) -> PathBuf {
+    state_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("threads")
+}
+
+fn acp_thread_path(state_path: &Path, ui_id: &str) -> PathBuf {
+    acp_threads_dir(state_path).join(format!("{ui_id}.json"))
+}
+
+fn validate_thread_schema(schema_version: u32) -> anyhow::Result<()> {
+    if schema_version > ACP_THREAD_SCHEMA_VERSION {
+        anyhow::bail!(
+            "thread schema {} is newer than supported {}",
+            schema_version,
+            ACP_THREAD_SCHEMA_VERSION
+        );
+    }
+    Ok(())
+}
+
+fn read_acp_thread_file(path: &Path) -> anyhow::Result<Option<PersistedAcpThreadData>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let record: PersistedAcpThreadData = serde_json::from_slice(&bytes)?;
+    validate_thread_id(&record.metadata.ui_id)?;
+    validate_thread_schema(record.schema_version)?;
+    let expected_name = format!("{}.json", record.metadata.ui_id);
+    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+        anyhow::bail!("thread file name does not match its ui_id");
+    }
+    Ok(Some(record))
+}
+fn validate_thread_id(ui_id: &str) -> anyhow::Result<()> {
+    if ui_id.starts_with("acp_")
+        && ui_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        Ok(())
+    } else {
+        anyhow::bail!("invalid ACP thread id")
+    }
 }
 
 fn secrets_path(state_path: &Path) -> PathBuf {
@@ -460,6 +662,10 @@ fn migrate(app: &mut PersistedApp) -> anyhow::Result<()> {
     }
     // v1 -> v2: legacy pane_tree/active_pane already represent the shared layout.
     // New project workspaces and sidebar preferences use serde defaults.
+    // v2 -> v3: ACP thread metadata is optional and restored lazily.
+    if app.version < 3 {
+        app.acp_threads = Vec::new();
+    }
     if app.version < 2 {
         // OSC52 clipboard used to default to off, which silently broke tmux
         // mouse-selection copy. Flip it on once during the v1 -> v2 upgrade
@@ -850,10 +1056,194 @@ mod tests {
     }
 
     #[test]
-    fn legacy_state_without_shortcuts_receives_defaults_without_version_change() {
+    fn legacy_state_without_shortcuts_receives_defaults_without_rewriting_version() {
         let app: PersistedApp = serde_json::from_str(r#"{"version":2}"#).unwrap();
-        assert_eq!(app.version, STORE_VERSION);
+        assert_eq!(app.version, 2);
         assert_eq!(app.shortcut_bindings, PersistedShortcutBindings::default());
+    }
+
+    #[test]
+    fn acp_thread_metadata_roundtrips_without_messages_or_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut app = PersistedApp::default();
+        app.acp_threads.push(PersistedAcpThread {
+            ui_id: "acp_1".into(),
+            project_id: "project_1".into(),
+            profile_id: "codex".into(),
+            protocol_session_id: Some("session_1".into()),
+            title: "Codex UI".into(),
+            parent_ui_id: None,
+            draft: "continue the refactor".into(),
+        });
+
+        save(&path, &app).unwrap();
+        let restored = load(&path).unwrap();
+
+        assert_eq!(restored.acp_threads, app.acp_threads);
+        let json = std::fs::read_to_string(path).unwrap();
+        assert!(!json.contains("api_key"));
+        assert!(!json.contains("messages"));
+    }
+
+    #[test]
+    fn acp_thread_data_roundtrips_and_rejects_path_traversal() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state.json");
+        let metadata = PersistedAcpThread {
+            ui_id: "acp_thread_1".into(),
+            project_id: "project_1".into(),
+            profile_id: "claude".into(),
+            protocol_session_id: Some("session_1".into()),
+            title: "Thread".into(),
+            parent_ui_id: None,
+            draft: "draft".into(),
+        };
+        let mut record = PersistedAcpThreadData::new(metadata);
+        record.snapshot.revision = 7;
+        record
+            .queued_prompts
+            .push(muxlane_acp::PromptSubmission::new(
+                muxlane_acp::PromptPayload::new("next"),
+            ));
+        record.queue_paused = true;
+
+        save_acp_thread(&state_path, &record).unwrap();
+        let loaded = load_acp_threads(&state_path);
+        assert!(loaded.errors.is_empty());
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.records[0].snapshot.revision, 7);
+        assert_eq!(loaded.records[0].write_revision, 1);
+        assert_eq!(loaded.records[0].schema_version, ACP_THREAD_SCHEMA_VERSION);
+        assert_eq!(loaded.records[0].queued_prompts[0].payload.text, "next");
+        assert!(loaded.records[0].queue_paused);
+
+        let mut invalid = record.clone();
+        invalid.metadata.ui_id = "../escape".into();
+        assert!(save_acp_thread(&state_path, &invalid).is_err());
+        delete_acp_thread(&state_path, "acp_thread_1").unwrap();
+        assert!(load_acp_threads(&state_path).records.is_empty());
+    }
+
+    #[test]
+    fn legacy_acp_queue_payloads_are_migrated_to_stable_submissions() {
+        let record: PersistedAcpThreadData = serde_json::from_str(
+            r#"{
+                "schema_version": 1,
+                "metadata": {"ui_id":"acp_legacy"},
+                "queued_prompts": [{"text":"keep me","blocks":[]}]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(record.write_revision, 0);
+        assert_eq!(record.queued_prompts.len(), 1);
+        assert_eq!(record.queued_prompts[0].payload.text, "keep me");
+        assert!(!record.queued_prompts[0].id.to_string().is_empty());
+    }
+
+    #[test]
+    fn acp_revision_guards_writes_and_deletes() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state.json");
+        let metadata = PersistedAcpThread {
+            ui_id: "acp_revision".into(),
+            ..Default::default()
+        };
+        let mut newer = PersistedAcpThreadData::new(metadata);
+        newer.write_revision = 2;
+        newer.updated_at = 42;
+        newer.snapshot.revision = 2;
+        assert_eq!(
+            save_acp_thread_if_newer(&state_path, &newer).unwrap(),
+            AcpThreadSaveOutcome::Written
+        );
+
+        let mut stale = newer.clone();
+        stale.write_revision = 1;
+        stale.updated_at = 99;
+        stale.snapshot.revision = 1;
+        assert_eq!(
+            save_acp_thread_if_newer(&state_path, &stale).unwrap(),
+            AcpThreadSaveOutcome::SkippedStale
+        );
+        assert_eq!(
+            load_acp_threads(&state_path).records[0].snapshot.revision,
+            2
+        );
+        assert_eq!(load_acp_threads(&state_path).records[0].updated_at, 42);
+
+        let mut equal = newer.clone();
+        equal.snapshot.revision = 3;
+        assert_eq!(
+            save_acp_thread_if_newer(&state_path, &equal).unwrap(),
+            AcpThreadSaveOutcome::SkippedStale
+        );
+
+        let mut latest = newer.clone();
+        latest.write_revision = 3;
+        latest.snapshot.revision = 4;
+        assert_eq!(
+            save_acp_thread_if_newer(&state_path, &latest).unwrap(),
+            AcpThreadSaveOutcome::Written
+        );
+        assert_eq!(
+            load_acp_threads(&state_path).records[0].snapshot.revision,
+            4
+        );
+
+        assert_eq!(
+            delete_acp_thread_if_not_newer(&state_path, "acp_revision", 2).unwrap(),
+            AcpThreadDeleteOutcome::SkippedNewer
+        );
+        assert_eq!(
+            delete_acp_thread_if_not_newer(&state_path, "acp_revision", 3).unwrap(),
+            AcpThreadDeleteOutcome::Deleted
+        );
+    }
+
+    #[test]
+    fn legacy_acp_schema_defaults_revision_and_roundtrips() {
+        let record: PersistedAcpThreadData = serde_json::from_str(
+            r#"{"schema_version":1,"metadata":{"ui_id":"acp_legacy_revision"}}"#,
+        )
+        .unwrap();
+        assert_eq!(record.write_revision, 0);
+        let encoded = serde_json::to_string(&record).unwrap();
+        let decoded: PersistedAcpThreadData = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, record);
+    }
+    #[test]
+    fn acp_thread_load_reports_corrupt_and_mismatched_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state.json");
+        let record = PersistedAcpThreadData::new(PersistedAcpThread {
+            ui_id: "acp_valid".into(),
+            ..Default::default()
+        });
+        save_acp_thread(&state_path, &record).unwrap();
+        let threads = acp_threads_dir(&state_path);
+        std::fs::write(threads.join("broken.json"), "not json").unwrap();
+        std::fs::write(
+            threads.join("wrong-name.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_acp_threads(&state_path);
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.errors.len(), 2);
+    }
+
+    #[test]
+    fn v2_state_defaults_to_no_acp_threads() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(&path, r#"{"version":2}"#).unwrap();
+
+        let restored = load(&path).unwrap();
+
+        assert_eq!(restored.version, STORE_VERSION);
+        assert!(restored.acp_threads.is_empty());
     }
 
     #[test]

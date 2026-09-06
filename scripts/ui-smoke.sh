@@ -44,6 +44,35 @@ export XDG_DATA_HOME="$TMP/data"
 mkdir -p "$XDG_DATA_HOME/muxlane"
 SMOKE_PROJECT="$TMP/workspace/muxlane"
 mkdir -p "$SMOKE_PROJECT"
+FAKE_ACP="$TMP/fake-acp.py"
+cat >"$FAKE_ACP" <<'PY'
+import json, sys
+for line in sys.stdin:
+    message=json.loads(line)
+    request_id=message.get('id')
+    method=message.get('method')
+    if request_id is None:
+        continue
+    if method == 'initialize':
+        result={'protocolVersion':1,'agentCapabilities':{'promptCapabilities':{'image':True,'audio':True,'embeddedContext':True}}}
+    elif method == 'session/new':
+        result={
+            'sessionId':'smoke-acp-session',
+            'modes': {'currentModeId':'high', 'availableModes':[{'id':'high','name':'Thinking: high'}]},
+            'configOptions':[
+                {'id':'model','name':'Model','type':'select','currentValue':'newapi/Kimi K3','options':[{'value':'newapi/Kimi K3','name':'newapi/Kimi K3'}]},
+                {'id':'thinking','name':'Thinking','type':'select','currentValue':'high','options':[{'value':'high','name':'high'}]},
+            ],
+        }
+    elif method == 'session/prompt':
+        update={'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'smoke-acp-session','update':{'sessionUpdate':'agent_message_chunk','messageId':'smoke-reply','content':{'type':'text','text':'Hello from fake ACP'}}}}
+        print(json.dumps(update), flush=True)
+        result={'stopReason':'end_turn'}
+    else:
+        result={}
+    print(json.dumps({'jsonrpc':'2.0','id':request_id,'result':result}), flush=True)
+PY
+export MUXLANE_ACP_CLAUDE_COMMAND="python3 $FAKE_ACP"
 SMOKE_AGENT="shell_smoke"
 SMOKE_TMUX="muxlane-smoke-shell"
 tmux -L muxlane new-session -d -s "$SMOKE_TMUX" -c "$SMOKE_PROJECT" "$SHELL"
@@ -208,11 +237,11 @@ xdotool key Return
 wait_tmux_text "$SMOKE_TMUX" MUXLANE_STARTUP_FOCUS "restored active tab input"
 echo '✓ restored active tab accepted input without a click'
 
-# 旧 state 不含快捷键字段时必须原地补默认值，不升级当前 store version。
+# 旧 state 不含快捷键字段时必须补默认值并迁移到当前 store version。
 STATE="$XDG_DATA_HOME/muxlane/state.json" python3 - <<'PY'
 import os,json
 d=json.load(open(os.environ['STATE']))
-assert d['version']==2, d['version']
+assert d['version']==3, d['version']
 assert d['shortcut_bindings']=={
     'close_tab':'ctrl-w',
     'previous_workspace':None,
@@ -429,8 +458,7 @@ click_at "$X_SESSION" "$Y_SESSION" 3; sleep .3
 import -window "$WID" "$ARTIFACTS/03-session-menu.png"
 xdotool key Escape
 
-# 4. 新建第二个 Shell 会话（Ctrl+K；项目 + 使用同一 preset action）。
-# 命令面板第一项是已有会话跳转，Down 一次选中「新建 Shell」preset。
+# 4. 新建第二个 Shell 会话（Ctrl+K；全局列表中项目后第一项为 Shell preset）。
 open_palette; sleep .4
 import -window "$WID" "$ARTIFACTS/04-project-add-session.png"
 xdotool key Down; sleep .2
@@ -469,6 +497,30 @@ assert len(json.loads(b.decode())['result']['agents'])==1
 print('✓ tab close terminated and removed its session')
 PY
 import -window "$WID" "$ARTIFACTS/05-tab-closed.png"
+
+# ACP UI session: global palette -> project -> UI -> Claude fake ACP.
+open_palette; sleep .3
+xdotool key Return; sleep .2
+xdotool key shift+Tab; sleep .2
+xdotool key Return; sleep .8
+wait_state "len(d.get('acp_threads', [])) == 1" "ACP UI thread created"
+xdotool type --delay 2 "hello from ui smoke"
+xdotool key Return
+for _ in {1..100}; do
+  if grep -R -Fq "Hello from fake ACP" "$XDG_DATA_HOME/muxlane/threads" 2>/dev/null; then break; fi
+  sleep .05
+done
+grep -R -Fq "Hello from fake ACP" "$XDG_DATA_HOME/muxlane/threads"
+import -window "$WID" "$ARTIFACTS/05-acp-thread.png"
+echo '✓ ACP UI thread created, sent a prompt, rendered a streamed reply, and persisted history'
+xdotool key ctrl+w
+wait_state "len(d.get('acp_threads', [])) == 1" "ACP UI thread archived"
+for _ in {1..100}; do
+  if grep -R -Fq '"archived": true' "$XDG_DATA_HOME/muxlane/threads" 2>/dev/null; then break; fi
+  sleep .05
+done
+grep -R -Fq '"archived": true' "$XDG_DATA_HOME/muxlane/threads"
+echo '✓ closing an ACP tab archived history instead of deleting it'
 
 # tab strip ＋ 与 Ctrl+Shift+T 共用 new_shell_tab：新增普通 Shell tab，不 split。
 xdotool key ctrl+shift+t; sleep .5

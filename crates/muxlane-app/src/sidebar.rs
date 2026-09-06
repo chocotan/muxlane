@@ -15,7 +15,16 @@ use crate::workspace::ProjectKey;
 use gpui::{
     div, prelude::*, relative, rgba, size, Context, Focusable, MouseButton, ParentElement, Styled,
 };
+use muxlane_core::model::AgentId;
 use std::sync::Arc;
+
+struct SessionRowData {
+    id: AgentId,
+    title: String,
+    status: muxlane_core::model::AgentStatus,
+    seen: bool,
+    remote: bool,
+}
 
 /// 侧栏项目行拖拽负载：仅同机器内重排。
 #[derive(Clone)]
@@ -335,6 +344,10 @@ impl MuxlaneApp {
                             .hover(|style| style.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
                             .on_click(cx.listener(move |this, _event, window, cx| {
                                 cx.stop_propagation();
+                                this.session_creation_mode =
+                                    super::palette::SessionCreationMode::for_target(
+                                        &new_session_target,
+                                    );
                                 this.new_session_target = Some(new_session_target.clone());
                                 this.palette_project = palette_key.clone();
                                 this.palette_open = true;
@@ -366,11 +379,100 @@ impl MuxlaneApp {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let id = agent.id.clone();
-        let active = self.active.as_deref() == Some(&id);
-        let status = agent.status;
+        self.render_session_row(
+            SessionRowData {
+                id: agent.id.clone(),
+                title: agent.title.clone(),
+                status: agent.status,
+                seen: agent.seen,
+                remote,
+            },
+            theme,
+            cx,
+        )
+    }
+
+    fn render_acp_row(
+        &self,
+        id: &AgentId,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (title, status, seen) = self.session_summary(id, cx).unwrap_or_else(|| {
+            (
+                "ACP UI".into(),
+                muxlane_core::model::AgentStatus::Idle,
+                true,
+            )
+        });
+        self.render_session_row(
+            SessionRowData {
+                id: id.clone(),
+                title,
+                status,
+                seen,
+                remote: false,
+            },
+            theme,
+            cx,
+        )
+    }
+
+    fn render_archived_row(
+        &self,
+        id: AgentId,
+        title: String,
+        project: String,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(gpui::ElementId::Name(format!("archived-{id}").into()))
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(ui_px(26.))
+            .pl_4()
+            .pr_2()
+            .text_size(ui_px(11.))
+            .text_color(rgba(theme.fg1))
+            .hover(|style| style.bg(rgba(theme.bg2)))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.unarchive_acp_session(&id, window, cx)
+            }))
+            .child(div().w(ui_px(6.)).h(ui_px(6.)).bg(rgba(theme.fg2)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(ui_px(9.))
+                    .text_color(rgba(theme.fg2))
+                    .child(project),
+            )
+    }
+
+    fn render_session_row(
+        &self,
+        session: SessionRowData,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let SessionRowData {
+            id,
+            title,
+            status,
+            seen,
+            remote,
+        } = session;
+        let active = self.active.as_ref() == Some(&id);
         let project_key = self.project_key_for_agent(&id);
-        let attention = compute_attention_style(status, agent.seen || active, theme);
+        let attention = compute_attention_style(status, seen || active, theme);
         let animation_id = format!(
             "sidebar-agent-{}-{id}",
             project_key
@@ -437,7 +539,7 @@ impl MuxlaneApp {
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child(agent.title.clone()),
+                    .child(title),
             )
     }
 }
@@ -586,8 +688,51 @@ impl MuxlaneApp {
                     for agent in snap.agents_of(&project.id) {
                         pnode = pnode.child(self.render_agent_row(agent, false, theme, cx));
                     }
+                    for id in self
+                        .acp_metadata
+                        .iter()
+                        .filter(|(_, thread)| thread.project_id == project.id)
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>()
+                    {
+                        pnode = pnode.child(self.render_acp_row(&id, theme, cx));
+                    }
                 }
                 tree = tree.child(pnode);
+            }
+        }
+
+        let mut archived: Vec<_> = self
+            .acp_records
+            .values()
+            .filter(|record| record.archived)
+            .map(|record| {
+                let project = snap
+                    .project(&record.metadata.project_id)
+                    .map(|project| project.name.clone())
+                    .unwrap_or_else(|| record.metadata.project_id.clone());
+                (
+                    record.updated_at,
+                    record.metadata.ui_id.clone(),
+                    record.metadata.title.clone(),
+                    project,
+                )
+            })
+            .collect();
+        archived.sort_by_key(|(updated_at, _, _, _)| std::cmp::Reverse(*updated_at));
+        if !archived.is_empty() {
+            tree = tree.child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .pb_1()
+                    .text_size(ui_px(9.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgba(theme.fg2))
+                    .child(i18n::text(self.language, "sidebar.archived_threads")),
+            );
+            for (_, id, title, project) in archived {
+                tree = tree.child(self.render_archived_row(id, title, project, theme, cx));
             }
         }
 

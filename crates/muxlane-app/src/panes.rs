@@ -7,8 +7,8 @@ use crate::ui_scale::px as ui_px;
 use crate::widgets::*;
 use crate::workspace::ProjectKey;
 use gpui::{
-    canvas, div, prelude::*, relative, rgba, Context, MouseButton, Pixels, Point, SharedString,
-    Window,
+    canvas, div, prelude::*, relative, rgba, size, Context, MouseButton, Pixels, Point,
+    SharedString, Window,
 };
 use muxlane_core::model::AgentId;
 use muxlane_core::{PaneId, PaneNode, SplitAxis};
@@ -202,13 +202,17 @@ impl MuxlaneApp {
                 .group(pane)
                 .and_then(|group| group.active.as_ref())
                 == Some(agent);
-        let remote = self.remote_snaps.values().any(|snapshot| {
-            snapshot
-                .agents
-                .iter()
-                .any(|candidate| &candidate.id == agent)
-        });
-        self.delete_session(agent, remote, window, cx);
+        if self.is_acp_session(agent) {
+            self.archive_acp_session(agent, window, cx);
+        } else {
+            let remote = self.remote_snaps.values().any(|snapshot| {
+                snapshot
+                    .agents
+                    .iter()
+                    .any(|candidate| &candidate.id == agent)
+            });
+            self.delete_session(agent, remote, window, cx);
+        }
         if clears_zoom {
             // 关闭 zoom owner 的选中会话不能把 zoom 转移给下一个会话。
             self.maximized_pane = None;
@@ -344,6 +348,28 @@ impl MuxlaneApp {
         .detach();
     }
 
+    pub(super) fn new_contextual_tab(
+        &mut self,
+        pane: &PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let acp_target = self
+            .pane_tree
+            .group(pane)
+            .and_then(|group| group.active.as_ref())
+            .and_then(|id| self.acp_views.get(id))
+            .and_then(|view| {
+                let view = view.read(cx);
+                Some((view.project_id.clone(), view.profile?))
+            });
+        if let Some((project_id, profile)) = acp_target {
+            self.spawn_acp_view_in_pane(project_id, profile, Some(pane.clone()), window, cx);
+        } else {
+            self.new_shell_tab(pane, window, cx);
+        }
+    }
+
     pub(super) fn new_shell_tab(
         &mut self,
         pane: &PaneId,
@@ -364,7 +390,7 @@ impl MuxlaneApp {
         self.spawn_shell_for_pane(pane, Some(axis), window, cx);
     }
 
-    pub(super) fn toggle_maximize(&mut self, pane: &PaneId, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_maximize(&mut self, pane: &PaneId, cx: &mut Context<Self>) {
         self.maximized_pane = if self.maximized_pane.as_ref() == Some(pane) {
             None
         } else {
@@ -619,30 +645,30 @@ impl MuxlaneApp {
                 for tab_id in group.tabs.clone() {
                     let is_active = active_id.as_ref() == Some(&tab_id);
                     let pane_for_tab = pane_id.clone();
-                    let agent_opt = self.find_agent(&tab_id);
-                    let status = agent_opt
+                    let summary = self.session_summary(&tab_id, cx);
+                    let status = summary
                         .as_ref()
-                        .map(|a| a.status)
+                        .map(|(_, status, _)| *status)
                         .unwrap_or(muxlane_core::model::AgentStatus::Idle);
-                    let seen = agent_opt.as_ref().map(|a| a.seen).unwrap_or(true)
+                    let seen = summary.as_ref().map(|(_, _, seen)| *seen).unwrap_or(true)
                         || self.active.as_ref() == Some(&tab_id);
                     let att = compute_attention_style(status, seen, theme);
-                    let tab_title = agent_opt
+                    let tab_title = summary
                         .as_ref()
-                        .map(|a| {
-                            let title = a.title.trim();
-                            if title.is_empty() {
-                                a.agent_type.as_str().to_string()
-                            } else {
-                                title.to_string()
-                            }
-                        })
-                        .unwrap_or_else(|| "session".into());
-                    let drag_label: SharedString = agent_opt
-                        .as_ref()
-                        .map(|a| format!("{} · {}", a.agent_type.as_str(), a.status.as_str()))
-                        .unwrap_or_default()
-                        .into();
+                        .map(|(title, _, _)| title.trim())
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or("session")
+                        .to_string();
+                    let drag_label: SharedString = format!(
+                        "{} · {}",
+                        if self.is_acp_session(&tab_id) {
+                            "UI"
+                        } else {
+                            "Terminal"
+                        },
+                        status.as_str()
+                    )
+                    .into();
                     let tab = div()
                         .id(gpui::ElementId::Name(format!("tab-{tab_id}").into()))
                         .flex()
@@ -740,10 +766,16 @@ impl MuxlaneApp {
                         );
                     tabs = tabs.child(tab);
                 }
+                let new_tab_label = if active_id.as_ref().is_some_and(|id| self.is_acp_session(id))
+                {
+                    i18n::text(self.language, "acp.new_thread").to_string()
+                } else {
+                    i18n::text(self.language, "palette.new").replace("{name}", "shell tab")
+                };
                 tabs = tabs.child(
                     semantic_button(
                         gpui::ElementId::Name(format!("new-tab-{pane_id}").into()),
-                        i18n::text(self.language, "palette.new").replace("{name}", "shell tab"),
+                        new_tab_label.clone(),
                         theme,
                     )
                     .w(ui_px(28.))
@@ -754,16 +786,18 @@ impl MuxlaneApp {
                     .text_size(ui_px(14.))
                     .text_color(rgba(theme.fg1))
                     .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                    .tooltip(hover_tip(
-                        i18n::text(self.language, "palette.new").replace("{name}", "shell tab"),
-                    ))
+                    .tooltip(hover_tip(new_tab_label))
                     .on_click(cx.listener({
                         let pane = pane_id.clone();
-                        move |this, _ev, window, cx| this.new_shell_tab(&pane, window, cx)
+                        move |this, _ev, window, cx| this.new_contextual_tab(&pane, window, cx)
                     }))
                     .child(panel_icon(PLUS_ICON, theme.fg1)),
                 );
                 // 显式分屏/最大化 controls：没有隐式 split。
+                let active_acp_id = active_id
+                    .as_ref()
+                    .filter(|id| self.is_acp_session(id))
+                    .cloned();
                 tabs = tabs.child(
                     div()
                         .ml_auto()
@@ -771,6 +805,45 @@ impl MuxlaneApp {
                         .items_center()
                         .h_full()
                         .text_color(rgba(theme.fg1))
+                        .when_some(active_acp_id, |controls, agent| {
+                            controls.child(
+                                semantic_button(
+                                    gpui::ElementId::Name(format!("acp-more-{pane_id}").into()),
+                                    i18n::text(self.language, "acp.more"),
+                                    theme,
+                                )
+                                .w(ui_px(28.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|style| {
+                                    style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0))
+                                })
+                                .tooltip(hover_tip(i18n::text(self.language, "acp.more")))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(
+                                        move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                            this.tree_menu = None;
+                                            this.session_menu = Some(crate::menus::SessionMenu {
+                                                agent: agent.clone(),
+                                                position: crate::menus::clamp_menu_position(
+                                                    event.position,
+                                                    window.viewport_size(),
+                                                    size(ui_px(180.), ui_px(44.)),
+                                                ),
+                                                remote: false,
+                                            });
+                                            this.palette_open = false;
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        },
+                                    ),
+                                )
+                                .child(panel_icon(MORE_ICON, theme.fg1)),
+                            )
+                        })
                         .child(
                             semantic_button(
                                 gpui::ElementId::Name(format!("split-h-{pane_id}").into()),
@@ -874,18 +947,32 @@ impl MuxlaneApp {
                         }),
                 );
 
-                let active_agent_opt = active_id.as_ref().and_then(|id| self.find_agent(id));
-                let active_status = active_agent_opt
+                let active_summary = active_id
                     .as_ref()
-                    .map(|a| a.status)
+                    .and_then(|id| self.session_summary(id, cx));
+                let active_status = active_summary
+                    .as_ref()
+                    .map(|(_, status, _)| *status)
                     .unwrap_or(muxlane_core::model::AgentStatus::Idle);
-                let active_seen = active_agent_opt.as_ref().map(|a| a.seen).unwrap_or(true)
+                let active_seen = active_summary
+                    .as_ref()
+                    .map(|(_, _, seen)| *seen)
+                    .unwrap_or(true)
                     || self.active.as_ref() == active_id.as_ref();
                 let pane_att = compute_attention_style(active_status, active_seen, theme);
 
-                let content = active_id
-                    .as_ref()
-                    .and_then(|id| self.terms.get(id).cloned());
+                let content = active_id.as_ref().and_then(|id| {
+                    self.acp_views
+                        .get(id)
+                        .cloned()
+                        .map(IntoElement::into_any_element)
+                        .or_else(|| {
+                            self.terms
+                                .get(id)
+                                .cloned()
+                                .map(IntoElement::into_any_element)
+                        })
+                });
                 let tab_count = group.tabs.len();
                 let target_pane = pane_id.clone();
                 let pane_click_id = pane_id.clone();
@@ -957,8 +1044,8 @@ impl MuxlaneApp {
                     }))
                     .drag_over::<DragTab>(move |s, _, _, _| s.bg(rgba(pane_drop_bg)))
                     .child(tabs);
-                if let Some(term) = content {
-                    pane = pane.child(div().flex_1().min_h_0().child(term));
+                if let Some(content) = content {
+                    pane = pane.child(div().flex_1().min_h_0().child(content));
                 } else {
                     pane = pane.child(
                         div()

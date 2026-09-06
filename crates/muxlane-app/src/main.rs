@@ -1,4 +1,9 @@
 //! muxlane GPUI 主程序：三区极简 UI（侧栏机器树 / 贴边终端网格 / 浮层）
+mod acp_checkpoint;
+mod acp_composer;
+mod acp_elicitation;
+mod acp_markdown;
+mod acp_view;
 mod actions;
 mod app;
 mod bootstrap;
@@ -7,7 +12,10 @@ mod i18n;
 mod icons;
 mod menus;
 mod notifications;
+mod persistence;
+mod prompt_editor;
 mod remotes;
+mod selector_menu;
 mod sessions;
 mod settings;
 mod shortcuts;

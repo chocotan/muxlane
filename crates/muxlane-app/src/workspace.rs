@@ -425,6 +425,12 @@ impl MuxlaneApp {
     }
 
     pub(crate) fn project_key_for_agent(&self, agent: &AgentId) -> Option<ProjectKey> {
+        if let Some(metadata) = self.acp_metadata.get(agent) {
+            return Some(ProjectKey::new(
+                self.local_machine_id(),
+                metadata.project_id.clone(),
+            ));
+        }
         if let Some(instance) = self.last_snapshot.agent(agent) {
             return Some(ProjectKey::new(
                 self.local_machine_id(),
@@ -447,6 +453,12 @@ impl MuxlaneApp {
                 .iter()
                 .filter(|agent| agent.project == key.project_id)
                 .map(|agent| agent.id.clone())
+                .chain(
+                    self.acp_metadata
+                        .iter()
+                        .filter(|(_, thread)| thread.project_id == key.project_id)
+                        .map(|(id, _)| id.clone()),
+                )
                 .collect();
         }
         self.remote_snaps
@@ -494,7 +506,7 @@ impl MuxlaneApp {
         if let Some(active) = self
             .active
             .clone()
-            .filter(|agent| self.terms.contains_key(agent))
+            .filter(|agent| self.terms.contains_key(agent) || self.acp_views.contains_key(agent))
         {
             self.focus_agent(&active, window, cx);
         } else {

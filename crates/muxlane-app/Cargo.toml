@@ -12,6 +12,7 @@ muxlane-core = { path = "../muxlane-core" }
 muxlane-term = { path = "../muxlane-term" }
 muxlane-server = { path = "../muxlane-server" }
 muxlane-client = { path = "../muxlane-client" }
+muxlane-acp = { path = "../muxlane-acp" }
 tokio.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -22,6 +23,10 @@ gpui.workspace = true
 gpui_platform.workspace = true
 muxlane-store = { path = "../muxlane-store" }
 notify-rust = "4"
+base64.workspace = true
+pulldown-cmark = "0.13"
+regex.workspace = true
+url = "2"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -112,6 +112,10 @@ impl MuxlaneServer {
     }
 
     /// 从同步上下文往 runtime 投递任务
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.clone()
+    }
+
     pub fn rt_spawn<F>(&self, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,

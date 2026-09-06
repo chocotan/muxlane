@@ -2,8 +2,8 @@ use crate::i18n::{self, Language};
 use crate::theme::Theme;
 use crate::ui_scale::px as ui_px;
 use gpui::{
-    div, prelude::*, pulsating_between, rgba, Animation, AnimationExt, Context, ElementId, Pixels,
-    Point, Render, Role, SharedString, Window,
+    div, prelude::*, rgba, Animation, AnimationExt, Context, ElementId, Pixels, Point, Render,
+    Role, SharedString, Window,
 };
 
 use std::time::Duration;
@@ -95,29 +95,42 @@ pub(crate) fn format_relative_time(then: u64, lang: Language) -> String {
     }
 }
 
-fn render_pi_loading_spinner(animation_id: impl Into<ElementId>, theme: Theme) -> impl IntoElement {
+fn render_pi_loading_spinner_frame(frame: usize, theme: Theme) -> gpui::Div {
+    let empty_index = frame % 8;
     let render_col = |indices: [usize; 4]| {
         let mut col = div().flex().flex_col().gap(ui_px(1.5));
-        for _ in indices {
-            col = col.child(div().w(ui_px(2.5)).h(ui_px(2.5)).bg(rgba(theme.accent)));
+        for index in indices {
+            col = col.child(div().w(ui_px(2.5)).h(ui_px(2.5)).bg(rgba(Theme::with_alpha(
+                theme.accent,
+                if index == empty_index { 0x25 } else { 0xff },
+            ))));
         }
         col
     };
 
     div()
         .flex()
-        .flex_row()
         .gap(ui_px(2.5))
         .items_center()
         .justify_center()
-        .child(render_col([0, 1, 2, 3]))
-        .child(render_col([4, 5, 6, 7]))
+        .child(render_col([0, 7, 6, 5]))
+        .child(render_col([1, 2, 3, 4]))
+}
+
+fn render_pi_loading_spinner(animation_id: impl Into<ElementId>, theme: Theme) -> impl IntoElement {
+    div()
+        .w(ui_px(14.))
+        .h(ui_px(14.))
+        .flex()
+        .items_center()
+        .justify_center()
         .with_animation(
             animation_id,
-            Animation::new(Duration::from_millis(1200))
-                .repeat()
-                .with_easing(pulsating_between(0.55, 1.0)),
-            |this, opacity| this.opacity(opacity),
+            Animation::new(Duration::from_millis(800)).repeat(),
+            move |container, delta| {
+                let frame = ((delta * 8.0).floor() as usize).min(7);
+                container.child(render_pi_loading_spinner_frame(frame, theme))
+            },
         )
 }
 

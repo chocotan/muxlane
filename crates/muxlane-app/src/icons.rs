@@ -10,9 +10,14 @@ pub(crate) const CONNECT_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/sv
 pub(crate) const THEME_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M20 15.5A8.5 8.5 0 1 1 8.5 4 6.5 6.5 0 0 0 20 15.5z'/></svg>"#;
 pub(crate) const NOTIFICATION_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9'/><path d='M10 21h4'/></svg>"#;
 pub(crate) const PLUS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square'><path d='M12 5v14M5 12h14'/></svg>"#;
+pub(crate) const SEND_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><path d='M3 11.5 21 3l-8.5 18-2-7.5z'/><path d='M10.5 13.5 21 3'/></svg>"#;
+pub(crate) const COPY_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><rect x='8' y='8' width='12' height='12'/><path d='M16 8V4H4v12h4'/></svg>"#;
+pub(crate) const ARROW_UP_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><path d='M12 20V4M5 11l7-7 7 7'/></svg>"#;
+pub(crate) const ARROW_DOWN_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><path d='M12 4v16M5 13l7 7 7-7'/></svg>"#;
 pub(crate) const FOLDER_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><path d='M3 5h6l2 2h10v12H3z'/></svg>"#;
 pub(crate) const SETTINGS_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.7' stroke-linejoin='round'><path d='M9.38 5.67L10.72 3.04H13.28L14.62 5.67L17.43 4.76L19.24 6.57L18.33 9.38L20.96 10.72V13.28L18.33 14.62L19.24 17.43L17.43 19.24L14.62 18.33L13.28 20.96H10.72L9.38 18.33L6.57 19.24L4.76 17.43L5.67 14.62L3.04 13.28V10.72L5.67 9.38L4.76 6.57L6.57 4.76Z'/><circle cx='12' cy='12' r='3'/></svg>"#;
 pub(crate) const SIDEBAR_COLLAPSE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><rect x='3' y='4' width='18' height='16'/><path d='M9 4v16M16 8l-4 4 4 4'/></svg>"#;
+pub(crate) const MORE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='#000'><path d='M4 10h4v4H4zM10 10h4v4h-4zM16 10h4v4h-4z'/></svg>"#;
 
 const SVG_ASSETS: &[(&str, &[u8])] = &[
     ("icons/split-horizontal.svg", SPLIT_HORIZONTAL_ICON),
@@ -24,8 +29,13 @@ const SVG_ASSETS: &[(&str, &[u8])] = &[
     ("icons/theme.svg", THEME_ICON),
     ("icons/notification.svg", NOTIFICATION_ICON),
     ("icons/plus.svg", PLUS_ICON),
+    ("icons/send.svg", SEND_ICON),
+    ("icons/copy.svg", COPY_ICON),
+    ("icons/arrow-up.svg", ARROW_UP_ICON),
+    ("icons/arrow-down.svg", ARROW_DOWN_ICON),
     ("icons/folder.svg", FOLDER_ICON),
     ("icons/settings.svg", SETTINGS_ICON),
+    ("icons/more.svg", MORE_ICON),
     ("icons/sidebar-collapse.svg", SIDEBAR_COLLAPSE_ICON),
 ];
 

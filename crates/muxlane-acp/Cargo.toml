@@ -1,14 +1,17 @@
 [package]
-name = "muxlane-store"
+name = "muxlane-acp"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
-muxlane-core = { path = "../muxlane-core" }
-muxlane-acp = { path = "../muxlane-acp" }
+agent-client-protocol = "2.1.0"
+anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
