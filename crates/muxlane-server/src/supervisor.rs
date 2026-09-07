@@ -18,10 +18,10 @@ impl MuxlaneServer {
     }
 
     pub async fn restore_sessions(&self, persisted: &PersistedApp) {
+        // 并发 attach：每个会话的 tmux 探活/attach 都是独立子进程 + spawn_blocking，
+        // 串行恢复会让首窗时间随会话数线性放大。
+        let mut pending = Vec::new();
         for saved in &persisted.sessions {
-            if !tmux_session_alive(&saved.tmux_session).await {
-                continue;
-            }
             let Some(project) = persisted
                 .projects
                 .iter()
@@ -30,8 +30,11 @@ impl MuxlaneServer {
             else {
                 continue;
             };
-            if let Ok((instance, session)) = self
-                .attach_tmux(
+            pending.push(async move {
+                if !tmux_session_alive(&saved.tmux_session).await {
+                    return None;
+                }
+                self.attach_tmux(
                     &saved.agent_id,
                     saved.agent_type,
                     &saved.title,
@@ -39,7 +42,12 @@ impl MuxlaneServer {
                     &project,
                 )
                 .await
-            {
+                .ok()
+                .map(|(instance, session)| (project, instance, session))
+            });
+        }
+        for restored in futures::future::join_all(pending).await {
+            if let Some((project, instance, session)) = restored {
                 self.restore_agent(project, instance, session).await;
             }
         }
@@ -68,9 +76,16 @@ impl MuxlaneServer {
                 exited.push(id);
                 continue;
             }
-            let replay = session.replay_snapshot();
-            let tail = &replay[replay.len().saturating_sub(64 * 1024)..];
+            // 屏幕采样只需要尾部（8 行上下文 + OSC 标题）：锁内只拷尾部 16KB，
+            // 避免每 500ms × 每会话全量拷贝 512KB replay。
+            let tail = session.replay_tail(16 * 1024);
+            let truncated = tail.len() == 16 * 1024;
+            let tail = &tail[..];
             let mut lines = muxlane_core::protocol::strip_ansi(tail);
+            // 截断可能从转义序列中间切开：丢弃首行残留，避免乱码进入采样。
+            if truncated && !lines.is_empty() {
+                lines.remove(0);
+            }
             if lines.len() > 8 {
                 lines = lines.split_off(lines.len() - 8);
             }

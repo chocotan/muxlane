@@ -60,7 +60,7 @@ fn logical_cursor_survives_hidden_visual_cursor() {
     vt.feed(b"abc\x1b[?25l");
     let snap = vt.render_snapshot();
     assert!(snap.cursor.is_none());
-    assert_eq!(snap.logical_cursor.unwrap().col, 3);
+    assert_eq!(snap.logical_cursor.as_ref().unwrap().col, 3);
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn vterm_preserves_truecolor_and_cursor() {
         .find(|r| r.text.contains("RED"))
         .expect("RED run");
     assert_eq!(run.style.fg, 0xff0000ff, "truecolor preserved");
-    let cursor = snap.cursor.expect("cursor visible");
+    let cursor = snap.cursor.as_ref().expect("cursor visible");
     assert_eq!(cursor.col, 3);
     assert_eq!(cursor.row, 0);
 }

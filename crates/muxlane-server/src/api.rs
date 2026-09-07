@@ -336,7 +336,8 @@ impl MuxlaneServer {
             branch: None,
             agents: vec![],
         };
-        debug_assert!(state.add_project(project.clone()));
+        let inserted = state.add_project(project.clone());
+        debug_assert!(inserted);
         drop(state);
 
         self.dirty.bump();

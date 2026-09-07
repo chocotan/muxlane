@@ -24,8 +24,8 @@ scripts/release-smoke.sh                               PASS
 - 支持图片/音频附件 capability gating，以及 mode/model/thinking/config selector
 - permission FIFO、form/URL elicitation、生成中 prompt queue/pause/Send Now
 - ACP host 文件访问限制在项目根目录；terminal 自动回收并在 wait 后保证 stdout/stderr 已 drain
-- typed thread snapshot、draft、queue、usage/plan 持久化；Archive/Unarchive、History、恢复与 replay 去重
-- 关闭 Agent Thread tab 执行 Archive；永久删除需二次确认并删除对应线程文件
+- typed thread snapshot、draft、queue、usage/plan 持久化；History、恢复与 replay 去重
+- 关闭 Agent Thread tab 永久删除对应线程记录与线程文件
 - checkpoint 恢复前二次确认并保存 Undo；未捕获的大型 untracked 文件保持不动
 - subagent session 关联打开；ACP `session/list` 分页带重复 cursor 与页数保护
 - zsh 会话正确启动（sidebar/tab 显示 `zsh`）

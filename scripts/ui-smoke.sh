@@ -246,9 +246,13 @@ assert d['shortcut_bindings']=={
     'close_tab':'ctrl-w',
     'previous_workspace':None,
     'next_workspace':None,
-    'previous_tab':'platform-left',
-    'next_tab':'platform-right',
+    'previous_tab':'alt-platform-up',
+    'next_tab':'alt-platform-down',
+    'new_tab':'alt-platform-t',
+    'split_right':'alt-platform-r',
+    'split_down':'alt-platform-d',
 }, d['shortcut_bindings']
+assert d['default_terminal_preset']=='shell', d.get('default_terminal_preset')
 print('✓ legacy state received persisted default shortcuts')
 PY
 
@@ -273,7 +277,7 @@ xdotool key ctrl+q
 wait_state "d['shortcut_bindings']['close_tab'] == 'ctrl-q'" "close-tab rebound to ctrl-q"
 assert_state_stable "len(d['pane_tree']['group']['tabs']) == 1" "capture must not execute close-tab"
 xdotool key Escape
-xdotool key ctrl+shift+t
+xdotool key super+alt+t
 wait_state "len(d['pane_tree']['group']['tabs']) == 2" "new tab before ctrl-q close"
 xdotool key ctrl+q
 wait_state "len(d['pane_tree']['group']['tabs']) == 1" "live ctrl-q close without restart"
@@ -290,7 +294,7 @@ assert_state_stable "d['shortcut_bindings']['close_tab'] == 'ctrl-q'" "fixed ctr
 click_at "$X_SHORTCUT_CLEAR" "$Y_CLOSE_TAB_SHORTCUT" 1
 wait_state "d['shortcut_bindings']['close_tab'] is None" "close-tab binding cleared"
 xdotool key Escape
-xdotool key ctrl+shift+t
+xdotool key super+alt+t
 wait_state "len(d['pane_tree']['group']['tabs']) == 2" "new tab before disabled ctrl-w"
 xdotool key ctrl+w
 assert_state_stable "len(d['pane_tree']['group']['tabs']) == 2" "disabled ctrl-w must pass through"
@@ -514,16 +518,23 @@ grep -R -Fq "Hello from fake ACP" "$XDG_DATA_HOME/muxlane/threads"
 import -window "$WID" "$ARTIFACTS/05-acp-thread.png"
 echo '✓ ACP UI thread created, sent a prompt, rendered a streamed reply, and persisted history'
 xdotool key ctrl+w
-wait_state "len(d.get('acp_threads', [])) == 1" "ACP UI thread archived"
+wait_state "len(d.get('acp_threads', [])) == 0" "ACP UI thread deleted"
 for _ in {1..100}; do
-  if grep -R -Fq '"archived": true' "$XDG_DATA_HOME/muxlane/threads" 2>/dev/null; then break; fi
+  thread_file=""
+  if [ -d "$XDG_DATA_HOME/muxlane/threads" ]; then
+    thread_file="$(find "$XDG_DATA_HOME/muxlane/threads" -maxdepth 1 -type f -name '*.json' -print -quit)"
+  fi
+  if [ -z "$thread_file" ]; then break; fi
   sleep .05
 done
-grep -R -Fq '"archived": true' "$XDG_DATA_HOME/muxlane/threads"
-echo '✓ closing an ACP tab archived history instead of deleting it'
+if [ -n "$thread_file" ]; then
+  echo 'ACP UI thread file was not deleted' >&2
+  exit 1
+fi
+echo '✓ closing an ACP tab deleted its thread record and file'
 
-# tab strip ＋ 与 Ctrl+Shift+T 共用 new_shell_tab：新增普通 Shell tab，不 split。
-xdotool key ctrl+shift+t; sleep .5
+# Terminal ＋ 与 Win+Alt+T 使用默认终端预设；本例默认 Shell，不 split。
+xdotool key super+alt+t; sleep .5
 STATE="$XDG_DATA_HOME/muxlane/state.json" python3 - <<'PY'
 import os,json
 p=os.environ['STATE']

@@ -100,21 +100,6 @@ impl MuxlaneApp {
             }
             muxlane_client::Target::Ssh { host, .. } => host.clone(),
         };
-        let inherited_machine_id =
-            if let Some(index) = self.remotes.iter().position(|host| host.cfg.name == name) {
-                let machine_id = self.remotes[index].machine_id();
-                self.remotes[index].stop();
-                let release_name = name.clone();
-                self.server.rt_spawn(async move {
-                    muxlane_client::release_remote_tunnel(&release_name).await;
-                });
-                self.remotes.remove(index);
-                self.remote_snaps.remove(&name);
-                self.remote_states.remove(&name);
-                machine_id
-            } else {
-                None
-            };
         let username = self.connect_username.read(cx).text();
         let auth = match self.connect_auth_mode {
             ConnectAuthMode::SshConfig => muxlane_client::SshAuth::SshConfig,
@@ -140,6 +125,22 @@ impl MuxlaneApp {
                 }
             }
         };
+        // Validate all credentials before mutating an existing connection.
+        let inherited_machine_id =
+            if let Some(index) = self.remotes.iter().position(|host| host.cfg.name == name) {
+                let machine_id = self.remotes[index].machine_id();
+                self.remotes[index].stop();
+                let release_name = name.clone();
+                self.server.rt_spawn(async move {
+                    muxlane_client::release_remote_tunnel(&release_name).await;
+                });
+                self.remotes.remove(index);
+                self.remote_snaps.remove(&name);
+                self.remote_states.remove(&name);
+                machine_id
+            } else {
+                None
+            };
         let host = muxlane_client::RemoteHost::new(
             muxlane_client::HostCfg {
                 name,
@@ -166,6 +167,9 @@ impl MuxlaneApp {
     }
 
     pub(crate) fn begin_delete(&mut self, target: DeleteTarget, cx: &mut Context<Self>) {
+        if self.delete_busy {
+            return;
+        }
         let affected_sessions = match &target {
             DeleteTarget::LocalProject { project, .. } => {
                 self.last_snapshot
@@ -198,6 +202,15 @@ impl MuxlaneApp {
             target,
             affected_sessions,
         });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_delete(&mut self, cx: &mut Context<Self>) {
+        if self.delete_busy {
+            return;
+        }
+        self.delete_confirm = None;
+        self.delete_error = None;
         cx.notify();
     }
 

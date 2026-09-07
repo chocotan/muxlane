@@ -9,14 +9,19 @@ use tokio::sync::Mutex;
 const DEFAULT_OUTPUT_LIMIT: usize = 1024 * 1024;
 const MAX_OUTPUT_LIMIT: usize = 10 * 1024 * 1024;
 const MAX_FILE_READ_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RETAINED_TERMINALS: usize = 32;
+const MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct HostServices {
     root: Arc<PathBuf>,
     terminals: Arc<Mutex<HashMap<String, HostTerminal>>>,
+    retained: Arc<Mutex<VecDeque<(String, v1::TerminalOutputResponse, crate::TerminalCommand)>>>,
+    events: Option<tokio::sync::mpsc::UnboundedSender<crate::Event>>,
 }
 
 struct HostTerminal {
+    command: crate::TerminalCommand,
     child: Arc<Mutex<Child>>,
     output: Arc<Mutex<OutputBuffer>>,
     exit_status: Arc<Mutex<Option<v1::TerminalExitStatus>>>,
@@ -59,7 +64,46 @@ impl HostServices {
         Ok(Self {
             root: Arc::new(root),
             terminals: Arc::new(Mutex::new(HashMap::new())),
+            retained: Default::default(),
+            events: None,
         })
+    }
+
+    pub(crate) fn with_events(mut self, events: tokio::sync::mpsc::UnboundedSender<crate::Event>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    fn publish(&self, id: String, output: &v1::TerminalOutputResponse, command: &crate::TerminalCommand) {
+        if let Some(events) = &self.events {
+            let _ = events.send(crate::Event::TerminalOutput(crate::TerminalQueryResult {
+                id: id.clone(),
+                state: ready_state(id, output.clone(), Some(command.clone())),
+            }));
+        }
+    }
+
+    pub(crate) async fn query_terminal(&self, request: v1::TerminalOutputRequest) -> crate::TerminalQueryResult {
+        let id = request.terminal_id.to_string();
+        let state = match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                let output = self.terminal_output_if_present(request).await?;
+                let Some(output) = output else { return Ok(None); };
+                let command = self.terminals.lock().await.get(&id).map(|terminal| terminal.command.clone());
+                let command = match command {
+                    Some(command) => Some(command),
+                    None => self.retained.lock().await.iter().find(|(key, _, _)| key == &id).map(|(_, _, command)| command.clone()),
+                };
+                Ok::<_, agent_client_protocol::Error>(Some(ready_state(id.clone(), output, command)))
+            },
+        ).await {
+            Ok(Ok(Some(state))) => state,
+            Ok(Ok(None)) => crate::TerminalOutputState::Unavailable,
+            Ok(Err(error)) => crate::TerminalOutputState::Failed(error.to_string()),
+            Err(_) => crate::TerminalOutputState::Failed("Terminal output query timed out".into()),
+        };
+        crate::TerminalQueryResult { id, state }
     }
 
     pub(crate) async fn read_text_file(
@@ -122,6 +166,11 @@ impl HostServices {
             .and_then(|limit| usize::try_from(limit).ok())
             .unwrap_or(DEFAULT_OUTPUT_LIMIT)
             .clamp(1, MAX_OUTPUT_LIMIT);
+        let metadata = crate::TerminalCommand {
+            command: request.command.clone(),
+            args: request.args.clone(),
+            cwd: cwd.to_string_lossy().into_owned(),
+        };
         let mut command = tokio::process::Command::new(request.command);
         command
             .args(request.args)
@@ -131,6 +180,9 @@ impl HostServices {
             .stderr(std::process::Stdio::piped());
         for variable in request.env {
             command.env(variable.name, variable.value);
+        }
+        for key in crate::TERMINAL_HOOK_ENV {
+            command.env_remove(key);
         }
         let mut child = command.spawn().map_err(internal_error)?;
         let stdout = child.stdout.take();
@@ -151,12 +203,15 @@ impl HostServices {
         self.terminals.lock().await.insert(
             id.clone(),
             HostTerminal {
+                command: metadata.clone(),
                 child,
                 output,
                 exit_status,
                 readers,
             },
         );
+        let initial = v1::TerminalOutputResponse::new(String::new(), false);
+        self.publish(id.clone(), &initial, &metadata);
         Ok(v1::CreateTerminalResponse::new(id))
     }
 
@@ -170,13 +225,16 @@ impl HostServices {
             .await
             .get(&request.terminal_id.to_string())
             .map(|terminal| HostTerminal {
+                command: terminal.command.clone(),
                 child: terminal.child.clone(),
                 output: terminal.output.clone(),
                 exit_status: terminal.exit_status.clone(),
                 readers: terminal.readers.clone(),
             })
         else {
-            return Ok(None);
+            return Ok(self.retained.lock().await.iter()
+                .find(|(id, _, _)| id == &request.terminal_id.to_string())
+                .map(|(_, output, _)| output.clone()));
         };
         refresh_exit_status(&terminal).await?;
         let exit_status = terminal.exit_status.lock().await.clone();
@@ -195,10 +253,10 @@ impl HostServices {
         refresh_exit_status(&terminal).await?;
         let exit_status = terminal.exit_status.lock().await.clone();
         let output = terminal.output.lock().await;
-        Ok(
-            v1::TerminalOutputResponse::new(output.text(), output.truncated)
-                .exit_status(exit_status),
-        )
+        let response = v1::TerminalOutputResponse::new(output.text(), output.truncated)
+            .exit_status(exit_status);
+        self.publish(request.terminal_id.to_string(), &response, &terminal.command);
+        Ok(response)
     }
 
     pub(crate) async fn wait_for_terminal_exit(
@@ -239,16 +297,37 @@ impl HostServices {
         &self,
         request: v1::ReleaseTerminalRequest,
     ) -> Result<v1::ReleaseTerminalResponse, agent_client_protocol::Error> {
-        let terminal = self
-            .terminals
-            .lock()
-            .await
-            .remove(&request.terminal_id.to_string())
-            .ok_or_else(|| invalid_request("unknown terminal"))?;
-        let mut child = terminal.child.lock().await;
-        if child.try_wait().map_err(internal_error)?.is_none() {
-            child.start_kill().map_err(internal_error)?;
+        let id = request.terminal_id.to_string();
+        let terminal = self.terminal(&id).await?;
+        {
+            let mut child = terminal.child.lock().await;
+            if child.try_wait().map_err(internal_error)?.is_none() {
+                child.start_kill().map_err(internal_error)?;
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(500), child.wait()).await;
+            }
         }
+        // Drain normal stdout/stderr EOF, but do not wait indefinitely on inherited pipes.
+        for _ in 0..4 {
+            if terminal.readers.load(std::sync::atomic::Ordering::Acquire) == 0 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        refresh_exit_status(&terminal).await?;
+        let status = terminal.exit_status.lock().await.clone();
+        let output = terminal.output.lock().await;
+        let snapshot = v1::TerminalOutputResponse::new(output.text(), output.truncated).exit_status(status);
+        drop(output);
+        {
+            let mut retained = self.retained.lock().await;
+            retained.retain(|(key, _, _)| key != &id);
+            retained.push_back((id.clone(), snapshot.clone(), terminal.command.clone()));
+            while retained.len() > MAX_RETAINED_TERMINALS
+                || retained.iter().map(|(_, output, command)| output.output.len() + command.command.len() + command.cwd.len() + command.args.iter().map(String::len).sum::<usize>()).sum::<usize>() > MAX_RETAINED_BYTES {
+                retained.pop_front();
+            }
+        }
+        self.publish(id.clone(), &snapshot, &terminal.command);
+        // Publish and retain before removal so concurrent UI polls cannot see a gap.
+        self.terminals.lock().await.remove(&id);
         Ok(v1::ReleaseTerminalResponse::new())
     }
 
@@ -258,6 +337,7 @@ impl HostServices {
             .await
             .get(id)
             .map(|terminal| HostTerminal {
+                command: terminal.command.clone(),
                 child: terminal.child.clone(),
                 output: terminal.output.clone(),
                 exit_status: terminal.exit_status.clone(),
@@ -275,6 +355,16 @@ impl HostServices {
             }
         }
     }
+}
+
+fn ready_state(id: String, output: v1::TerminalOutputResponse, command: Option<crate::TerminalCommand>) -> crate::TerminalOutputState {
+    crate::TerminalOutputState::Ready(crate::TerminalSnapshot {
+        id,
+        output: output.output,
+        truncated: output.truncated,
+        exit_code: output.exit_status.and_then(|status| status.exit_code),
+        command,
+    })
 }
 
 async fn refresh_exit_status(terminal: &HostTerminal) -> Result<(), agent_client_protocol::Error> {
@@ -372,14 +462,16 @@ mod tests {
         assert!(output.truncated);
     }
     #[tokio::test]
-    async fn released_terminal_is_absent_from_best_effort_output_poll() {
+    async fn released_terminal_retains_final_output_for_ui_poll() {
         let directory = tempfile::tempdir().unwrap();
         let host = HostServices::new(directory.path()).unwrap();
         let created = host
-            .create_terminal(v1::CreateTerminalRequest::new("session", "/bin/sh"))
+            .create_terminal(v1::CreateTerminalRequest::new("session", "/bin/sh")
+                .args(vec!["-c".into(), "printf retained-final".into()]))
             .await
             .unwrap();
         let terminal_id = created.terminal_id.clone();
+        host.wait_for_terminal_exit(v1::WaitForTerminalExitRequest::new("session", terminal_id.clone())).await.unwrap();
         host.release_terminal(v1::ReleaseTerminalRequest::new(
             "session",
             terminal_id.clone(),
@@ -387,19 +479,64 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(host
-            .terminal_output_if_present(v1::TerminalOutputRequest::new(
-                "session",
-                terminal_id.clone(),
-            ))
-            .await
-            .unwrap()
-            .is_none());
+        let result = host.query_terminal(v1::TerminalOutputRequest::new("session", terminal_id.clone())).await;
+        assert_eq!(result.id, terminal_id.to_string());
+        assert!(matches!(result.state, crate::TerminalOutputState::Ready(snapshot)
+            if snapshot.output == "retained-final" && snapshot.exit_code == Some(0)
+                && snapshot.command == Some(crate::TerminalCommand { command: "/bin/sh".into(), args: vec!["-c".into(), "printf retained-final".into()], cwd: directory.path().canonicalize().unwrap().to_string_lossy().into_owned() })));
+        assert!(!host.terminals.lock().await.contains_key(&terminal_id.to_string()));
         let error = host
             .terminal_output(v1::TerminalOutputRequest::new("session", terminal_id))
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "Invalid request: \"unknown terminal\"");
+    }
+
+    #[tokio::test]
+    async fn unknown_id_and_blocked_query_have_explicit_terminal_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = HostServices::new(directory.path()).unwrap();
+        let request = || v1::TerminalOutputRequest::new("session", "tool_fixture");
+        let result = host.query_terminal(request()).await;
+        assert_eq!(result.id, "tool_fixture");
+        assert_eq!(result.state, crate::TerminalOutputState::Unavailable);
+        let _locked = host.terminals.lock().await;
+        let result = host.query_terminal(request()).await;
+        assert_eq!(result.id, "tool_fixture");
+        assert!(matches!(result.state, crate::TerminalOutputState::Failed(error) if error.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn agent_terminal_callbacks_publish_empty_output_and_final_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let host = HostServices::new(directory.path()).unwrap().with_events(tx);
+        let created = host.create_terminal(v1::CreateTerminalRequest::new("session", "/bin/sh")
+            .args(vec!["-c".into(), "printf callback-output".into()])).await.unwrap();
+        let id = created.terminal_id.to_string();
+        assert!(matches!(rx.try_recv().unwrap(), crate::Event::TerminalOutput(crate::TerminalQueryResult {
+            id: event_id, state: crate::TerminalOutputState::Ready(snapshot),
+        }) if event_id == id && snapshot.output.is_empty()));
+        host.wait_for_terminal_exit(v1::WaitForTerminalExitRequest::new("session", id.clone())).await.unwrap();
+        host.terminal_output(v1::TerminalOutputRequest::new("session", id.clone())).await.unwrap();
+        host.release_terminal(v1::ReleaseTerminalRequest::new("session", id.clone())).await.unwrap();
+        for _ in 0..2 {
+            assert!(matches!(rx.try_recv().unwrap(), crate::Event::TerminalOutput(crate::TerminalQueryResult {
+                id: event_id, state: crate::TerminalOutputState::Ready(snapshot),
+            }) if event_id == id && snapshot.output == "callback-output"));
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn retained_snapshots_are_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = HostServices::new(directory.path()).unwrap();
+        for _ in 0..MAX_RETAINED_TERMINALS + 1 {
+            let created = host.create_terminal(v1::CreateTerminalRequest::new("session", "/bin/true")).await.unwrap();
+            host.release_terminal(v1::ReleaseTerminalRequest::new("session", created.terminal_id)).await.unwrap();
+        }
+        assert_eq!(host.retained.lock().await.len(), MAX_RETAINED_TERMINALS);
     }
 
     #[tokio::test]

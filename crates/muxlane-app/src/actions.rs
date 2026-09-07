@@ -4,6 +4,8 @@ gpui::actions!(
         TogglePalette,
         CloseTab,
         NewShellTab,
+        SplitRight,
+        SplitDown,
         NextTab,
         PreviousTab,
         SelectTab1,

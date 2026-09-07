@@ -94,6 +94,81 @@ fn marked_selection(base: usize, text: &str, range: Range<usize>) -> Range<usize
     base + range.start..base + range.end
 }
 
+fn clicked_char_start(text: &str, offset: usize) -> Option<usize> {
+    if text.is_empty() {
+        return None;
+    }
+    let offset = offset.min(text.len());
+    if offset == text.len() {
+        return text.char_indices().next_back().map(|(start, _)| start);
+    }
+    let mut start = offset;
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    Some(start)
+}
+
+fn surrounding_word_range(text: &str, offset: usize) -> Range<usize> {
+    let Some(start) = clicked_char_start(text, offset) else {
+        return 0..0;
+    };
+    let character = text[start..].chars().next().unwrap_or_default();
+    let is_word = |character: char| character.is_alphanumeric() || character == '_';
+    let is_word_character = is_word(character);
+    let is_selectable = |candidate: char| {
+        if is_word_character {
+            is_word(candidate)
+        } else if character.is_whitespace() {
+            candidate.is_whitespace()
+        } else {
+            false
+        }
+    };
+
+    let mut range_start = start;
+    while range_start > 0 {
+        let Some((previous_start, previous)) = text[..range_start].char_indices().next_back()
+        else {
+            break;
+        };
+        if !is_selectable(previous) {
+            break;
+        }
+        range_start = previous_start;
+    }
+
+    let mut range_end = start + character.len_utf8();
+    while range_end < text.len() {
+        let next = text[range_end..].chars().next().unwrap_or_default();
+        if !is_selectable(next) {
+            break;
+        }
+        range_end += next.len_utf8();
+    }
+    range_start..range_end
+}
+
+fn surrounding_line_range(text: &str, offset: usize) -> Range<usize> {
+    let offset = offset.min(text.len());
+    let mut boundary = offset;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let start = text[..boundary]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let end = text[boundary..]
+        .find('\n')
+        .map_or(text.len(), |newline| boundary + newline + 1);
+    start..end
+}
+
+fn composer_height_limits(available_height: f32) -> (f32, f32) {
+    let max = (available_height * 0.4).clamp(28., 240.);
+    (100_f32.min(max), max)
+}
+
 pub(crate) struct PromptEditor {
     focus: FocusHandle,
     content: String,
@@ -104,6 +179,9 @@ pub(crate) struct PromptEditor {
     completion_active: bool,
     submit_enabled: bool,
     chrome_visible: bool,
+    height_limits: Option<(f32, f32)>,
+    scroll: gpui::ScrollHandle,
+    scrollbar: crate::pixel_scrollbar::PixelScrollbar,
     theme_mode: ThemeMode,
     last_layout: Option<TextLayout>,
     last_bounds: Option<Bounds<Pixels>>,
@@ -118,7 +196,7 @@ impl PromptEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let focus = cx.focus_handle();
+        let focus = cx.focus_handle().tab_stop(true);
         let focus_subscription = cx.on_focus_in(&focus, window, |_this, window, _cx| {
             window.invalidate_character_coordinates();
         });
@@ -132,6 +210,9 @@ impl PromptEditor {
             completion_active: false,
             submit_enabled: true,
             chrome_visible: true,
+            height_limits: None,
+            scroll: gpui::ScrollHandle::new(),
+            scrollbar: Default::default(),
             theme_mode: ThemeMode::Light,
             last_layout: None,
             last_bounds: None,
@@ -175,6 +256,14 @@ impl PromptEditor {
         cx.notify();
     }
 
+    pub(crate) fn configure_composer(&mut self, available_height: f32, cx: &mut Context<Self>) {
+        let limits = composer_height_limits(available_height);
+        if self.height_limits != Some(limits) {
+            self.height_limits = Some(limits);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_theme_mode(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
         self.theme_mode = mode;
         cx.notify();
@@ -205,6 +294,13 @@ impl PromptEditor {
     fn selection_utf16(&self) -> Range<usize> {
         byte_to_utf16(&self.content, self.selected_range.start)
             ..byte_to_utf16(&self.content, self.selected_range.end)
+    }
+
+    fn set_selection(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.selected_range = range;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -250,12 +346,15 @@ impl PromptEditor {
     ) {
         self.focus.focus(window, cx);
         window.invalidate_character_coordinates();
-        self.is_selecting = true;
-        if let Some(index) = self.index_for_point(event.position) {
-            if event.modifiers.shift {
-                self.select_to(index, cx);
-            } else {
-                self.move_to(index, cx);
+        self.is_selecting = event.click_count == 1;
+        if event.click_count >= 4 {
+            self.select_all(cx);
+        } else if let Some(index) = self.index_for_point(event.position) {
+            match event.click_count {
+                3 => self.set_selection(surrounding_line_range(&self.content, index), cx),
+                2 => self.set_selection(surrounding_word_range(&self.content, index), cx),
+                _ if event.modifiers.shift => self.select_to(index, cx),
+                _ => self.move_to(index, cx),
             }
         }
         cx.stop_propagation();
@@ -693,12 +792,6 @@ impl Element for PromptTextElement {
         window: &mut Window,
         cx: &mut gpui::App,
     ) {
-        let focus = self.input.read(cx).focus.clone();
-        window.handle_input(
-            &focus,
-            ElementInputHandler::new(bounds, self.input.clone()),
-            cx,
-        );
         self.text.paint(
             None,
             inspector_id,
@@ -713,11 +806,15 @@ impl Element for PromptTextElement {
         }
         let layout = self.text.layout().clone();
         let line_height = window.line_height();
-        self.input.update(cx, |input, _cx| {
+        let focus = self.input.update(cx, |input, _cx| {
             input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
             input.last_line_height = Some(line_height);
+            input.focus.clone()
         });
+        // Register IME on the text itself: an absolute full-height sibling with a
+        // static position contributes its text-line offset to the scroll extent.
+        window.handle_input(&focus, ElementInputHandler::new(bounds, self.input.clone()), cx);
     }
 }
 
@@ -773,13 +870,18 @@ impl Render for PromptEditor {
         };
         let mut root = div()
             .id("prompt-editor")
+            .debug_selector(|| "acp-prompt-editor".into())
             .relative()
             .track_focus(&focus)
             .w_full()
-            .max_h(ui_px(176.))
+            .min_w_0()
+            .max_h(ui_px(self.height_limits.map_or(176., |limits| limits.1)))
             .overflow_y_scroll()
-            .text_size(ui_px(12.))
-            .font_family("monospace")
+            .track_scroll(&self.scroll)
+            .pr(ui_px(12.))
+            .text_size(ui_px(if self.height_limits.is_some() { 13. } else { 12. }))
+            .line_height(ui_px(if self.height_limits.is_some() { 20. } else { 18. }))
+            .when(self.height_limits.is_none(), |root| root.font_family("monospace"))
             .text_color(rgba(text_color))
             .whitespace_normal()
             .cursor(CursorStyle::IBeam)
@@ -818,9 +920,9 @@ impl Render for PromptEditor {
                 .border_color(rgba(if focused { theme.accent } else { theme.line }))
                 .bg(rgba(theme.bg0));
         } else {
-            root = root.min_h(ui_px(28.));
+            root = root.min_h(ui_px(self.height_limits.map_or(28., |limits| limits.0)));
         }
-        root.on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+        let root = root.on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
             let key = event.keystroke.key.as_str();
             let modifiers = event.keystroke.modifiers;
             let command = modifiers.control || modifiers.platform;
@@ -900,13 +1002,143 @@ impl Render for PromptEditor {
                 cx.stop_propagation();
             }
         }))
-        .child(text_element)
+        .child(text_element);
+        div().relative().w_full().min_w_0().child(root)
+            .child(self.scrollbar.render(&self.scroll, theme, |_, _| {}))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_empty_short_long_and_clear_update_scroll_geometry() {
+        use gpui::{TestAppContext, VisualTestContext};
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|window, cx| {
+            let mut editor = PromptEditor::new("Draft", window, cx);
+            editor.set_chrome_visible(false, cx);
+            editor.configure_composer(640., cx);
+            editor
+        });
+        let editor = window.root(&mut cx).unwrap();
+        let mut visual = VisualTestContext::from_window(window.into(), &mut cx);
+        visual.simulate_resize(size(ui_px(320.), ui_px(640.)));
+        let long = "中文 😀 line\n".repeat(50);
+        for (label, placeholder, content, overflow) in [
+            ("empty", "", "", false),
+            ("placeholder", "Draft", "", false),
+            ("short", "Draft", "Short line", false),
+            ("long", "Draft", long.as_str(), true),
+            ("short after scroll", "Draft", "Short again", false),
+            ("long again", "Draft", long.as_str(), true),
+            ("clear after scroll", "Draft", "", false),
+        ] {
+            cx.update(|cx| editor.update(cx, |editor, cx| {
+                editor.set_placeholder(placeholder, cx);
+                if label == "clear after scroll" {
+                    editor.reset(cx);
+                } else {
+                    editor.set_text(content, cx);
+                }
+            }));
+            // Assert immediately after one draw, not after a second frame repairs stale geometry.
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+            let scroll = cx.update(|cx| editor.read(cx).scroll.clone());
+            assert_eq!(scroll.bounds().size.height, ui_px(if overflow { 240. } else { 100. }), "{label}");
+            assert_eq!(scroll.max_offset().x, ui_px(0.), "{label}");
+            assert_eq!(scroll.max_offset().y > ui_px(0.), overflow, "{label}");
+            if overflow {
+                // The text is the only child contributing to scroll extent.
+                let text_height = cx.update(|cx| editor.read(cx).last_bounds.unwrap().size.height);
+                assert_eq!(scroll.max_offset().y, text_height - ui_px(240.));
+                visual.simulate_click(point(ui_px(315.), ui_px(200.)), Default::default());
+                assert!(scroll.offset().y < ui_px(0.), "visible scrollbar must handle clicks");
+            } else {
+                assert_eq!(scroll.offset().y, ui_px(0.), "{label}");
+                cx.update_window(window.into(), |_, window, _| window.blur()).unwrap();
+                visual.simulate_click(point(ui_px(315.), ui_px(50.)), Default::default());
+                assert!(cx.update_window(window.into(), |_, window, cx| editor.read(cx).focus.is_focused(window)).unwrap(), "{label}: right edge must focus the editor");
+                cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+                cx.simulate_keystrokes(window.into(), "z");
+                assert_eq!(cx.update(|cx| editor.read(cx).text()), format!("{content}z"));
+            }
+        }
+
+        // The keystrokes above exercise platform registration. Check preedit and
+        // surrogate-pair ranges through the same EntityInputHandler implementation.
+        cx.update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.reset(cx);
+                editor.replace_and_mark_text_in_range(None, "中😀", Some(1..3), window, cx);
+                assert_eq!(editor.marked_text_range(window, cx), Some(0..3));
+                assert_eq!(editor.selected_text_range(false, window, cx).unwrap().range, 1..3);
+            });
+        }).unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |editor, cx| {
+                assert!(editor.bounds_for_range(1..3, editor.last_bounds.unwrap(), window, cx).is_some());
+                editor.replace_text_in_range(None, "中文", window, cx);
+                assert_eq!(editor.marked_text_range(window, cx), None);
+                assert_eq!(editor.selected_text_range(false, window, cx).unwrap().range, 2..2);
+                assert_eq!(editor.text(), "中文");
+            });
+        }).unwrap();
+    }
+
+    #[test]
+    fn composer_size_is_independent_and_long_input_scrolls() {
+        let mut cx = gpui::TestAppContext::single();
+        let composer = cx.add_window(|window, cx| {
+            let mut editor = PromptEditor::new("Draft", window, cx);
+            editor.set_chrome_visible(false, cx);
+            editor.configure_composer(640., cx);
+            editor.set_text("中文 😀 line\n".repeat(50), cx);
+            editor
+        });
+        let compact = cx.add_window(|window, cx| {
+            let mut editor = PromptEditor::new("Answer", window, cx);
+            editor.set_chrome_visible(false, cx);
+            editor
+        });
+        let editor = composer.root(&mut cx).unwrap();
+        let compact_editor = compact.root(&mut cx).unwrap();
+        cx.update_window(composer.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+        cx.update_window(compact.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+        cx.update(|cx| {
+            let editor = editor.read(cx);
+            assert_eq!(editor.height_limits, Some((100., 240.)));
+            assert_eq!(editor.scroll.bounds().size.height, ui_px(240.));
+            assert!(editor.scroll.max_offset().y > ui_px(0.));
+            let compact = compact_editor.read(cx);
+            assert_eq!(compact.height_limits, None);
+            assert_eq!(compact.scroll.bounds().size.height, ui_px(28.));
+        });
+        assert_eq!(composer_height_limits(100.), (40., 40.));
+        assert_eq!(composer_height_limits(1000.), (100., 240.));
+    }
+
+    #[test]
+    fn surrounding_word_ranges_handle_words_whitespace_unicode_and_boundaries() {
+        assert_eq!(surrounding_word_range("hello world", 1), 0..5);
+        assert_eq!(surrounding_word_range("foo  bar", 4), 3..5);
+        assert_eq!(surrounding_word_range("中文😀!", 0), 0..6);
+        assert_eq!(surrounding_word_range("中文😀!", 6), 6..10);
+        assert_eq!(surrounding_word_range("中文😀!", 10), 10..11);
+        assert_eq!(surrounding_word_range("", 0), 0..0);
+        assert_eq!(surrounding_word_range("abc", 99), 0..3);
+    }
+
+    #[test]
+    fn surrounding_line_ranges_include_newlines_without_crossing_lines() {
+        let text = "first\n中😀\nlast";
+        assert_eq!(surrounding_line_range(text, 1), 0..6);
+        assert_eq!(surrounding_line_range(text, 8), 6..14);
+        assert_eq!(surrounding_line_range(text, text.len()), 14..text.len());
+        assert_eq!(surrounding_line_range("", 4), 0..0);
+    }
 
     #[test]
     fn utf16_round_trip_handles_surrogates_and_newlines() {

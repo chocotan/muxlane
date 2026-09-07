@@ -104,7 +104,7 @@ impl MuxlaneApp {
             return div().into_any_element();
         };
         let is_acp = self.is_acp_session(&menu.agent);
-        let (acp_view, can_history, can_logout) = self
+        let (acp_view, can_logout) = self
             .acp_views
             .get(&menu.agent)
             .map(|view| {
@@ -115,15 +115,10 @@ impl MuxlaneApp {
                         && state
                             .capabilities
                             .as_ref()
-                            .is_some_and(|capabilities| capabilities.sessions.list),
-                    state.handle.is_some()
-                        && state
-                            .capabilities
-                            .as_ref()
                             .is_some_and(|capabilities| capabilities.logout),
                 )
             })
-            .unwrap_or((None, false, false));
+            .unwrap_or((None, false));
         div()
             .absolute()
             .occlude()
@@ -144,48 +139,6 @@ impl MuxlaneApp {
             .border_1()
             .border_color(rgba(theme.line))
             .shadow_lg()
-            .when(is_acp, |menu_element| {
-                menu_element.child(
-                    semantic_button(
-                        "session-archive",
-                        i18n::text(self.language, "menu.archive_session"),
-                        theme,
-                    )
-                    .px_3()
-                    .py_2()
-                    .text_size(ui_px(12.))
-                    .text_color(rgba(theme.fg0))
-                    .hover(|style| style.bg(rgba(theme.bg2)))
-                    .on_click(cx.listener({
-                        let id = menu.agent.clone();
-                        move |this, _event, window, cx| this.archive_acp_session(&id, window, cx)
-                    }))
-                    .child(i18n::text(self.language, "menu.archive_session")),
-                )
-            })
-            .when(is_acp && can_history, |menu_element| {
-                let view = acp_view.clone();
-                menu_element.child(
-                    semantic_button(
-                        "session-history",
-                        i18n::text(self.language, "acp.session_history"),
-                        theme,
-                    )
-                    .px_3()
-                    .py_2()
-                    .text_size(ui_px(12.))
-                    .text_color(rgba(theme.fg0))
-                    .hover(|style| style.bg(rgba(theme.bg2)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.session_menu = None;
-                        if let Some(view) = &view {
-                            view.update(cx, |view, cx| view.request_session_list(cx));
-                        }
-                        cx.notify();
-                    }))
-                    .child(i18n::text(self.language, "acp.session_history")),
-                )
-            })
             .when(is_acp && can_logout, |menu_element| {
                 let view = acp_view.clone();
                 menu_element.child(
@@ -507,6 +460,7 @@ impl MuxlaneApp {
 
     pub(crate) fn render_delete_confirm(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
+        let busy = self.delete_busy;
         let Some(confirm) = self.delete_confirm.clone() else {
             return div().into_any_element();
         };
@@ -583,14 +537,15 @@ impl MuxlaneApp {
                                 )
                                 .px_3()
                                 .py_1()
-                                .text_color(rgba(theme.fg0))
-                                .hover(|style| style.bg(rgba(theme.bg2)))
-                                .cursor_pointer()
+                                .text_color(rgba(if busy { theme.fg2 } else { theme.fg0 }))
+                                .when(busy, |button| button.cursor_default())
+                                .when(!busy, |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgba(theme.bg2)))
+                                })
                                 .on_click(cx.listener(|this, _event, _window, cx| {
-                                    this.delete_confirm = None;
-                                    this.delete_error = None;
-                                    this.delete_busy = false;
-                                    cx.notify();
+                                    this.cancel_delete(cx);
                                 }))
                                 .child(i18n::text(self.language, "common.cancel")),
                             )

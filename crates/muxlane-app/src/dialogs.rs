@@ -672,8 +672,7 @@ impl MuxlaneApp {
         self.remote_project_dialog = None;
         self.dialog_error = None;
         crate::menus::dismiss_context_menus(&mut self.session_menu, &mut self.tree_menu);
-        self.delete_confirm = None;
-        self.delete_error = None;
+        self.cancel_delete(cx);
         self.bootstrap_confirm = None;
         self.bootstrap_error = None;
         self.pending_project_creation = None;

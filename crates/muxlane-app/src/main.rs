@@ -14,6 +14,7 @@ mod menus;
 mod notifications;
 mod persistence;
 mod prompt_editor;
+mod pixel_scrollbar;
 mod remotes;
 mod selector_menu;
 mod sessions;

@@ -156,6 +156,8 @@ async fn local_state_changes_wake_dirty_subscribers() {
 #[tokio::test]
 async fn project_add_api_creates_validates_and_deduplicates_paths() {
     let (server, _sock, state, _dirty, dir) = spawn_server().await;
+    let store_path = dir.path().join("state.json");
+    server.set_persistence_path(store_path.clone());
 
     let existing = dir.path().join("existing");
     std::fs::create_dir(&existing).unwrap();
@@ -240,6 +242,9 @@ async fn project_add_api_creates_validates_and_deduplicates_paths() {
             .count(),
         1
     );
+    let expected = vec![first, created, left];
+    assert_eq!(server.snapshot().await.projects, expected);
+    assert_eq!(muxlane_store::load(&store_path).unwrap().projects, expected);
 }
 
 #[tokio::test]

@@ -9,7 +9,7 @@ pub enum ThreadItem {
     Tool(Tool),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum MessageRole {
     User,
     Assistant,
@@ -18,6 +18,9 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Message {
     pub id: String,
+    /// ACP identity is separate from the stable timeline identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_id: Option<String>,
     pub role: MessageRole,
     pub text: String,
 }
@@ -32,6 +35,8 @@ pub struct ContentItem {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Thought {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_id: Option<String>,
     pub text: String,
 }
 
@@ -263,8 +268,8 @@ enum LocalUserEcho {
 pub struct ThreadReducer {
     snapshot: ThreadSnapshot,
     next_local_id: u64,
-    restored_messages: std::collections::HashMap<String, String>,
-    replay_progress: std::collections::HashMap<String, String>,
+    restored_messages: std::collections::HashMap<(String, MessageRole), String>,
+    replay_progress: std::collections::HashMap<(String, MessageRole), String>,
     user_echo_progress: std::collections::HashMap<String, String>,
     content_counts: std::collections::HashMap<String, u64>,
 }
@@ -274,13 +279,68 @@ impl ThreadReducer {
         Self::default()
     }
 
-    pub fn from_snapshot(snapshot: ThreadSnapshot) -> Self {
-        let next_local_id = snapshot.revision;
+    pub fn from_snapshot(mut snapshot: ThreadSnapshot) -> Self {
+        // Older reducers split same-ID text after a thought with that ID. Repair
+        // only adjacent, same-role, same-ID fragments; never erase a boundary.
+        let mut items: Vec<ThreadItem> = Vec::with_capacity(snapshot.items.len());
+        for item in std::mem::take(&mut snapshot.items) {
+            match (items.last_mut(), &item) {
+                (Some(ThreadItem::Message(previous)), ThreadItem::Message(message))
+                    if previous.id == message.id && previous.role == message.role =>
+                {
+                    previous.text.push_str(&message.text);
+                }
+                (Some(ThreadItem::Thought(previous)), ThreadItem::Thought(thought))
+                    if previous.id == thought.id =>
+                {
+                    previous.text.push_str(&thought.text);
+                }
+                _ => items.push(item),
+            }
+        }
+        snapshot.items = items;
+        let mut next_local_id = snapshot.revision;
+        let mut occupied: std::collections::HashSet<String> = snapshot
+            .items
+            .iter()
+            .map(|item| match item {
+                ThreadItem::Message(message) => message.id.clone(),
+                ThreadItem::Thought(thought) => thought.id.clone(),
+                ThreadItem::Content(content) => content.id.clone(),
+                ThreadItem::Tool(tool) => tool.id.clone(),
+            })
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for item in &mut snapshot.items {
+            let (id, alias, kind) = match item {
+                ThreadItem::Message(message) => {
+                    (&mut message.id, &mut message.protocol_id, "message")
+                }
+                ThreadItem::Thought(thought) => {
+                    (&mut thought.id, &mut thought.protocol_id, "thought")
+                }
+                _ => continue,
+            };
+            if !seen.insert(id.clone()) {
+                let original = protocol_id(id, alias.as_deref()).map(str::to_string);
+                loop {
+                    next_local_id = next_local_id.saturating_add(1);
+                    let replacement = format!("local-{kind}-{next_local_id}");
+                    if occupied.insert(replacement.clone()) {
+                        *id = replacement;
+                        *alias = original;
+                        break;
+                    }
+                }
+            }
+        }
         let restored_messages = snapshot
             .items
             .iter()
             .filter_map(|item| match item {
-                ThreadItem::Message(message) => Some((message.id.clone(), message.text.clone())),
+                ThreadItem::Message(message) => {
+                    Some(((message.id.clone(), message.role), message.text.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -317,159 +377,187 @@ impl ThreadReducer {
     }
 
     pub fn apply(&mut self, delta: ThreadDelta) -> ThreadChange {
-        let change =
-            match delta {
-                ThreadDelta::MessageChunk { id, role, text } => {
-                    let explicit_id = id.is_some();
-                    let id = self.message_id(id, Some(role));
-                    if explicit_id && role == MessageRole::User {
-                        match self.consume_local_user_echo(&id, &text) {
-                            LocalUserEcho::Completed => ThreadChange::Item {
-                                index: self.snapshot.items.len().saturating_sub(1),
-                                appended: false,
-                            },
-                            LocalUserEcho::Pending => ThreadChange::None,
-                            LocalUserEcho::NoMatch => self.apply_message_chunk(id, role, text),
+        let change = match delta {
+            ThreadDelta::MessageChunk { id, role, text } => {
+                if id.is_some() && role == MessageRole::User {
+                    let protocol_id = id.as_deref().unwrap();
+                    match self.consume_local_user_echo(protocol_id, &text) {
+                        LocalUserEcho::Completed => ThreadChange::Item {
+                            index: self.snapshot.items.len().saturating_sub(1),
+                            appended: false,
+                        },
+                        LocalUserEcho::Pending => ThreadChange::None,
+                        LocalUserEcho::NoMatch => {
+                            let resolved = self.message_id(id.clone(), Some(role));
+                            self.apply_message_chunk(resolved, id, role, text)
                         }
-                    } else {
-                        self.apply_message_chunk(id, role, text)
                     }
+                } else {
+                    let resolved = self.message_id(id.clone(), Some(role));
+                    self.apply_message_chunk(resolved, id, role, text)
                 }
-                ThreadDelta::ThoughtChunk { id, text } => {
-                    let id = self.message_id(id, None);
-                    let index = self.item_index(&id);
-                    if let Some(ThreadItem::Thought(thought)) = self.find_item_mut(&id) {
-                        thought.text.push_str(&text);
-                    } else {
-                        self.snapshot
-                            .items
-                            .push(ThreadItem::Thought(Thought { id, text }));
+            }
+            ThreadDelta::ThoughtChunk { id, text } => {
+                let protocol_id = id.clone();
+                let id = self.message_id(id, None);
+                let index = self.snapshot.items.iter().position(|item| {
+                    matches!(item,
+                        ThreadItem::Thought(thought) if thought.id == id)
+                });
+                if let Some(ThreadItem::Thought(thought)) =
+                    index.map(|index| &mut self.snapshot.items[index])
+                {
+                    thought.text.push_str(&text);
+                } else {
+                    self.snapshot.items.push(ThreadItem::Thought(Thought {
+                        id,
+                        protocol_id,
+                        text,
+                    }));
+                }
+                ThreadChange::Item {
+                    index: index.unwrap_or(self.snapshot.items.len() - 1),
+                    appended: index.is_none(),
+                }
+            }
+            ThreadDelta::ContentBlock { id, role, content } => {
+                let base = id.unwrap_or_else(|| "local-message".into());
+                let count = self.content_counts.entry(base.clone()).or_default();
+                *count = count.saturating_add(1);
+                let id = format!("{base}:content:{count}");
+                let index = self.snapshot.items.iter().position(|item| {
+                    matches!(item,
+                        ThreadItem::Content(content) if content.id == id)
+                });
+                if let Some(ThreadItem::Content(existing)) =
+                    index.map(|index| &mut self.snapshot.items[index])
+                {
+                    existing.role = role;
+                    existing.content = content;
+                } else {
+                    self.snapshot.items.push(ThreadItem::Content(ContentItem {
+                        id,
+                        role,
+                        content,
+                    }));
+                }
+                ThreadChange::Item {
+                    index: index.unwrap_or(self.snapshot.items.len() - 1),
+                    appended: index.is_none(),
+                }
+            }
+            ThreadDelta::ToolUpsert {
+                id,
+                title,
+                kind,
+                state,
+                content,
+                locations,
+                raw_input,
+                raw_output,
+                subagent_session_id,
+            } => {
+                let index = self.snapshot.items.iter().position(|item| {
+                    matches!(item,
+                        ThreadItem::Tool(tool) if tool.id == id)
+                });
+                if let Some(ThreadItem::Tool(tool)) =
+                    index.map(|index| &mut self.snapshot.items[index])
+                {
+                    if let Some(title) = title.filter(|title| !title.is_empty()) {
+                        tool.title = title;
                     }
-                    ThreadChange::Item {
-                        index: index.unwrap_or(self.snapshot.items.len() - 1),
-                        appended: index.is_none(),
+                    if let Some(state) = state {
+                        tool.state = state;
                     }
-                }
-                ThreadDelta::ContentBlock { id, role, content } => {
-                    let base = id.unwrap_or_else(|| "local-message".into());
-                    let count = self.content_counts.entry(base.clone()).or_default();
-                    *count = count.saturating_add(1);
-                    let id = format!("{base}:content:{count}");
-                    let index = self.item_index(&id);
-                    if let Some(ThreadItem::Content(existing)) = self.find_item_mut(&id) {
-                        existing.role = role;
-                        existing.content = content;
-                    } else {
-                        self.snapshot.items.push(ThreadItem::Content(ContentItem {
-                            id,
-                            role,
-                            content,
-                        }));
+                    if let Some(kind) = kind {
+                        tool.kind = kind;
                     }
-                    ThreadChange::Item {
-                        index: index.unwrap_or(self.snapshot.items.len() - 1),
-                        appended: index.is_none(),
+                    if let Some(content) = content {
+                        tool.content = content;
                     }
-                }
-                ThreadDelta::ToolUpsert {
-                    id,
-                    title,
-                    kind,
-                    state,
-                    content,
-                    locations,
-                    raw_input,
-                    raw_output,
-                    subagent_session_id,
-                } => {
-                    let index = self.item_index(&id);
-                    if let Some(ThreadItem::Tool(tool)) = self.snapshot.items.iter_mut().find(
-                        |item| matches!(item, ThreadItem::Tool(existing) if existing.id == id),
-                    ) {
-                        if let Some(title) = title.filter(|title| !title.is_empty()) {
-                            tool.title = title;
-                        }
-                        if let Some(state) = state {
-                            tool.state = state;
-                        }
-                        if let Some(kind) = kind {
-                            tool.kind = kind;
-                        }
-                        if let Some(content) = content {
-                            tool.content = content;
-                        }
-                        if let Some(locations) = locations {
-                            tool.locations = locations;
-                        }
-                        if raw_input.is_some() {
-                            tool.raw_input = raw_input;
-                        }
-                        if raw_output.is_some() {
-                            tool.raw_output = raw_output;
-                        }
-                        if subagent_session_id.is_some() {
-                            tool.subagent_session_id = subagent_session_id;
-                        }
-                    } else {
-                        self.snapshot.items.push(ThreadItem::Tool(Tool {
-                            id,
-                            title: title.unwrap_or_default(),
-                            kind: kind.unwrap_or_default(),
-                            state: state.unwrap_or_default(),
-                            content: content.unwrap_or_default(),
-                            locations: locations.unwrap_or_default(),
-                            raw_input,
-                            raw_output,
-                            subagent_session_id,
-                        }));
+                    if let Some(locations) = locations {
+                        tool.locations = locations;
                     }
-                    ThreadChange::Item {
-                        index: index.unwrap_or(self.snapshot.items.len() - 1),
-                        appended: index.is_none(),
+                    if raw_input.is_some() {
+                        tool.raw_input = raw_input;
                     }
+                    if raw_output.is_some() {
+                        tool.raw_output = raw_output;
+                    }
+                    if subagent_session_id.is_some() {
+                        tool.subagent_session_id = subagent_session_id;
+                    }
+                } else {
+                    self.snapshot.items.push(ThreadItem::Tool(Tool {
+                        id,
+                        title: title.unwrap_or_default(),
+                        kind: kind.unwrap_or_default(),
+                        state: state.unwrap_or_default(),
+                        content: content.unwrap_or_default(),
+                        locations: locations.unwrap_or_default(),
+                        raw_input,
+                        raw_output,
+                        subagent_session_id,
+                    }));
                 }
-                ThreadDelta::Plan(plan) => {
-                    self.snapshot.plan = Some(plan);
-                    ThreadChange::Plan
+                ThreadChange::Item {
+                    index: index.unwrap_or(self.snapshot.items.len() - 1),
+                    appended: index.is_none(),
                 }
-                ThreadDelta::Usage(usage) => {
-                    self.snapshot.usage = Some(usage);
-                    ThreadChange::Usage
-                }
-                ThreadDelta::AvailableCommands(commands) => {
-                    self.snapshot.available_commands = commands;
-                    ThreadChange::AvailableCommands
-                }
-                ThreadDelta::Modes(modes) => {
-                    if modes.available.is_empty() {
-                        if let Some(existing) = self.snapshot.modes.as_mut() {
-                            existing.current = modes.current;
-                        } else {
-                            self.snapshot.modes = Some(modes);
-                        }
+            }
+            ThreadDelta::Plan(plan) => {
+                self.snapshot.plan = Some(plan);
+                ThreadChange::Plan
+            }
+            ThreadDelta::Usage(usage) => {
+                self.snapshot.usage = Some(usage);
+                ThreadChange::Usage
+            }
+            ThreadDelta::AvailableCommands(commands) => {
+                self.snapshot.available_commands = commands;
+                ThreadChange::AvailableCommands
+            }
+            ThreadDelta::Modes(modes) => {
+                if modes.available.is_empty() {
+                    if let Some(existing) = self.snapshot.modes.as_mut() {
+                        existing.current = modes.current;
                     } else {
                         self.snapshot.modes = Some(modes);
                     }
-                    ThreadChange::Modes
+                } else {
+                    self.snapshot.modes = Some(modes);
                 }
-                ThreadDelta::ConfigOptions(options) => {
-                    self.snapshot.config_options = options;
-                    ThreadChange::ConfigOptions
-                }
-                ThreadDelta::SessionInfo(_) => ThreadChange::Metadata,
-                ThreadDelta::Unknown(_) => ThreadChange::None,
-            };
+                ThreadChange::Modes
+            }
+            ThreadDelta::ConfigOptions(options) => {
+                self.snapshot.config_options = options;
+                ThreadChange::ConfigOptions
+            }
+            ThreadDelta::SessionInfo(_) => ThreadChange::Metadata,
+            ThreadDelta::Unknown(_) => ThreadChange::None,
+        };
         self.snapshot.revision = self.snapshot.revision.saturating_add(1);
         change
     }
 
-    fn apply_message_chunk(&mut self, id: String, role: MessageRole, text: String) -> ThreadChange {
-        match self.replayed_chunk(&id, &text) {
+    fn apply_message_chunk(
+        &mut self,
+        id: String,
+        protocol_id: Option<String>,
+        role: MessageRole,
+        text: String,
+    ) -> ThreadChange {
+        let index = self.snapshot.items.iter().position(|item| {
+            matches!(item,
+            ThreadItem::Message(message) if message.id == id && message.role == role)
+        });
+        match self.replayed_chunk(&id, role, &text) {
             ReplayChunk::Skip => ThreadChange::None,
             ReplayChunk::Replace(accumulated) => {
-                let index = self.item_index(&id);
-                if let Some(ThreadItem::Message(message)) = self.find_item_mut(&id) {
-                    message.role = role;
+                if let Some(ThreadItem::Message(message)) =
+                    index.map(|index| &mut self.snapshot.items[index])
+                {
                     message.text = accumulated;
                 }
                 index.map_or(ThreadChange::None, |index| ThreadChange::Item {
@@ -478,17 +566,21 @@ impl ThreadReducer {
                 })
             }
             ReplayChunk::Append => {
-                let index = self.item_index(&id);
-                if let Some(ThreadItem::Message(message)) = self.find_item_mut(&id) {
+                if let Some(ThreadItem::Message(message)) =
+                    index.map(|index| &mut self.snapshot.items[index])
+                {
                     message.text.push_str(&text);
                     ThreadChange::Item {
-                        index: index.unwrap_or_default(),
+                        index: index.unwrap(),
                         appended: false,
                     }
                 } else {
-                    self.snapshot
-                        .items
-                        .push(ThreadItem::Message(Message { id, role, text }));
+                    self.snapshot.items.push(ThreadItem::Message(Message {
+                        id,
+                        protocol_id,
+                        role,
+                        text,
+                    }));
                     ThreadChange::Item {
                         index: self.snapshot.items.len() - 1,
                         appended: true,
@@ -511,7 +603,10 @@ impl ThreadReducer {
         let Some(ThreadItem::Message(local)) = self.snapshot.items.last() else {
             return LocalUserEcho::NoMatch;
         };
-        if local.role != MessageRole::User || !local.id.starts_with("local-message-") {
+        if local.role != MessageRole::User
+            || !local.id.starts_with("local-message-")
+            || local.protocol_id.is_some()
+        {
             return LocalUserEcho::NoMatch;
         }
         let local_text = local.text.clone();
@@ -520,7 +615,7 @@ impl ThreadReducer {
         let accumulated = progress.clone();
         if !local_text.starts_with(&accumulated) {
             if let Some(ThreadItem::Message(local)) = self.snapshot.items.last_mut() {
-                local.id = id.to_string();
+                local.protocol_id = Some(id.to_string());
                 local.text = accumulated;
             }
             self.user_echo_progress.remove(id);
@@ -528,7 +623,7 @@ impl ThreadReducer {
         }
         if accumulated == local_text {
             if let Some(ThreadItem::Message(local)) = self.snapshot.items.last_mut() {
-                local.id = id.to_string();
+                local.protocol_id = Some(id.to_string());
             }
             self.user_echo_progress.remove(id);
             LocalUserEcho::Completed
@@ -537,58 +632,100 @@ impl ThreadReducer {
         }
     }
 
-    fn replayed_chunk(&mut self, id: &str, text: &str) -> ReplayChunk {
-        let Some(original) = self.restored_messages.get(id).cloned() else {
+    fn replayed_chunk(&mut self, id: &str, role: MessageRole, text: &str) -> ReplayChunk {
+        let key = (id.to_string(), role);
+        let Some(original) = self.restored_messages.get(&key).cloned() else {
             return ReplayChunk::Append;
         };
-        let progress = self.replay_progress.entry(id.to_string()).or_default();
+        let progress = self.replay_progress.entry(key.clone()).or_default();
         progress.push_str(text);
         if original.starts_with(progress.as_str()) {
             if progress == &original {
-                self.restored_messages.remove(id);
-                self.replay_progress.remove(id);
+                self.restored_messages.remove(&key);
+                self.replay_progress.remove(&key);
             }
             ReplayChunk::Skip
         } else {
             let accumulated = progress.clone();
-            self.restored_messages.remove(id);
-            self.replay_progress.remove(id);
+            self.restored_messages.remove(&key);
+            self.replay_progress.remove(&key);
             ReplayChunk::Replace(accumulated)
         }
     }
 
     fn message_id(&mut self, id: Option<String>, role: Option<MessageRole>) -> String {
+        // Restored messages can be replayed from the beginning of the session.
+        // Live chunks, however, may only extend the adjacent compatible item.
+        if let Some(incoming) = id.as_deref() {
+            if let Some(message) = self.snapshot.items.iter().find_map(|item| match item {
+                ThreadItem::Message(message)
+                    if Some(message.role) == role
+                        && self
+                            .restored_messages
+                            .contains_key(&(message.id.clone(), message.role))
+                        && protocol_id(&message.id, message.protocol_id.as_deref())
+                            == Some(incoming) =>
+                {
+                    Some(message)
+                }
+                _ => None,
+            }) {
+                return message.id.clone();
+            }
+        }
+        let last = self.snapshot.items.last_mut().and_then(|item| match item {
+            ThreadItem::Message(message) => {
+                if role == Some(message.role) {
+                    Some((&message.id, &mut message.protocol_id))
+                } else {
+                    None
+                }
+            }
+            ThreadItem::Thought(thought) => {
+                if role.is_none() {
+                    Some((&thought.id, &mut thought.protocol_id))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        });
+        if let Some((stable_id, existing)) = last {
+            if can_merge_message_chunks(protocol_id(stable_id, existing.as_deref()), id.as_deref())
+            {
+                if existing.is_none() {
+                    *existing = id;
+                }
+                return stable_id.clone();
+            }
+        }
         if let Some(id) = id {
-            return id;
+            if self.item_index(&id).is_none() {
+                return id;
+            }
         }
-        let matches_last = self
-            .snapshot
-            .items
-            .last()
-            .is_some_and(|item| match (role, item) {
-                (Some(role), ThreadItem::Message(message)) => message.role == role,
-                (None, ThreadItem::Thought(_)) => true,
-                _ => false,
-            });
-        if matches_last {
-            return match self.snapshot.items.last() {
-                Some(ThreadItem::Message(message)) => message.id.clone(),
-                Some(ThreadItem::Thought(thought)) => thought.id.clone(),
-                _ => unreachable!(),
-            };
+        loop {
+            self.next_local_id = self.next_local_id.saturating_add(1);
+            let kind = if role.is_none() { "thought" } else { "message" };
+            let id = format!("local-{kind}-{}", self.next_local_id);
+            if self.item_index(&id).is_none() {
+                return id;
+            }
         }
-        self.next_local_id = self.next_local_id.saturating_add(1);
-        let kind = if role.is_none() { "thought" } else { "message" };
-        format!("local-{kind}-{}", self.next_local_id)
     }
+}
 
-    fn find_item_mut(&mut self, id: &str) -> Option<&mut ThreadItem> {
-        self.snapshot.items.iter_mut().find(|item| match item {
-            ThreadItem::Message(message) => message.id == id,
-            ThreadItem::Content(content) => content.id == id,
-            ThreadItem::Thought(thought) => thought.id == id,
-            ThreadItem::Tool(tool) => tool.id == id,
-        })
+// Snapshots written before protocol_id existed stored explicit IDs in id.
+fn protocol_id<'a>(id: &'a str, explicit: Option<&'a str>) -> Option<&'a str> {
+    explicit.or_else(|| {
+        (!id.starts_with("local-message-") && !id.starts_with("local-thought-")).then_some(id)
+    })
+}
+
+fn can_merge_message_chunks(existing: Option<&str>, incoming: Option<&str>) -> bool {
+    match (existing, incoming) {
+        (Some(existing), Some(incoming)) => existing == incoming,
+        _ => true,
     }
 }
 
@@ -632,6 +769,7 @@ mod tests {
         let snapshot = ThreadSnapshot {
             revision: 2,
             items: vec![ThreadItem::Message(Message {
+                protocol_id: None,
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "hello".into(),
@@ -678,7 +816,7 @@ mod tests {
         assert!(matches!(
             &reducer.snapshot().items[0],
             ThreadItem::Message(message)
-                if message.id == "agent-user-1" && message.text == "hello"
+                if message.id == "local-message-1" && message.protocol_id.as_deref() == Some("agent-user-1") && message.text == "hello"
         ));
     }
 
@@ -705,7 +843,7 @@ mod tests {
         assert!(matches!(
             reducer.snapshot().items.last(),
             Some(ThreadItem::Message(message))
-                if message.id == "agent-user-1" && message.text == "helXlo"
+                if message.id == "local-message-1" && message.protocol_id.as_deref() == Some("agent-user-1") && message.text == "helXlo"
         ));
     }
 
@@ -714,6 +852,7 @@ mod tests {
         let snapshot = ThreadSnapshot {
             revision: 1,
             items: vec![ThreadItem::Message(Message {
+                protocol_id: None,
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "old answer".into(),
@@ -737,6 +876,7 @@ mod tests {
         let snapshot = ThreadSnapshot {
             revision: 1,
             items: vec![ThreadItem::Message(Message {
+                protocol_id: None,
                 id: "m1".into(),
                 role: MessageRole::Assistant,
                 text: "old answer".into(),

@@ -35,6 +35,12 @@ impl ReplayBuffer {
         self.buf.clone().freeze()
     }
 
+    /// 尾部快照：只拷贝最后 n 字节（屏幕采样等只需尾部的热路径，避免全量拷贝）
+    pub fn tail(&self, n: usize) -> Bytes {
+        let start = self.buf.len().saturating_sub(n);
+        Bytes::copy_from_slice(&self.buf[start..])
+    }
+
     pub fn len(&self) -> usize {
         self.buf.len()
     }
@@ -63,5 +69,14 @@ mod tests {
         let mut rb = ReplayBuffer::new(4);
         rb.push(b"123456");
         assert_eq!(&rb.snapshot()[..], b"3456");
+    }
+
+    #[test]
+    fn tail_copies_only_suffix() {
+        let mut rb = ReplayBuffer::new(16);
+        rb.push(b"0123456789abcdef");
+        assert_eq!(&rb.tail(4)[..], b"cdef");
+        assert_eq!(&rb.tail(64)[..], b"0123456789abcdef");
+        assert!(rb.tail(0).is_empty());
     }
 }

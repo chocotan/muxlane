@@ -21,28 +21,6 @@ impl ProjectKey {
     }
 }
 
-pub(crate) fn adjacent_project_target(
-    ordered_projects: &[ProjectKey],
-    current: Option<&ProjectKey>,
-    next: bool,
-) -> Option<ProjectKey> {
-    if ordered_projects.len() < 2 {
-        return None;
-    }
-    let index = current.and_then(|current| {
-        ordered_projects
-            .iter()
-            .position(|candidate| candidate == current)
-    });
-    let target = match (index, next) {
-        (Some(index), true) => (index + 1) % ordered_projects.len(),
-        (Some(index), false) => (index + ordered_projects.len() - 1) % ordered_projects.len(),
-        (None, true) => 0,
-        (None, false) => ordered_projects.len() - 1,
-    };
-    Some(ordered_projects[target].clone())
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WorkspaceLayout {
     pub(crate) pane_tree: PaneNode,
@@ -722,45 +700,6 @@ mod tests {
 
     fn contains(layout: &WorkspaceLayout, agent: &str) -> bool {
         layout.pane_tree.pane_for_agent(&agent.into()).is_some()
-    }
-
-    #[test]
-    fn adjacent_projects_wrap_at_both_boundaries_in_available_order() {
-        let projects = vec![
-            ProjectKey::new("local", "first"),
-            ProjectKey::new("local", "middle"),
-            ProjectKey::new("remote", "last"),
-        ];
-        assert_eq!(
-            adjacent_project_target(&projects, Some(&projects[0]), false),
-            Some(projects[2].clone())
-        );
-        assert_eq!(
-            adjacent_project_target(&projects, Some(&projects[2]), true),
-            Some(projects[0].clone())
-        );
-        assert_eq!(
-            adjacent_project_target(&projects, Some(&projects[1]), false),
-            Some(projects[0].clone())
-        );
-        assert_eq!(
-            adjacent_project_target(&projects, Some(&projects[1]), true),
-            Some(projects[2].clone())
-        );
-    }
-
-    #[test]
-    fn adjacent_project_target_handles_single_or_empty_project_lists() {
-        let single = vec![ProjectKey::new("local", "only")];
-        assert_eq!(
-            adjacent_project_target(&single, Some(&single[0]), true),
-            None
-        );
-        assert_eq!(adjacent_project_target(&[], None, false), None);
-        assert_eq!(
-            adjacent_project_target(&[ProjectKey::new("local", "only")], None, false),
-            None
-        );
     }
 
     #[test]

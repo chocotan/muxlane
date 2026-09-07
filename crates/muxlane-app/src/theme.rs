@@ -79,6 +79,7 @@ pub struct Theme {
     pub fg2: u32,
     pub accent: u32,
     pub on_accent: u32,
+    pub on_warning: u32,
     pub green: u32,
     pub yellow: u32,
     pub red: u32,
@@ -122,6 +123,7 @@ impl Theme {
                 fg2: 0x59636fff,
                 accent: 0x3d6cd8ff,
                 on_accent: 0xffffffff,
+                on_warning: 0x101010ff,
                 green: 0x529633ff,
                 yellow: 0xb88226ff,
                 red: 0xd13e50ff,
@@ -137,6 +139,7 @@ impl Theme {
                 fg2: 0x66584dff,
                 accent: 0xb35f2aff,
                 on_accent: 0xffffffff,
+                on_warning: 0x101010ff,
                 green: 0x4e8c62ff,
                 yellow: 0xb8872eff,
                 red: 0xc94b4bff,
@@ -152,6 +155,7 @@ impl Theme {
                 fg2: 0x52647cff,
                 accent: 0x2563ebff,
                 on_accent: 0xffffffff,
+                on_warning: 0x101010ff,
                 green: 0x16805cff,
                 yellow: 0xb7791fff,
                 red: 0xdc3f51ff,
@@ -167,6 +171,7 @@ impl Theme {
                 fg2: 0x526b5eff,
                 accent: 0x059669ff,
                 on_accent: 0xffffffff,
+                on_warning: 0x101010ff,
                 green: 0x2f855aff,
                 yellow: 0xb7791fff,
                 red: 0xc94b4bff,
@@ -182,6 +187,7 @@ impl Theme {
                 fg2: 0x765060ff,
                 accent: 0xe11d48ff,
                 on_accent: 0xffffffff,
+                on_warning: 0x101010ff,
                 green: 0x378557ff,
                 yellow: 0xb7791fff,
                 red: 0xc2415aff,
@@ -197,6 +203,7 @@ impl Theme {
                 fg2: 0x9aa1adff,
                 accent: 0x528bffff,
                 on_accent: 0x0f1419ff,
+                on_warning: 0x101010ff,
                 green: 0x98c379ff,
                 yellow: 0xe5c07bff,
                 red: 0xe06c75ff,
@@ -212,6 +219,7 @@ impl Theme {
                 fg2: 0xb39bc8ff,
                 accent: 0xe879f9ff,
                 on_accent: 0x1b1029ff,
+                on_warning: 0x101010ff,
                 green: 0x7ee2b8ff,
                 yellow: 0xf5ca7aff,
                 red: 0xfb7185ff,
@@ -227,6 +235,7 @@ impl Theme {
                 fg2: 0x9da4b2ff,
                 accent: 0x61afefff,
                 on_accent: 0x0f1419ff,
+                on_warning: 0x101010ff,
                 green: 0x98c379ff,
                 yellow: 0xe5c07bff,
                 red: 0xe06c75ff,
@@ -303,5 +312,17 @@ mod tests {
         let theme = Theme::for_mode(ThemeMode::Synthwave);
         assert_ne!(theme.on_accent, 0xffffffff);
         assert_eq!(Theme::with_alpha(theme.accent, 0x44) & 0xff, 0x44);
+    }
+
+    #[test]
+    fn warning_badge_text_meets_aa_in_every_theme() {
+        for mode in ThemeMode::ALL {
+            let theme = Theme::for_mode(mode);
+            assert!(
+                contrast_ratio(theme.on_warning, theme.yellow) >= 4.5,
+                "{}",
+                mode.id()
+            );
+        }
     }
 }

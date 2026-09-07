@@ -1,6 +1,6 @@
 use crate::actions::{
-    CloseTab, FocusNextPart, FocusPreviousPart, NewShellTab, NextTab, PreviousTab, SelectTab1,
-    SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
+    CloseTab, NewShellTab, NextTab, PreviousTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
+    SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, SplitDown, SplitRight,
     TogglePalette,
 };
 use gpui::{App, KeyBinding, Keystroke};
@@ -10,9 +10,6 @@ use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 pub(crate) const FIXED_CHORDS: &[&str] = &[
     "cmd-k",
-    "f6",
-    "shift-f6",
-    "ctrl-shift-t",
     "ctrl-tab",
     "ctrl-shift-tab",
     "cmd-1",
@@ -29,9 +26,6 @@ pub(crate) const FIXED_CHORDS: &[&str] = &[
 #[cfg(not(target_os = "macos"))]
 pub(crate) const FIXED_CHORDS: &[&str] = &[
     "super-k",
-    "f6",
-    "shift-f6",
-    "ctrl-shift-t",
     "ctrl-tab",
     "ctrl-shift-tab",
     "super-1",
@@ -51,16 +45,29 @@ pub(crate) enum ShortcutAction {
     CloseTab,
     PreviousTab,
     NextTab,
+    NewTab,
+    SplitRight,
+    SplitDown,
 }
 
 impl ShortcutAction {
-    pub(crate) const ALL: [Self; 3] = [Self::CloseTab, Self::PreviousTab, Self::NextTab];
+    pub(crate) const ALL: [Self; 6] = [
+        Self::CloseTab,
+        Self::PreviousTab,
+        Self::NextTab,
+        Self::NewTab,
+        Self::SplitRight,
+        Self::SplitDown,
+    ];
 
     pub(crate) fn build_binding(self, chord: &str) -> KeyBinding {
         match self {
             Self::CloseTab => KeyBinding::new(&expand_platform_chord(chord), CloseTab, None),
             Self::PreviousTab => KeyBinding::new(&expand_platform_chord(chord), PreviousTab, None),
             Self::NextTab => KeyBinding::new(&expand_platform_chord(chord), NextTab, None),
+            Self::NewTab => KeyBinding::new(&expand_platform_chord(chord), NewShellTab, None),
+            Self::SplitRight => KeyBinding::new(&expand_platform_chord(chord), SplitRight, None),
+            Self::SplitDown => KeyBinding::new(&expand_platform_chord(chord), SplitDown, None),
         }
     }
 
@@ -69,6 +76,9 @@ impl ShortcutAction {
             Self::CloseTab => "settings.shortcut.close_tab",
             Self::PreviousTab => "settings.shortcut.previous_tab",
             Self::NextTab => "settings.shortcut.next_tab",
+            Self::NewTab => "settings.shortcut.new_tab",
+            Self::SplitRight => "settings.shortcut.split_right",
+            Self::SplitDown => "settings.shortcut.split_down",
         }
     }
 
@@ -77,6 +87,9 @@ impl ShortcutAction {
             Self::CloseTab => &bindings.close_tab,
             Self::PreviousTab => &bindings.previous_tab,
             Self::NextTab => &bindings.next_tab,
+            Self::NewTab => &bindings.new_tab,
+            Self::SplitRight => &bindings.split_right,
+            Self::SplitDown => &bindings.split_down,
         }
     }
 
@@ -89,6 +102,9 @@ impl ShortcutAction {
             Self::CloseTab => bindings.close_tab = value,
             Self::PreviousTab => bindings.previous_tab = value,
             Self::NextTab => bindings.next_tab = value,
+            Self::NewTab => bindings.new_tab = value,
+            Self::SplitRight => bindings.split_right = value,
+            Self::SplitDown => bindings.split_down = value,
         }
     }
 }
@@ -116,24 +132,32 @@ fn canonical_chord(source: &str) -> Result<String, ShortcutError> {
 }
 
 fn expand_platform_chord(chord: &str) -> String {
-    let Some(key) = chord.strip_prefix("platform-") else {
-        return chord.to_string();
-    };
     #[cfg(target_os = "macos")]
     let modifier = "cmd";
     #[cfg(not(target_os = "macos"))]
     let modifier = "super";
-    format!("{modifier}-{key}")
+    replace_modifier(chord, "platform", modifier)
 }
 
 fn canonical_platform_chord(chord: &str) -> String {
     #[cfg(target_os = "macos")]
-    let modifier = "cmd-";
+    let modifier = "cmd";
     #[cfg(not(target_os = "macos"))]
-    let modifier = "super-";
-    chord
-        .strip_prefix(modifier)
-        .map_or_else(|| chord.to_string(), |key| format!("platform-{key}"))
+    let modifier = "super";
+    replace_modifier(chord, modifier, "platform")
+}
+
+// GPUI emits alt-super-up, so the platform modifier need not be first.
+// Retain empty tokens: the final key in ctrl-- is the literal minus key.
+fn replace_modifier(chord: &str, from: &str, to: &str) -> String {
+    let mut tokens: Vec<_> = chord.split("-").collect();
+    let modifier_count = tokens.len().saturating_sub(1);
+    for token in &mut tokens[..modifier_count] {
+        if *token == from {
+            *token = to;
+        }
+    }
+    tokens.join("-")
 }
 
 pub(crate) fn normalize(
@@ -191,18 +215,59 @@ pub(crate) fn install_keymap_or_defaults(
     cx: &mut App,
     bindings: &PersistedShortcutBindings,
 ) -> PersistedShortcutBindings {
-    install_keymap(cx, bindings).unwrap_or_else(|_| {
+    install_keymap(cx, &recover_defaults(bindings)).unwrap_or_else(|_| {
         install_keymap(cx, &PersistedShortcutBindings::default())
             .expect("default shortcuts must form a valid keymap")
     })
 }
 
+/// New defaults must not displace custom chords loaded from an older settings file.
+pub(crate) fn recover_defaults(bindings: &PersistedShortcutBindings) -> PersistedShortcutBindings {
+    let defaults = PersistedShortcutBindings::default();
+    let mut candidate = bindings.clone();
+    for action in ShortcutAction::ALL {
+        if action == ShortcutAction::CloseTab {
+            continue;
+        }
+        let Some(chord) = action
+            .binding(bindings)
+            .as_deref()
+            .and_then(|s| canonical_chord(s).ok())
+        else {
+            continue;
+        };
+        let default = action
+            .binding(&defaults)
+            .as_deref()
+            .and_then(|s| canonical_chord(s).ok());
+        if Some(&chord) != default.as_ref() {
+            continue;
+        }
+        let conflicts_with_custom = ShortcutAction::ALL.into_iter().any(|other| {
+            other != action
+                && other
+                    .binding(bindings)
+                    .as_deref()
+                    .and_then(|s| canonical_chord(s).ok())
+                    .as_ref()
+                    == Some(&chord)
+                && other
+                    .binding(&defaults)
+                    .as_deref()
+                    .and_then(|s| canonical_chord(s).ok())
+                    .as_ref()
+                    != Some(&chord)
+        });
+        if conflicts_with_custom {
+            action.set_binding(&mut candidate, None);
+        }
+    }
+    normalize(&candidate).unwrap_or_default()
+}
+
 fn build_keymap(bindings: &PersistedShortcutBindings) -> Vec<KeyBinding> {
     let mut keymap = vec![
         KeyBinding::new(&expand_platform_chord("platform-k"), TogglePalette, None),
-        KeyBinding::new("f6", FocusNextPart, None),
-        KeyBinding::new("shift-f6", FocusPreviousPart, None),
-        KeyBinding::new("ctrl-shift-t", NewShellTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
         KeyBinding::new(&expand_platform_chord("platform-1"), SelectTab1, None),
@@ -244,8 +309,11 @@ mod tests {
             chords,
             [
                 Some("ctrl-w".into()),
-                Some("platform-left".into()),
-                Some("platform-right".into())
+                Some("alt-platform-up".into()),
+                Some("alt-platform-down".into()),
+                Some("alt-platform-t".into()),
+                Some("alt-platform-r".into()),
+                Some("alt-platform-d".into())
             ]
         );
     }
@@ -286,12 +354,12 @@ mod tests {
     #[test]
     fn configurable_duplicates_and_fixed_conflicts_are_rejected() {
         let bindings = PersistedShortcutBindings {
-            next_tab: Some("platform-left".into()),
+            next_tab: Some("platform-alt-up".into()),
             ..Default::default()
         };
         assert_eq!(
             normalize(&bindings),
-            Err(ShortcutError::Conflict("platform-left".into()))
+            Err(ShortcutError::Conflict("alt-platform-up".into()))
         );
         let bindings = PersistedShortcutBindings {
             next_tab: Some("platform-k".into()),
@@ -323,6 +391,9 @@ mod tests {
             next_workspace: None,
             previous_tab: None,
             next_tab: None,
+            new_tab: None,
+            split_right: None,
+            split_down: None,
         };
         let keymap = build_keymap(&bindings);
         assert_eq!(keymap.len(), FIXED_CHORDS.len());
@@ -331,6 +402,84 @@ mod tests {
                 Keystroke::parse(chord).is_ok(),
                 "invalid fixed chord: {chord}"
             );
+        }
+    }
+
+    #[test]
+    fn platform_alt_capture_roundtrips_in_any_modifier_order_and_preserves_minus() {
+        for key in ["up", "down", "t", "r", "d", "-"] {
+            let source = format!("platform-alt-{key}");
+            let expected = format!("alt-platform-{key}");
+            let keystroke = Keystroke::parse(&expand_platform_chord(&source)).unwrap();
+            assert_eq!(captured_chord(&keystroke).unwrap(), expected);
+            assert_eq!(canonical_chord(&expected).unwrap(), expected);
+            assert_eq!(canonical_chord(&source).unwrap(), expected);
+        }
+        assert_eq!(canonical_chord("ctrl--").unwrap(), "ctrl--");
+        let bindings = PersistedShortcutBindings {
+            close_tab: Some("alt-platform-t".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            normalize(&bindings),
+            Err(ShortcutError::Conflict("alt-platform-t".into()))
+        );
+    }
+
+    #[test]
+    fn introduced_defaults_yield_to_custom_chords_without_resetting_other_preferences() {
+        for action in ShortcutAction::ALL.into_iter().skip(1) {
+            let mut bindings = PersistedShortcutBindings::default();
+            bindings.close_tab = action.binding(&bindings).clone();
+            let repaired = recover_defaults(&bindings);
+            assert_eq!(
+                repaired.close_tab,
+                bindings
+                    .close_tab
+                    .as_deref()
+                    .map(|chord| canonical_chord(chord).unwrap())
+            );
+            assert!(action.binding(&repaired).is_none());
+            for other in ShortcutAction::ALL
+                .into_iter()
+                .skip(1)
+                .filter(|other| *other != action)
+            {
+                assert_eq!(
+                    other.binding(&repaired).as_ref().unwrap(),
+                    &canonical_chord(other.binding(&bindings).as_ref().unwrap()).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn new_actions_are_not_fixed_and_can_be_rebound_or_disabled() {
+        let mut bindings = PersistedShortcutBindings::default();
+        for (action, chord) in [
+            (ShortcutAction::NewTab, "ctrl-shift-t"),
+            (ShortcutAction::SplitRight, "ctrl-alt-r"),
+            (ShortcutAction::SplitDown, "ctrl-alt-d"),
+        ] {
+            action.set_binding(&mut bindings, Some(chord.into()));
+        }
+        assert!(normalize(&bindings).is_ok());
+        for action in ShortcutAction::ALL.into_iter().skip(3) {
+            action.set_binding(&mut bindings, None);
+        }
+        let keymap = build_keymap(&normalize(&bindings).unwrap());
+        for binding in keymap {
+            assert!(!binding.action().as_any().is::<NewShellTab>());
+            assert!(!binding.action().as_any().is::<SplitRight>());
+            assert!(!binding.action().as_any().is::<SplitDown>());
+            assert!(!binding
+                .action()
+                .as_any()
+                .is::<crate::actions::FocusNextPart>());
+            assert!(!binding
+                .action()
+                .as_any()
+                .is::<crate::actions::FocusPreviousPart>());
         }
     }
 }

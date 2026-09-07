@@ -52,85 +52,84 @@ impl AcpView {
                     PermissionKind::RejectOnce | PermissionKind::RejectAlways
                 )
             });
-            let mut card = div()
-                .mx_3()
-                .my_2()
-                .p_2()
-                .border_1()
-                .border_color(rgba(theme.yellow))
-                .bg(rgba(Theme::with_alpha(theme.yellow, 0x18)))
-                .child(div().text_color(rgba(theme.yellow)).child(permission.title));
+            let pending_more = self.pending_permissions.len().saturating_sub(1);
+            let mut options = div().flex().flex_row().flex_wrap().items_center().gap_2();
             for option in permission.options {
                 let permission_id = id.clone();
                 let option_id = option.id.clone();
                 let option_label = option.label.clone();
-                let option_color = match option.kind {
-                    PermissionKind::AllowOnce | PermissionKind::AllowAlways => theme.green,
-                    PermissionKind::RejectOnce | PermissionKind::RejectAlways => theme.red,
-                    PermissionKind::Unknown => theme.fg1,
-                };
-                card = card.child(
-                    semantic_button(
+                let option_button = match option.kind {
+                    PermissionKind::AllowOnce | PermissionKind::AllowAlways => primary_button(
                         format!("acp-permission-{id}-{}", option.id),
                         option_label.clone(),
                         theme,
-                    )
-                    .px_2()
-                    .py_1()
-                    .mt_1()
-                    .border_1()
-                    .border_color(rgba(theme.line))
-                    .text_color(rgba(option_color))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.choose_permission(permission_id.clone(), Some(option_id.clone()), cx)
-                    }))
-                    .child(option_label),
+                        theme.green,
+                    ),
+                    PermissionKind::RejectOnce | PermissionKind::RejectAlways => secondary_button(
+                        format!("acp-permission-{id}-{}", option.id),
+                        option_label.clone(),
+                        theme,
+                        theme.red,
+                    ),
+                    PermissionKind::Unknown => secondary_button(
+                        format!("acp-permission-{id}-{}", option.id),
+                        option_label.clone(),
+                        theme,
+                        theme.fg1,
+                    ),
+                };
+                options = options.child(
+                    option_button
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.choose_permission(
+                                permission_id.clone(),
+                                Some(option_id.clone()),
+                                cx,
+                            )
+                        }))
+                        .child(option_label),
                 );
             }
             if !has_reject {
                 let reject_id = id.clone();
-                card = card.child(
-                    semantic_button(
+                options = options.child(
+                    secondary_button(
                         gpui::ElementId::Name(format!("acp-permission-{id}-reject").into()),
                         i18n::text(self.language, "acp.reject"),
                         theme,
+                        theme.red,
                     )
-                    .px_2()
-                    .py_1()
-                    .mt_1()
-                    .text_color(rgba(theme.red))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.choose_permission(reject_id.clone(), None, cx)
                     }))
                     .child(i18n::text(self.language, "acp.reject")),
                 );
             }
-            if self.pending_permissions.len() > 1 {
-                card = card.child(
-                    div()
-                        .pt_1()
-                        .text_size(ui_px(9.))
-                        .text_color(rgba(theme.fg2))
-                        .child(format!("+{} pending", self.pending_permissions.len() - 1)),
-                );
-            }
+            let card = signal_card(theme, theme.yellow).min_w_0()
+                .child(card_title(theme, theme.yellow, permission.title).when(
+                    pending_more > 0,
+                    |title| {
+                        title.child(meta(theme, format!("+{pending_more} pending")).flex_none())
+                    },
+                ))
+                .child(meta(theme, format!("Awaiting permission | {}", permission.tool_id)))
+                .when(!permission.context.is_empty(), |card| card.child(
+                    div().id(format!("permission-context-{id}"))
+                        .min_w_0().w_full().max_h(ui_px(180.))
+                        .overflow_x_scroll().overflow_y_scroll().flex().font_family("monospace")
+                        .text_size(ui_px(CODE_SIZE)).line_height(ui_px(CODE_LINE))
+                        .whitespace_nowrap().child(div().w_auto().flex_none().child(permission.context.clone()))
+                ))
+                .child(options);
             panels = panels.child(card);
         }
         if let Some(request) = self.pending_elicitations.first().cloned() {
             let request_id = request.id.clone();
-            let mut panel = div()
-                .mx_3()
-                .my_2()
-                .p_3()
-                .border_1()
-                .border_color(rgba(theme.yellow))
-                .bg(rgba(Theme::with_alpha(theme.yellow, 0x12)))
-                .child(
-                    div()
-                        .pb_2()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(request.message),
-                );
+            let mut panel = signal_card(theme, theme.yellow).child(card_title(
+                theme,
+                theme.yellow,
+                request.message,
+            ));
             match request.mode {
                 ElicitationMode::Form { .. } => {
                     let fields = self
@@ -149,14 +148,9 @@ impl AcpView {
                             .flex_col()
                             .gap_1()
                             .py_1()
-                            .child(div().text_size(ui_px(10.)).child(label));
+                            .child(div().text_color(rgba(theme.fg0)).child(label));
                         if let Some(description) = field.description {
-                            field_view = field_view.child(
-                                div()
-                                    .text_size(ui_px(9.))
-                                    .text_color(rgba(theme.fg2))
-                                    .child(description),
-                            );
+                            field_view = field_view.child(meta(theme, description));
                         }
                         let value_key = format!("{request_id}:{}", field.name);
                         match field.kind {
@@ -172,19 +166,16 @@ impl AcpView {
                                         .and_then(|form| form.values.get(&value_key))
                                         == Some(&serde_json::Value::String(choice.clone()));
                                     choices_view = choices_view.child(
-                                        semantic_button(
+                                        choice_button(
                                             gpui::ElementId::Name(
                                                 format!("elicitation-{request_id}-{name}-{choice}")
                                                     .into(),
                                             ),
                                             choice.clone(),
                                             theme,
+                                            selected,
+                                            false,
                                         )
-                                        .px_2()
-                                        .py_1()
-                                        .border_1()
-                                        .border_color(rgba(theme.line))
-                                        .when(selected, |button| button.bg(rgba(theme.bg2)))
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.select_elicitation_value(
                                                 &choice_request_id,
@@ -214,21 +205,16 @@ impl AcpView {
                                         if value { "common.on" } else { "common.off" },
                                     );
                                     choices_view = choices_view.child(
-                                        semantic_button(
+                                        choice_button(
                                             gpui::ElementId::Name(
                                                 format!("elicitation-{request_id}-{name}-{value}")
                                                     .into(),
                                             ),
                                             label,
                                             theme,
+                                            current == Some(value),
+                                            false,
                                         )
-                                        .px_2()
-                                        .py_1()
-                                        .border_1()
-                                        .border_color(rgba(theme.line))
-                                        .when(current == Some(value), |button| {
-                                            button.bg(rgba(theme.bg2))
-                                        })
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.select_elicitation_value(
                                                 &choice_request_id,
@@ -260,19 +246,16 @@ impl AcpView {
                                             ))
                                         });
                                     choices_view = choices_view.child(
-                                        semantic_button(
+                                        choice_button(
                                             gpui::ElementId::Name(
                                                 format!("elicitation-{request_id}-{name}-{choice}")
                                                     .into(),
                                             ),
                                             choice.clone(),
                                             theme,
+                                            selected,
+                                            true,
                                         )
-                                        .px_2()
-                                        .py_1()
-                                        .border_1()
-                                        .border_color(rgba(theme.line))
-                                        .when(selected, |button| button.bg(rgba(theme.bg2)))
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.select_elicitation_value(
                                                 &choice_request_id,
@@ -290,7 +273,10 @@ impl AcpView {
                             ElicitationFieldKind::Unsupported(kind) => {
                                 field_view = field_view.child(
                                     div()
-                                        .text_color(rgba(theme.red))
+                                        .pl_2()
+                                        .border_l_2()
+                                        .border_color(rgba(theme.red))
+                                        .text_color(rgba(theme.fg1))
                                         .child(format!("Unsupported field type: {kind}")),
                                 );
                             }
@@ -312,32 +298,29 @@ impl AcpView {
                     panel = panel.child(
                         div()
                             .flex()
-                            .gap_1()
-                            .pt_2()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .pt_1()
                             .child(
-                                semantic_button(
+                                primary_button(
                                     "elicitation-accept",
                                     i18n::text(self.language, "acp.elicitation_accept"),
                                     theme,
+                                    theme.green,
                                 )
-                                .px_3()
-                                .py_1()
-                                .border_1()
-                                .border_color(rgba(theme.green))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.submit_elicitation(accept_id.clone(), cx)
                                 }))
                                 .child(i18n::text(self.language, "acp.elicitation_accept")),
                             )
                             .child(
-                                semantic_button(
+                                secondary_button(
                                     "elicitation-decline",
                                     i18n::text(self.language, "acp.elicitation_decline"),
                                     theme,
+                                    theme.red,
                                 )
-                                .px_3()
-                                .py_1()
-                                .text_color(rgba(theme.red))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.respond_elicitation(
                                         decline_id.clone(),
@@ -358,25 +341,26 @@ impl AcpView {
                         .child(
                             div()
                                 .font_family("monospace")
+                                .text_size(ui_px(CODE_SIZE))
+                                .line_height(ui_px(CODE_LINE))
                                 .text_color(rgba(if valid { theme.accent } else { theme.red }))
                                 .child(url),
                         )
                         .child(
                             div()
                                 .flex()
-                                .gap_1()
-                                .pt_2()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .pt_1()
                                 .when(valid, |actions| {
                                     actions.child(
-                                        semantic_button(
+                                        primary_button(
                                             "elicitation-open-url",
                                             i18n::text(self.language, "acp.elicitation_open_url"),
                                             theme,
+                                            theme.accent,
                                         )
-                                        .px_3()
-                                        .py_1()
-                                        .border_1()
-                                        .border_color(rgba(theme.accent))
                                         .on_click(cx.listener(move |this, _event, _window, cx| {
                                             this.open_elicitation_url(&open_url, cx)
                                         }))
@@ -387,13 +371,12 @@ impl AcpView {
                                     )
                                 })
                                 .child(
-                                    semantic_button(
+                                    secondary_button(
                                         "elicitation-done",
                                         i18n::text(self.language, "acp.elicitation_done"),
                                         theme,
+                                        theme.fg1,
                                     )
-                                    .px_3()
-                                    .py_1()
                                     .on_click(cx.listener(move |this, _event, _window, cx| {
                                         this.respond_elicitation(
                                             done_id.clone(),
@@ -404,14 +387,12 @@ impl AcpView {
                                     .child(i18n::text(self.language, "acp.elicitation_done")),
                                 )
                                 .child(
-                                    semantic_button(
+                                    secondary_button(
                                         "elicitation-url-decline",
                                         i18n::text(self.language, "acp.elicitation_decline"),
                                         theme,
+                                        theme.red,
                                     )
-                                    .px_3()
-                                    .py_1()
-                                    .text_color(rgba(theme.red))
                                     .on_click(cx.listener(move |this, _event, _window, cx| {
                                         this.respond_elicitation(
                                             decline_id.clone(),
@@ -426,22 +407,22 @@ impl AcpView {
                 ElicitationMode::Unsupported => {
                     let cancel_id = request_id.clone();
                     panel = panel.child(
-                        semantic_button(
-                            "elicitation-cancel-unsupported",
-                            i18n::text(self.language, "common.cancel"),
-                            theme,
-                        )
-                        .px_3()
-                        .py_1()
-                        .text_color(rgba(theme.red))
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.respond_elicitation(
-                                cancel_id.clone(),
-                                ElicitationResponse::Cancel,
-                                cx,
+                        div().flex().pt_1().child(
+                            secondary_button(
+                                "elicitation-cancel-unsupported",
+                                i18n::text(self.language, "common.cancel"),
+                                theme,
+                                theme.red,
                             )
-                        }))
-                        .child(i18n::text(self.language, "common.cancel")),
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.respond_elicitation(
+                                    cancel_id.clone(),
+                                    ElicitationResponse::Cancel,
+                                    cx,
+                                )
+                            }))
+                            .child(i18n::text(self.language, "common.cancel")),
+                        ),
                     );
                 }
             }
@@ -453,22 +434,18 @@ impl AcpView {
                 .as_ref()
                 .filter(|capabilities| !capabilities.auth_methods.is_empty())
             {
-                let mut auth_panel = div()
-                    .mx_3()
-                    .my_2()
-                    .p_3()
-                    .border_1()
-                    .border_color(rgba(theme.yellow))
-                    .child(
-                        div()
-                            .pb_2()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(i18n::text(self.language, "acp.authentication_required")),
-                    );
+                let mut auth_panel = signal_card(theme, theme.yellow).gap_0().child(
+                    card_title(
+                        theme,
+                        theme.yellow,
+                        i18n::text(self.language, "acp.authentication_required"),
+                    )
+                    .pb_2(),
+                );
                 for method in &capabilities.auth_methods {
                     let method_id = method.id.clone();
                     auth_panel = auth_panel.child(
-                        semantic_button(
+                        button(
                             gpui::ElementId::Name(format!("acp-auth-{method_id}").into()),
                             method.name.clone(),
                             theme,
@@ -476,8 +453,10 @@ impl AcpView {
                         .w_full()
                         .px_3()
                         .py_2()
+                        .border_0()
                         .border_t_1()
                         .border_color(rgba(theme.line))
+                        .text_color(rgba(theme.fg0))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.begin_authentication(method_id.clone(), cx)
                         }))
@@ -492,43 +471,43 @@ impl AcpView {
             && matches!(self.status, Status::Failed | Status::Disconnected)
         {
             let can_start_fresh = self.protocol_session_id.is_some();
-            panels = panels.child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(rgba(theme.line))
-                    .child(
-                        semantic_button("acp-retry", i18n::text(self.language, "acp.retry"), theme)
-                            .px_3()
-                            .py_1()
-                            .border_1()
-                            .border_color(rgba(theme.line))
+            panels =
+                panels.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px(ui_px(CARD_MARGIN))
+                        .py_2()
+                        .border_t_1()
+                        .border_color(rgba(theme.line))
+                        .child(
+                            primary_button(
+                                "acp-retry",
+                                i18n::text(self.language, "acp.retry"),
+                                theme,
+                                theme.accent,
+                            )
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.request_restart(false, cx)
                             }))
                             .child(i18n::text(self.language, "acp.retry")),
-                    )
-                    .when(can_start_fresh, |controls| {
-                        controls.child(
-                            semantic_button(
-                                "acp-start-fresh",
-                                i18n::text(self.language, "acp.start_fresh"),
-                                theme,
-                            )
-                            .px_3()
-                            .py_1()
-                            .border_1()
-                            .border_color(rgba(theme.line))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.request_restart(true, cx)
-                            }))
-                            .child(i18n::text(self.language, "acp.start_fresh")),
                         )
-                    }),
-            );
+                        .when(can_start_fresh, |controls| {
+                            controls.child(
+                                secondary_button(
+                                    "acp-start-fresh",
+                                    i18n::text(self.language, "acp.start_fresh"),
+                                    theme,
+                                    theme.fg1,
+                                )
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.request_restart(true, cx)
+                                }))
+                                .child(i18n::text(self.language, "acp.start_fresh")),
+                            )
+                        }),
+                );
         }
         panels
     }
@@ -556,21 +535,16 @@ impl AcpView {
                     div()
                         .flex()
                         .items_center()
-                        .gap_1()
-                        .px_3()
+                        .gap_2()
+                        .px(ui_px(CARD_MARGIN))
                         .py_2()
                         .border_t_1()
                         .border_color(rgba(theme.line))
                         .bg(rgba(theme.bg1))
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_size(ui_px(10.))
-                                .text_color(rgba(theme.fg1))
-                                .child(format!(
+                            meta(
+                                theme,
+                                format!(
                                     "{} · {preview}",
                                     i18n::text(
                                         self.language,
@@ -581,41 +555,47 @@ impl AcpView {
                                         }
                                     )
                                     .replace("{count}", &count.to_string())
-                                )),
+                                ),
+                            )
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(rgba(theme.fg1)),
                         )
                         .child(
-                            semantic_button("acp-queue-send-now", send_now_label, theme)
-                                .px_2()
-                                .py_1()
-                                .on_click(
-                                    cx.listener(|this, _event, _window, cx| this.send_next_now(cx)),
-                                )
-                                .child(send_now_label),
+                            primary_button(
+                                "acp-queue-send-now",
+                                send_now_label,
+                                theme,
+                                theme.accent,
+                            )
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| this.send_next_now(cx)),
+                            )
+                            .child(send_now_label),
                         )
                         .child(
-                            semantic_button(
+                            icon_button(
                                 "acp-queue-remove",
                                 i18n::text(self.language, "acp.queue_remove"),
                                 theme,
                             )
-                            .px_2()
-                            .py_1()
                             .on_click(
                                 cx.listener(|this, _event, _window, cx| {
                                     this.remove_first_queued(cx)
                                 }),
                             )
-                            .child("×"),
+                            .child(panel_icon(CLOSE_ICON, theme.fg2)),
                         )
                         .when(count > 1, |queue| {
                             queue.child(
-                                semantic_button(
+                                secondary_button(
                                     "acp-queue-clear",
                                     i18n::text(self.language, "acp.queue_clear"),
                                     theme,
+                                    theme.red,
                                 )
-                                .px_2()
-                                .py_1()
                                 .on_click(
                                     cx.listener(|this, _event, _window, cx| this.clear_queue(cx)),
                                 )
@@ -632,24 +612,31 @@ impl AcpView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .px_3()
+                            .pl(ui_px(BAR_PAD))
+                            .pr(ui_px(CARD_MARGIN))
                             .py_2()
-                            .border_t_1()
+                            .border_l_2()
                             .border_color(rgba(theme.yellow))
+                            .bg(rgba(Theme::with_alpha(theme.yellow, TINT_ALPHA)))
                             .child(
-                                div().flex_1().text_size(ui_px(10.)).child(i18n::text(
-                                    self.language,
-                                    "acp.checkpoint_confirm_copy",
-                                )),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(ui_px(BODY_SIZE))
+                                    .line_height(ui_px(BODY_LINE))
+                                    .text_color(rgba(theme.fg0))
+                                    .child(i18n::text(
+                                        self.language,
+                                        "acp.checkpoint_confirm_copy",
+                                    )),
                             )
                             .child(
-                                semantic_button(
+                                secondary_button(
                                     "acp-restore-checkpoint-cancel",
                                     i18n::text(self.language, "common.cancel"),
                                     theme,
+                                    theme.fg1,
                                 )
-                                .px_2()
-                                .py_1()
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.checkpoint_restore_confirm = false;
                                     cx.notify();
@@ -657,15 +644,12 @@ impl AcpView {
                                 .child(i18n::text(self.language, "common.cancel")),
                             )
                             .child(
-                                semantic_button(
+                                primary_button(
                                     "acp-restore-checkpoint-confirm",
                                     i18n::text(self.language, "acp.checkpoint_confirm"),
                                     theme,
+                                    theme.yellow,
                                 )
-                                .px_2()
-                                .py_1()
-                                .border_1()
-                                .border_color(rgba(theme.yellow))
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.restore_last_checkpoint(cx)
                                 }))
@@ -828,9 +812,79 @@ impl AcpView {
     }
 }
 
+/// Selection lives in the marker; the outer border remains a focus indicator.
+fn choice_button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    theme: Theme,
+    selected: bool,
+    multiple: bool,
+) -> gpui::Stateful<gpui::Div> {
+    button(id, label, theme)
+        .role(if multiple {
+            gpui::Role::CheckBox
+        } else {
+            gpui::Role::RadioButton
+        })
+        .aria_toggled(if selected {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .border_color(rgba(theme.line))
+        .text_color(rgba(theme.fg0))
+        .child(
+            div()
+                .flex_none()
+                .size(ui_px(14.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_1()
+                .border_color(rgba(if selected { theme.accent } else { theme.fg2 }))
+                .text_size(ui_px(11.))
+                .line_height(ui_px(12.))
+                .text_color(rgba(theme.fg0))
+                .child(if selected { "✓" } else { "" }),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choices_expose_radio_or_checkbox_and_explicit_toggled_state() {
+        use gpui::Element;
+        let theme = Theme::for_mode(crate::theme::ThemeMode::Light);
+        for multiple in [false, true] {
+            for selected in [false, true] {
+                let choice = choice_button("choice", "Choice", theme, selected, multiple);
+                let role = if multiple {
+                    gpui::Role::CheckBox
+                } else {
+                    gpui::Role::RadioButton
+                };
+                assert_eq!(choice.a11y_role(), Some(role));
+                let mut node = gpui::accesskit::Node::new(role);
+                choice.write_a11y_info(&mut node);
+                assert_eq!(
+                    node.toggled(),
+                    Some(if selected {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                );
+                assert_eq!(node.label(), Some("Choice"));
+            }
+        }
+    }
 
     fn request(id: &str) -> ElicitationRequest {
         ElicitationRequest {

@@ -655,7 +655,7 @@ impl Render for TextField {
                     // 普通字符不在此处自插：字符插入统一走平台层
                     // key_char → replace_text_in_range 路径（前提是事件
                     // 未被祖先 stop_propagation，见 app.rs 根节点监听器）。
-                    // 若在此消费字符，会破坏 palette 的单键快捷键（h/v/x/m）。
+                    // 祖先导航处理器也应放行普通字符，确保输入框可以正常搜索。
                     _ => false,
                 };
 

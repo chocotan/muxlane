@@ -3,7 +3,6 @@ use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SelectorTarget {
-    Sessions,
     Mode,
     More,
     Config(String),
@@ -16,7 +15,6 @@ impl SelectorTarget {
 
     pub(crate) fn matches_id(&self, id: &str) -> bool {
         match self {
-            Self::Sessions => id == "sessions",
             Self::Mode => id == "mode",
             Self::More => id == "more",
             Self::Config(config_id) => config_id == id,
@@ -270,6 +268,6 @@ mod tests {
     fn selector_config_ids_do_not_collide_with_reserved_targets() {
         assert_ne!(SelectorTarget::config("mode"), SelectorTarget::Mode);
         assert_ne!(SelectorTarget::config("more"), SelectorTarget::More);
-        assert_ne!(SelectorTarget::config("sessions"), SelectorTarget::Sessions);
+        assert_ne!(SelectorTarget::config("sessions"), SelectorTarget::More);
     }
 }

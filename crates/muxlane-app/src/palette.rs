@@ -11,6 +11,16 @@ use gpui::{
 };
 use muxlane_core::SplitAxis;
 
+fn availability_key(availability: &muxlane_acp::Availability) -> &'static str {
+    match availability {
+        muxlane_acp::Availability::Found(_) => "agents.found",
+        muxlane_acp::Availability::Missing => "agents.missing",
+        muxlane_acp::Availability::Unmapped => "agents.unmapped",
+        muxlane_acp::Availability::Unsupported => "agents.unsupported",
+        muxlane_acp::Availability::Invalid(_) => "agents.invalid",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NewSessionTarget {
     Local(muxlane_core::model::ProjectId),
@@ -47,11 +57,6 @@ enum PaletteItem {
         key: ProjectKey,
         label: String,
         path: String,
-    },
-    ArchivedThread {
-        id: muxlane_core::model::AgentId,
-        label: String,
-        project: String,
     },
     Preset {
         preset: muxlane_core::AgentPreset,
@@ -148,24 +153,66 @@ impl MuxlaneApp {
             .collect()
     }
 
-    fn palette_acp_profiles(&self, cx: &Context<Self>) -> Vec<muxlane_acp::Profile> {
+    fn palette_acp_profiles(&self, cx: &Context<Self>) -> Vec<muxlane_acp::AgentEntry> {
         let query = self.palette_input.read(cx).text().trim().to_lowercase();
-        [
-            muxlane_acp::Profile::Claude,
-            muxlane_acp::Profile::Codex,
-            muxlane_acp::Profile::Pi,
-        ]
-        .into_iter()
-        .filter(|profile| {
-            query.is_empty()
-                || format!("{} {}", profile.label(), profile.command())
-                    .to_lowercase()
-                    .contains(&query)
-        })
-        .collect()
+        self.acp_entries
+            .iter()
+            .filter(|entry| {
+                query.is_empty()
+                    || format!("{} {}", entry.id, entry.label)
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Both pointer and keyboard activation, and non-palette creation, use this gate.
+    pub(crate) fn prepare_acp_creation(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        if self.acp_detecting {
+            return false;
+        }
+        let result = self.acp_launch_profile(id);
+        if result.is_ok() {
+            return true;
+        }
+        if let Some(error) = &self.acp_registry_error {
+            self.notifications.update(cx, |center, cx| center.show_error(error.clone(), cx));
+            self.palette_open = true;
+            cx.notify();
+            return false;
+        }
+        if let Some(entry) = self.acp_entries.iter_mut().find(|entry| entry.id == id) {
+            if let Some(profile) = &entry.profile {
+                entry.availability = match muxlane_acp::effective_definition(profile) {
+                    Ok(definition) => muxlane_acp::LocalProbe::current().definition(&definition),
+                    Err(error) => muxlane_acp::Availability::Invalid(format!("{error:#}")),
+                };
+            }
+        }
+        self.acp_install_detail = Some(id.into());
+        self.palette_open = true;
+        cx.notify();
+        false
+    }
+
+    fn activate_acp_entry(
+        &mut self,
+        entry: muxlane_acp::AgentEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.prepare_acp_creation(&entry.id, cx) {
+            return;
+        }
+        if let Some(profile) = self.acp_registry.resolve(&entry.id) {
+            self.acp_install_detail = None;
+            self.spawn_acp_view(profile, window, cx);
+        }
     }
 
     pub(crate) fn select_palette_project(&mut self, key: ProjectKey, cx: &mut Context<Self>) {
+        self.acp_install_detail = None;
         self.palette_project_index = self
             .available_project_keys()
             .iter()
@@ -253,14 +300,7 @@ impl MuxlaneApp {
         }
 
         if self.new_session_target.is_none() {
-            for record in self.acp_records.values().filter(|record| record.archived) {
-                items.push(PaletteItem::ArchivedThread {
-                    id: record.metadata.ui_id.clone(),
-                    label: record.metadata.title.clone(),
-                    project: record.metadata.project_id.clone(),
-                });
-            }
-            // Global command palette: archived threads, presets, and actions.
+            // Global command palette: presets and actions.
             let project_path = self.palette_project_path();
             for preset in self.presets.clone().into_iter().filter(|p| {
                 project_path
@@ -274,26 +314,26 @@ impl MuxlaneApp {
             items.push(PaletteItem::Action {
                 id: "cmd-split-h",
                 label: i18n::text(self.language, "palette.horizontal_split"),
-                shortcut: Some("h"),
+                shortcut: None,
                 icon: SPLIT_HORIZONTAL_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-split-v",
                 label: i18n::text(self.language, "palette.vertical_split"),
-                shortcut: Some("v"),
+                shortcut: None,
                 icon: SPLIT_VERTICAL_ICON,
             });
             items.push(PaletteItem::Action {
                 id: "cmd-max",
                 label: i18n::text(self.language, "palette.maximize"),
-                shortcut: Some("m"),
+                shortcut: None,
                 icon: MAXIMIZE_ICON,
             });
             if self.pane_tree.leaf_count() > 1 {
                 items.push(PaletteItem::Action {
                     id: "cmd-close-pane",
                     label: i18n::text(self.language, "palette.close_split"),
-                    shortcut: Some("x"),
+                    shortcut: None,
                     icon: CLOSE_ICON,
                 });
             }
@@ -330,11 +370,6 @@ impl MuxlaneApp {
                     PaletteItem::Project { label, path, .. } => {
                         format!("{label} {path}").to_lowercase().contains(&query)
                     }
-                    PaletteItem::ArchivedThread { label, project, .. } => {
-                        format!("{label} {project} archived")
-                            .to_lowercase()
-                            .contains(&query)
-                    }
                     PaletteItem::Preset { preset } => {
                         let text = i18n::text(self.language, "palette.new")
                             .replace("{name}", &format!("{} {}", preset.label, preset.program))
@@ -358,12 +393,6 @@ impl MuxlaneApp {
                 self.select_palette_project(key, cx);
                 self.palette_open = true;
                 return;
-            }
-            PaletteItem::ArchivedThread { id, .. } => {
-                self.palette_open = false;
-                self.new_session_target = None;
-                self.palette_project = None;
-                self.unarchive_acp_session(&id, window, cx);
             }
             PaletteItem::Preset { preset } => {
                 self.palette_open = false;
@@ -418,34 +447,6 @@ impl MuxlaneApp {
             return self.handle_new_session_palette_key(ks, window, cx);
         }
         let items = self.compute_palette_items(cx);
-        // 无查询时支持 Action 快捷键（与列表里展示的 [h]/[v]/[x]/[m] 一致）
-        let query = self.palette_input.read(cx).text().trim().to_lowercase();
-        if query.is_empty() {
-            let pane = self.active_pane.clone();
-            match ks.key.as_str() {
-                "h" => {
-                    self.palette_open = false;
-                    self.split_pane(&pane, SplitAxis::Horizontal, window, cx);
-                    return true;
-                }
-                "v" => {
-                    self.palette_open = false;
-                    self.split_pane(&pane, SplitAxis::Vertical, window, cx);
-                    return true;
-                }
-                "x" => {
-                    self.palette_open = false;
-                    self.close_split_pane(&pane, window, cx);
-                    return true;
-                }
-                "m" => {
-                    self.palette_open = false;
-                    self.toggle_maximize(&pane, cx);
-                    return true;
-                }
-                _ => {}
-            }
-        }
         match ks.key.as_str() {
             "up" => {
                 self.palette_index = self.palette_index.saturating_sub(1);
@@ -489,6 +490,29 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.session_creation_mode == SessionCreationMode::Ui {
+            if let Some(id) = self.acp_install_detail.clone() {
+                match ks.key.as_str() {
+                    "escape" | "up" | "down" => {
+                        self.acp_install_detail = None;
+                        cx.notify();
+                        return true;
+                    }
+                    "enter" => {
+                        if let Some(entry) = self
+                            .acp_entries
+                            .iter()
+                            .find(|entry| entry.id == id)
+                            .cloned()
+                        {
+                            self.activate_acp_entry(entry, window, cx);
+                        }
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
         let projects = self.palette_projects(cx);
         let presets = self.palette_presets(cx);
         let profiles = self.palette_acp_profiles(cx);
@@ -567,9 +591,8 @@ impl MuxlaneApp {
                 }
                 PaletteColumn::Presets => match self.session_creation_mode {
                     SessionCreationMode::Ui => {
-                        if let Some(profile) = profiles.get(self.palette_index).copied() {
-                            self.palette_open = false;
-                            self.spawn_acp_view(profile, window, cx);
+                        if let Some(profile) = profiles.get(self.palette_index).cloned() {
+                            self.activate_acp_entry(profile, window, cx);
                             cx.notify();
                             return true;
                         }
@@ -696,31 +719,6 @@ impl MuxlaneApp {
                                     .child(path),
                             )
                     }
-                    PaletteItem::ArchivedThread { label, project, .. } => div()
-                        .id(gpui::ElementId::Name(
-                            format!("pal-archived-{index}").into(),
-                        ))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .py_2()
-                        .text_size(ui_px(12.))
-                        .text_color(rgba(theme.fg0))
-                        .when(is_selected, |el| el.bg(rgba(theme.bg2)))
-                        .hover(|style| style.bg(rgba(theme.bg2)))
-                        .on_click(cx.listener(move |this, _event, window, cx| {
-                            this.execute_palette_item(item_for_click.clone(), window, cx)
-                        }))
-                        .child(panel_icon(CONNECT_ICON, theme.fg2))
-                        .child(label)
-                        .child(
-                            div()
-                                .ml_auto()
-                                .text_size(ui_px(10.))
-                                .text_color(rgba(theme.fg2))
-                                .child(project),
-                        ),
                     PaletteItem::Preset { preset } => div()
                         .id(gpui::ElementId::Name(
                             format!("pal-preset-{}", preset.id).into(),
@@ -839,6 +837,162 @@ impl MuxlaneApp {
             .into_any_element()
     }
 
+    fn render_agent_discovery_actions(
+        &self,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let refresh = i18n::text(
+            self.language,
+            if self.acp_catalog_loading {
+                "agents.refreshing"
+            } else {
+                "agents.refresh"
+            },
+        );
+        let detect = i18n::text(
+            self.language,
+            if self.acp_detecting {
+                "agents.detecting"
+            } else {
+                "agents.detect"
+            },
+        );
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .p_2()
+            .text_size(ui_px(11.))
+            .child(
+                semantic_button("acp-catalog-refresh", refresh, theme)
+                    .px_2()
+                    .py_1()
+                    .when(!self.acp_catalog_loading, |button| {
+                        button.on_click(cx.listener(|this, _, _, cx| this.refresh_acp_catalog(cx)))
+                    })
+                    .child(panel_icon(CONNECT_ICON, theme.fg2))
+                    .child(refresh),
+            )
+            .child(
+                semantic_button("acp-local-detect", detect, theme)
+                    .px_2()
+                    .py_1()
+                    .when(!self.acp_detecting, |button| {
+                        button.on_click(cx.listener(|this, _, _, cx| this.detect_acp_agents(cx)))
+                    })
+                    .child(panel_icon(FOLDER_ICON, theme.fg2))
+                    .child(detect),
+            )
+            .into_any_element()
+    }
+
+    fn render_agent_install_detail(
+        &self,
+        entry: muxlane_acp::AgentEntry,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let back = i18n::text(self.language, "agents.back");
+        let mut detail = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap_2()
+            .p_3()
+            .text_size(ui_px(11.))
+            .text_color(rgba(theme.fg0))
+            .child(
+                semantic_button("acp-install-back", back, theme)
+                    .px_2()
+                    .py_1()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.acp_install_detail = None;
+                        cx.notify();
+                    }))
+                    .child(panel_icon(CLOSE_ICON, theme.fg2))
+                    .child(back),
+            )
+            .child(entry.label.clone())
+            .child(i18n::text(
+                self.language,
+                availability_key(&entry.availability),
+            ));
+        if let muxlane_acp::Availability::Found(path) = &entry.availability {
+            detail = detail
+                .child(
+                    div()
+                        .id("acp-found-path")
+                        .overflow_x_scroll()
+                        .child(path.display().to_string()),
+                )
+                .child(i18n::text(self.language, "agents.found_note"));
+            let start = i18n::text(self.language, "agents.create");
+            let selected = entry.clone();
+            detail = detail.child(
+                semantic_button("acp-install-create", start, theme)
+                    .px_2()
+                    .py_1()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.activate_acp_entry(selected.clone(), window, cx)
+                    }))
+                    .child(panel_icon(PLUS_ICON, theme.fg2))
+                    .child(start),
+            );
+        }
+        if let muxlane_acp::Availability::Invalid(error) = &entry.availability {
+            detail = detail.child(error.clone());
+        }
+        if let Some(command) = entry.install.filter(|_| !entry.can_start()) {
+            detail = detail
+                .child(i18n::text(self.language, "agents.manual_install"))
+                .child(
+                    div()
+                        .id("acp-install-command")
+                        .w_full()
+                        .overflow_x_scroll()
+                        .child(command),
+                )
+                .child(
+                    semantic_button(
+                        "acp-copy-install",
+                        i18n::text(self.language, "agents.copy"),
+                        theme,
+                    )
+                    .px_2()
+                    .py_1()
+                    .when(cfg!(test), |button| {
+                        button.debug_selector(|| "acp-copy-install".into())
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.into()))
+                    }))
+                    .child(panel_icon(COPY_ICON, theme.fg2))
+                    .child(i18n::text(self.language, "agents.copy")),
+                );
+        } else if !entry.can_start() {
+            detail = detail.child(i18n::text(self.language, "agents.configure"));
+        }
+        if entry.user_configured {
+            detail = detail.child(i18n::text(self.language, "agents.custom_warning"));
+        }
+        if let Some(url) = entry.docs {
+            detail = detail.child(
+                semantic_button(
+                    "acp-install-docs",
+                    i18n::text(self.language, "agents.docs"),
+                    theme,
+                )
+                .px_2()
+                .py_1()
+                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+                .child(panel_icon(CONNECT_ICON, theme.fg2))
+                .child(i18n::text(self.language, "agents.docs")),
+            );
+        }
+        detail.into_any_element()
+    }
+
     /// 新建会话面板：左栏项目、右栏 Agent 类型，不再是混合列表。
     fn render_new_session_palette(
         &mut self,
@@ -923,6 +1077,7 @@ impl MuxlaneApp {
             .flex()
             .flex_col()
             .flex_1()
+            .min_w_0()
             .max_h(ui_px(324.))
             .overflow_y_scroll()
             .track_scroll(&self.palette_scroll);
@@ -942,15 +1097,71 @@ impl MuxlaneApp {
         }
         match mode {
             SessionCreationMode::Ui => {
-                for (index, profile) in profiles.into_iter().enumerate() {
+                preset_list = preset_list.child(self.render_agent_discovery_actions(theme, cx));
+                if let Some(error) = &self.acp_catalog_error {
+                    preset_list = preset_list.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_size(ui_px(11.))
+                            .text_color(rgba(theme.red))
+                            .child(format!(
+                                "{}: {error}",
+                                i18n::text(self.language, "agents.catalog_error")
+                            )),
+                    );
+                }
+                if let Some(error) = &self.acp_registry_error {
+                    preset_list = preset_list.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_size(ui_px(11.))
+                            .text_color(rgba(theme.red))
+                            .child(error.clone()),
+                    );
+                }
+                let detail = self
+                    .acp_install_detail
+                    .as_ref()
+                    .and_then(|id| self.acp_entries.iter().find(|entry| &entry.id == id))
+                    .cloned();
+                if let Some(detail) = detail {
+                    preset_list =
+                        preset_list.child(self.render_agent_install_detail(detail, theme, cx));
+                }
+                for (index, profile) in profiles
+                    .into_iter()
+                    .enumerate()
+                    .filter(|_| self.acp_install_detail.is_none())
+                {
                     let is_focused =
                         focused_column == PaletteColumn::Presets && index == preset_index;
-                    let label = format!("{} UI", profile.label());
+                    let label = format!("{} UI", profile.label);
+                    let command = format!(
+                        "{}{}",
+                        i18n::text(
+                            self.language,
+                            if self.acp_detecting {
+                                "agents.detecting"
+                            } else {
+                                availability_key(&profile.availability)
+                            }
+                        ),
+                        if profile.user_configured {
+                            i18n::text(self.language, "agents.user_command")
+                        } else {
+                            ""
+                        }
+                    );
                     preset_list = preset_list.child(
                         div()
                             .id(gpui::ElementId::Name(
-                                format!("pal-acp-{}", profile.id()).into(),
+                                format!("pal-acp-{}", profile.id).into(),
                             ))
+                            .when(cfg!(test), |row| {
+                                row.debug_selector(|| "acp-agent-row".into())
+                            })
                             .flex()
                             .items_center()
                             .gap_2()
@@ -962,18 +1173,25 @@ impl MuxlaneApp {
                             .hover(|style| style.bg(rgba(theme.bg2)))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.palette_open = false;
-                                this.spawn_acp_view(profile, window, cx);
+                                this.activate_acp_entry(profile.clone(), window, cx);
                                 cx.notify();
                             }))
                             .child(panel_icon(CONNECT_ICON, theme.accent))
-                            .child(label)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(label),
+                            )
                             .child(
                                 div()
                                     .ml_auto()
+                                    .max_w(ui_px(120.))
                                     .text_size(ui_px(10.))
                                     .text_color(rgba(theme.fg2))
-                                    .child(profile.command()),
+                                    .child(command),
                             ),
                     );
                 }
@@ -1057,6 +1275,7 @@ impl MuxlaneApp {
                 )
                 .px_3()
                 .py_1()
+                .border_0()
                 .border_l_1()
                 .border_color(rgba(theme.line))
                 .text_size(ui_px(11.))
@@ -1147,6 +1366,130 @@ impl MuxlaneApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_agent_enter_click_and_copy_never_create_or_execute() {
+        use gpui::{AppContext, TestAppContext, VisualTestContext};
+        use std::sync::Arc;
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let state = muxlane_server::ServerState::new(muxlane_core::model::MachineInfo {
+            machine_id: "catalog-test".into(),
+            name: "test".into(),
+            os: "test".into(),
+            version: "test".into(),
+        });
+        let mut snapshot = state.snapshot();
+        snapshot.projects.push(muxlane_core::model::Project {
+            id: "project".into(),
+            name: "Project".into(),
+            path: directory.path().into(),
+            branch: None,
+            agents: vec![],
+        });
+        let server = muxlane_server::MuxlaneServer::new_with_runtime(
+            directory.path().join("unused.sock"),
+            Arc::new(tokio::sync::RwLock::new(state)),
+            muxlane_server::DirtyFlag::new(),
+            runtime.handle().clone(),
+        );
+        let missing = muxlane_acp::AgentDefinition {
+            id: "missing".into(),
+            label: "Missing Agent".into(),
+            command: directory
+                .path()
+                .join("must-not-exist")
+                .to_str()
+                .unwrap()
+                .into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        let store = directory.path().join("state.json");
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(move |window, cx| {
+            let mut app = MuxlaneApp::new(
+                window,
+                cx,
+                server,
+                snapshot,
+                vec![],
+                Default::default(),
+                store,
+            );
+            app.acp_registry = muxlane_acp::AgentRegistry::from_definitions(vec![missing]).unwrap();
+            app.acp_entries = app
+                .acp_registry
+                .entries(None, &muxlane_acp::LocalProbe::new(""))
+                .into_iter()
+                .filter(|entry| entry.id == "missing")
+                .collect();
+            // A fixed local recipe command, never a remote distribution value.
+            app.acp_entries[0].install = Some("npm install -g opencode-ai");
+            app.acp_entries[0].user_configured = false;
+            app.new_session_target = Some(NewSessionTarget::Local("project".into()));
+            app.session_creation_mode = SessionCreationMode::Ui;
+            app.palette_open = true;
+            app
+        });
+        let view = window.root(&mut cx).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            view.update(cx, |app, cx| {
+                assert!(app.handle_new_session_palette_key(
+                    &gpui::Keystroke::parse("enter").unwrap(),
+                    window,
+                    cx
+                ));
+                assert_eq!(app.acp_install_detail.as_deref(), Some("missing"));
+                assert!(app.acp_views.is_empty());
+                assert!(app.acp_records.is_empty());
+                assert!(app.new_session_target.is_some());
+                app.acp_install_detail = None;
+                cx.notify();
+            });
+        })
+        .unwrap();
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.simulate_next_frame(cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        draw(&mut cx);
+        {
+            let mut visual = VisualTestContext::from_window(window.into(), &mut cx);
+            let bounds = visual.debug_bounds("acp-agent-row").unwrap();
+            visual.simulate_click(bounds.center(), Default::default());
+        }
+        draw(&mut cx);
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert_eq!(app.acp_install_detail.as_deref(), Some("missing"));
+            assert!(app.acp_views.is_empty());
+            assert!(app.acp_records.is_empty());
+        });
+        {
+            let mut visual = VisualTestContext::from_window(window.into(), &mut cx);
+            let bounds = visual.debug_bounds("acp-copy-install").unwrap();
+            visual.simulate_click(bounds.center(), Default::default());
+        }
+        draw(&mut cx);
+        cx.update(|cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "npm install -g opencode-ai"
+            );
+            assert!(view.read(cx).acp_views.is_empty());
+            assert!(view.read(cx).acp_records.is_empty());
+        });
+        assert!(!directory.path().join("must-not-exist").exists());
+    }
 
     #[test]
     fn all_targets_default_to_terminal_sessions() {

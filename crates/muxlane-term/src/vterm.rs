@@ -19,7 +19,7 @@ pub struct VTerm {
 struct VTermInner {
     term: Term<ClipboardBridge>,
     parser: Processor,
-    cached: Option<RenderSnapshot>,
+    cached: Option<Arc<RenderSnapshot>>,
     damage: ContentDamage,
 }
 
@@ -181,11 +181,11 @@ impl VTerm {
     pub fn text_lines(&self) -> Vec<String> {
         let snap = self.render_snapshot();
         snap.rows
-            .into_iter()
+            .iter()
             .map(|r| {
                 r.runs
-                    .into_iter()
-                    .map(|x| x.text)
+                    .iter()
+                    .map(|x| x.text.as_str())
                     .collect::<String>()
                     .trim_end()
                     .to_string()
@@ -194,17 +194,18 @@ impl VTerm {
     }
 
     /// 真彩色渲染快照：相邻同样式 cell 合并为 run；光标独立返回。
-    pub fn render_snapshot(&self) -> RenderSnapshot {
+    /// 返回 Arc：damage 为 None 时调用方 O(1) 共享缓存快照，不再整帧深拷贝。
+    pub fn render_snapshot(&self) -> Arc<RenderSnapshot> {
         let mut guard = match self.lock_inner() {
             Some(guard) => guard,
             None => {
-                return RenderSnapshot {
+                return Arc::new(RenderSnapshot {
                     rows: vec![],
                     cursor: None,
                     logical_cursor: None,
                     cols: 0,
                     lines: 0,
-                }
+                })
             }
         };
         let damage = std::mem::replace(&mut guard.damage, ContentDamage::None);
@@ -215,11 +216,13 @@ impl VTerm {
             });
 
         let mut snap = if need_full {
-            build_snapshot(&guard.term)
+            Arc::new(build_snapshot(&guard.term))
         } else {
             guard.cached.take().unwrap()
         };
         if let ContentDamage::Partial(rows) = damage {
+            // copy-on-write：无其他持有者时原地更新，有持有者（渲染中）时克隆一份再改。
+            let snap = Arc::make_mut(&mut snap);
             for row in rows {
                 if row < snap.rows.len() {
                     snap.rows[row] = build_row(&guard.term, row);
@@ -228,7 +231,7 @@ impl VTerm {
             snap.cursor = cursor_of(&guard.term);
             snap.logical_cursor = logical_cursor_of(&guard.term);
         }
-        guard.cached = Some(snap.clone());
+        guard.cached = Some(Arc::clone(&snap));
         snap
     }
 
@@ -492,6 +495,11 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
     let buffer_line = visual as i32 - grid.display_offset() as i32;
     let default_fg = 0x2a2e38ff;
     let default_bg = 0xffffffff;
+    // 选区范围与 cell 无关：每行只解析一次，不再逐 cell 调 to_range。
+    let selection_range = term
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.to_range(term));
     let mut runs: Vec<RenderRun> = vec![];
     let mut current: Option<RenderRun> = None;
     for col in 0..columns {
@@ -515,13 +523,9 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
             italic: cell.flags.contains(Flags::ITALIC),
             underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
             dim: cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD),
-            selected: term
-                .selection
-                .as_ref()
-                .and_then(|selection| selection.to_range(term))
-                .is_some_and(|selection| {
-                    selection.contains(Point::new(Line(buffer_line), Column(col)))
-                }),
+            selected: selection_range.as_ref().is_some_and(|selection| {
+                selection.contains(Point::new(Line(buffer_line), Column(col)))
+            }),
         };
         let ch = if cell.flags.contains(Flags::HIDDEN) {
             ' '

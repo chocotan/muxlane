@@ -93,7 +93,7 @@ impl MuxlaneServer {
             Ok(st) => st.events.clone(),
             Err(_) => state.blocking_read().events.clone(),
         };
-        Arc::new(MuxlaneServer {
+        let server = Arc::new(MuxlaneServer {
             runtime,
             state,
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -104,7 +104,12 @@ impl MuxlaneServer {
             auth,
             lifecycle: Arc::new(Mutex::new(())),
             persistence_path: StdRwLock::new(None),
-        })
+        });
+        // 转发任务退出时自行摘除条目需要注册表自身的 Weak。
+        if let Ok(mut subs) = server.subs.try_lock() {
+            subs.bind_self(&server.subs);
+        }
+        server
     }
 
     pub fn hook_token(&self, agent: &muxlane_core::model::AgentId) -> String {
@@ -170,16 +175,6 @@ impl MuxlaneServer {
             std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))?;
         }
         tracing::info!(path = %self.socket_path.display(), "muxlane server listening");
-
-        {
-            let subs = Arc::clone(&self.subs);
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(4)).await;
-                    subs.lock().await.pump_once().await;
-                }
-            });
-        }
 
         loop {
             let (stream, _addr) = listener.accept().await?;

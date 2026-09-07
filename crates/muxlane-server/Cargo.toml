@@ -10,6 +10,7 @@ muxlane-store = { path = "../muxlane-store" }
 tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
+futures = "0.3"
 ulid.workspace = true
 tracing.workspace = true
 bytes = "1"

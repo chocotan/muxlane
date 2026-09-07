@@ -38,7 +38,7 @@ fn invalidate_cached_geometry(dims: &mut (u16, u16), bounds: &mut Option<Bounds<
     *bounds = None;
 }
 
-fn refresh_snapshot_after_resize(vterm: &VTerm, snapshot: &mut RenderSnapshot) {
+fn refresh_snapshot_after_resize(vterm: &VTerm, snapshot: &mut Arc<RenderSnapshot>) {
     *snapshot = vterm.render_snapshot();
 }
 
@@ -120,6 +120,114 @@ struct TerminalPaintState {
     runs: Vec<PaintRun>,
     visible_cursor: Option<Bounds<Pixels>>,
     logical_cursor: Option<Bounds<Pixels>>,
+}
+
+/// 行级 shaping 缓存：shape_line (harfbuzz) 是每帧最贵的一步。
+/// 只缓存影响 shaping 的输入；bg/selected 在 paint 阶段以 quad 绘制，不进 key。
+/// 注：muxlane_term 未导出 RenderRun，比较/构进一律在使用点内联（靠类型推断）。
+struct CachedRunKey {
+    text: String,
+    start_col: usize,
+    cells: usize,
+    fg: u32,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    dim: bool,
+}
+
+struct CachedShapedRow {
+    keys: Vec<CachedRunKey>,
+    /// 与 keys 一一对应；ShapedLine clone 廉价（Arc<LineLayout> + SharedString）。
+    shaped: Vec<ShapedLine>,
+}
+
+/// (font_family, ui_scale_percent, window scale_factor bits) —— 任何一项变化都会
+/// 改变 shaping 结果，整个缓存重建。主题变化由 set_theme 显式 clear。
+#[derive(Default)]
+struct ShapeCache {
+    config_key: Option<(String, u32, u32)>,
+    base_font: Option<Font>,
+    cell_width: Option<Pixels>,
+    line_height: Option<Pixels>,
+    base_half: Option<Pixels>,
+    rows: Vec<Option<CachedShapedRow>>,
+}
+
+impl ShapeCache {
+    fn clear(&mut self) {
+        self.config_key = None;
+        self.base_font = None;
+        self.cell_width = None;
+        self.line_height = None;
+        self.base_half = None;
+        self.rows.clear();
+    }
+
+    /// 返回 (base_font, cell_width, line_height, base_half)；config 变化时重建度量。
+    fn metrics(
+        &mut self,
+        font_family: &str,
+        font_size: Pixels,
+        scale_factor: f32,
+        text_system: &gpui::WindowTextSystem,
+        theme: Theme,
+    ) -> (Font, Pixels, Pixels, Pixels) {
+        let key = (
+            font_family.to_string(),
+            crate::ui_scale::percent(),
+            scale_factor.to_bits(),
+        );
+        if self.config_key.as_ref() != Some(&key) {
+            self.clear();
+            self.config_key = Some(key);
+        }
+        if let (Some(base_font), Some(cell_width), Some(line_height), Some(base_half)) = (
+            self.base_font.clone(),
+            self.cell_width,
+            self.line_height,
+            self.base_half,
+        ) {
+            return (base_font, cell_width, line_height, base_half);
+        }
+        let base_font = Font {
+            family: font_family.to_string().into(),
+            features: FontFeatures::disable_ligatures(),
+            fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "DejaVu Sans Mono".into(),
+                "Noto Sans Mono".into(),
+                "Noto Sans CJK SC".into(),
+                "Liberation Mono".into(),
+            ])),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        };
+        let font_id = text_system.resolve_font(&base_font);
+        let cell_width = text_system
+            .advance(font_id, font_size, 'm')
+            .map(|advance| advance.width)
+            .unwrap_or(ui_px(FALLBACK_CELL_W));
+        let line_height = font_size * 1.3;
+        let base_shape = text_system.shape_line(
+            "m".into(),
+            font_size,
+            &[TextRun {
+                len: 1,
+                font: base_font.clone(),
+                color: rgba(theme.fg0).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            Some(cell_width),
+        );
+        let base_half = (base_shape.ascent - base_shape.descent) * 0.5;
+        self.base_font = Some(base_font.clone());
+        self.cell_width = Some(cell_width);
+        self.line_height = Some(line_height);
+        self.base_half = Some(base_half);
+        (base_font, cell_width, line_height, base_half)
+    }
 }
 
 #[derive(Debug)]
@@ -280,6 +388,9 @@ pub struct TermView {
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
     focus_subscriptions: Option<(Subscription, Subscription)>,
     osc52_clipboard_enabled: Arc<AtomicBool>,
+    shape_cache: Arc<std::sync::Mutex<ShapeCache>>,
+    pending_selection: Option<(i32, usize, bool)>,
+    selection_flush_scheduled: bool,
     _drain: Task<()>,
     _clipboard: Task<()>,
 }
@@ -386,6 +497,12 @@ impl TermView {
         let vterm_for_task = vterm.clone();
         let session_for_task = Arc::clone(&session);
         let drain = cx.spawn(async move |view, cx| {
+            // 上次 feed 时间；初始化为很久以前，保证第一个 chunk 立即上屏。
+            let mut last_feed = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(60))
+                .unwrap_or_else(std::time::Instant::now);
+            // 持续刷屏计数：见下方输出调度注释。
+            let mut saturated_streak = 0u32;
             loop {
                 let first = match rx.recv().await {
                     Ok(b) => b,
@@ -393,13 +510,14 @@ impl TermView {
                         let (snapshot, synced_rx) = session_for_task.subscribe();
                         rx = synced_rx;
                         let vterm = vterm_for_task.clone();
-                        let stop = view
-                            .update(cx, move |_view, cx| {
+                        cx.background_executor()
+                            .spawn(async move {
                                 vterm.feed(b"\x1bc");
                                 vterm.feed(&snapshot);
-                                cx.notify();
                             })
-                            .is_err();
+                            .await;
+                        last_feed = std::time::Instant::now();
+                        let stop = view.update(cx, move |_view, cx| cx.notify()).is_err();
                         if stop {
                             break;
                         }
@@ -407,20 +525,34 @@ impl TermView {
                     }
                     Err(_) => break,
                 };
-                // 输出调度：交互 8ms / 聚焦 stream 33ms / 后台 100ms。
-                let delay = if session_for_task.interaction_recent() {
-                    std::time::Duration::from_millis(8)
+                // 输出调度：首个 chunk 立即上屏（0ms）；窗口只约束同批后续
+                // chunk 的合并节奏（交互 4ms / 聚焦 16ms / 后台 100ms）。
+                // 持续刷屏（每批都收集到多个 chunk）时聚焦档自适应降到 30fps：
+                // 滚动流人眼无感，但渲染 CPU 近似减半；按键回显走交互档不受影响。
+                let window = if session_for_task.interaction_recent() {
+                    std::time::Duration::from_millis(4)
                 } else if session_for_task.is_focused() {
-                    std::time::Duration::from_millis(33)
+                    if saturated_streak >= 4 {
+                        std::time::Duration::from_millis(33)
+                    } else {
+                        std::time::Duration::from_millis(16)
+                    }
                 } else {
                     std::time::Duration::from_millis(100)
                 };
-                cx.background_executor().timer(delay).await;
+                let since_last = last_feed.elapsed();
+                if since_last < window {
+                    cx.background_executor().timer(window - since_last).await;
+                }
                 let mut output = first.to_vec();
+                let mut chunks = 1usize;
                 let mut lagged = false;
                 while output.len() < 256 * 1024 {
                     match rx.try_recv() {
-                        Ok(b) => output.extend_from_slice(&b),
+                        Ok(b) => {
+                            output.extend_from_slice(&b);
+                            chunks += 1;
+                        }
                         Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
                             lagged = true;
                             break;
@@ -428,29 +560,39 @@ impl TermView {
                         Err(_) => break,
                     }
                 }
+                // 本批收集到 ≥2 个 chunk 说明上游仍在灌水；空批（1 chunk）重置。
+                saturated_streak = if chunks > 1 {
+                    saturated_streak.saturating_add(1)
+                } else {
+                    0
+                };
                 if lagged {
                     let (snapshot, synced_rx) = session_for_task.subscribe();
                     rx = synced_rx;
                     let vterm = vterm_for_task.clone();
-                    let stop = view
-                        .update(cx, move |_view, cx| {
+                    cx.background_executor()
+                        .spawn(async move {
                             vterm.feed(b"\x1bc");
                             vterm.feed(&snapshot);
-                            cx.notify();
                         })
-                        .is_err();
+                        .await;
+                    last_feed = std::time::Instant::now();
+                    let stop = view.update(cx, move |_view, cx| cx.notify()).is_err();
                     if stop {
                         break;
                     }
                     continue;
                 }
                 let vterm = vterm_for_task.clone();
-                let stop = view
-                    .update(cx, move |_view, cx| {
+                // VT 逐字节解析可能很慢（单批最大 256KB）：放到后台线程执行，
+                // drain 循环本身按序 await，同一终端的 chunk 顺序不变。
+                cx.background_executor()
+                    .spawn(async move {
                         vterm.feed(&output);
-                        cx.notify();
                     })
-                    .is_err();
+                    .await;
+                last_feed = std::time::Instant::now();
+                let stop = view.update(cx, move |_view, cx| cx.notify()).is_err();
                 if stop {
                     break;
                 }
@@ -474,6 +616,9 @@ impl TermView {
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             focus_subscriptions: None,
             osc52_clipboard_enabled,
+            shape_cache: Arc::new(std::sync::Mutex::new(ShapeCache::default())),
+            pending_selection: None,
+            selection_flush_scheduled: false,
             _drain: drain,
             _clipboard: clipboard,
         }
@@ -514,6 +659,9 @@ impl TermView {
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             focus_subscriptions: None,
             osc52_clipboard_enabled,
+            shape_cache: Arc::new(std::sync::Mutex::new(ShapeCache::default())),
+            pending_selection: None,
+            selection_flush_scheduled: false,
             _drain: idle,
             _clipboard: clipboard,
         }
@@ -526,17 +674,27 @@ impl TermView {
 
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
+        // 主题颜色烘进 ShapedLine 的 TextRun，必须重建 shaping 缓存。
+        if let Ok(mut cache) = self.shape_cache.lock() {
+            cache.rows.clear();
+        }
         cx.notify();
     }
 
     pub fn set_font_family(&mut self, font_family: String, cx: &mut Context<Self>) {
         self.font_family = font_family;
+        if let Ok(mut cache) = self.shape_cache.lock() {
+            cache.clear();
+        }
         cx.notify();
     }
 
     pub(crate) fn refresh_ui_scale(&mut self, cx: &mut Context<Self>) {
         if let (Ok(mut dims), Ok(mut bounds)) = (self.last_dims.lock(), self.last_bounds.lock()) {
             invalidate_cached_geometry(&mut dims, &mut bounds);
+        }
+        if let Ok(mut cache) = self.shape_cache.lock() {
+            cache.clear();
         }
         cx.notify();
     }
@@ -595,6 +753,10 @@ impl TermView {
         }
         if event.button == MouseButton::Left && self.selecting {
             self.selecting = false;
+            // 帧节流的 pending selection 在复制前先落盘，保证终点准确。
+            if let Some((line, col, right)) = self.pending_selection.take() {
+                self.vterm.update_selection(line, col, right);
+            }
             if let Some(text) = self
                 .vterm
                 .selection_to_string()
@@ -726,9 +888,12 @@ impl TermView {
                 event.modifiers.alt,
                 event.modifiers.control,
             );
+            // 合并 count 个 report 为一次 write（原实现每次 write 都 mutex+write_all+flush）。
+            let mut buf = Vec::with_capacity(report.len() * count);
             for _ in 0..count {
-                sink.write(&report);
+                buf.extend_from_slice(&report);
             }
+            sink.write(&buf);
         } else if modes.alternate_scroll || modes.alt_screen {
             let Some(sink) = self.input_sink() else {
                 return;
@@ -739,9 +904,11 @@ impl TermView {
                 (false, true) => b"\x1bOB",
                 (false, false) => b"\x1b[B",
             };
+            let mut buf = Vec::with_capacity(seq.len() * count);
             for _ in 0..count {
-                sink.write(seq);
+                buf.extend_from_slice(seq);
             }
+            sink.write(&buf);
         } else if self.vterm.scroll_display(lines) {
             cx.notify();
         }
@@ -934,6 +1101,7 @@ impl Render for TermView {
         let dims = Arc::clone(&self.last_dims);
         let pane_bounds = Arc::clone(&self.last_bounds);
         let cell_size = Arc::clone(&self.cell_size);
+        let shape_cache = Arc::clone(&self.shape_cache);
         let scrollbar = self.scrollbar_geometry().map(|(_, geometry)| geometry);
 
         div()
@@ -1005,41 +1173,23 @@ impl Render for TermView {
                             size: size(gpui::px(inner_width), gpui::px(inner_height)),
                         };
 
-                        let family = font_family.clone().into();
-                        let base_font = Font {
-                            family,
-                            features: FontFeatures::disable_ligatures(),
-                            fallbacks: Some(FontFallbacks::from_fonts(vec![
-                                "DejaVu Sans Mono".into(),
-                                "Noto Sans Mono".into(),
-                                "Noto Sans CJK SC".into(),
-                                "Liberation Mono".into(),
-                            ])),
-                            weight: FontWeight::NORMAL,
-                            style: FontStyle::Normal,
-                        };
                         let text_system = window.text_system();
                         let font_size = ui_px(FONT_SIZE);
-                        let font_id = text_system.resolve_font(&base_font);
-                        let measured_cell = text_system
-                            .advance(font_id, font_size, 'm')
-                            .map(|advance| advance.width)
-                            .unwrap_or(ui_px(FALLBACK_CELL_W));
-                        let line_height = font_size * 1.3;
-                        let base_shape = text_system.shape_line(
-                            "m".into(),
+                        let mut temp_cache = ShapeCache::default();
+                        let mut cache_guard = shape_cache.lock().ok();
+                        let cache: &mut ShapeCache = match cache_guard.as_mut() {
+                            Some(guard) => &mut **guard,
+                            None => &mut temp_cache,
+                        };
+                        // 字体度量缓存：resolve_font/advance('m')/shape_line("m")
+                        // 只在字体/缩放变化时重算。
+                        let (base_font, measured_cell, line_height, base_half) = cache.metrics(
+                            &font_family,
                             font_size,
-                            &[TextRun {
-                                len: 1,
-                                font: base_font.clone(),
-                                color: rgba(term_theme.fg0).into(),
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            }],
-                            Some(measured_cell),
+                            window.scale_factor(),
+                            text_system,
+                            term_theme,
                         );
-                        let base_half = (base_shape.ascent - base_shape.descent) * 0.5;
 
                         let cols = (((f32::from(inner.size.width) - 0.5)
                             / f32::from(measured_cell))
@@ -1072,49 +1222,96 @@ impl Render for TermView {
                             }
                         }
 
+                        // 行级 shaping 缓存：命中（runs 内容+影响 shaping 的样式未变）
+                        // 时 clone ShapedLine（廉价），未命中才 shape_line 并写入。
+                        if cache.rows.len() != snapshot.rows.len() {
+                            cache.rows.clear();
+                            cache.rows.resize_with(snapshot.rows.len(), || None);
+                        }
                         let mut runs = Vec::new();
                         for (row, render_row) in snapshot.rows.iter().enumerate() {
-                            for run in &render_row.runs {
-                                let fg = if run.style.fg == 0x2a2e38ff {
-                                    term_theme.fg0
-                                } else if run.style.dim {
-                                    dim_u32(run.style.fg)
-                                } else {
-                                    run.style.fg
-                                };
-                                let font = Font {
-                                    weight: if run.style.bold {
-                                        FontWeight::BOLD
-                                    } else {
-                                        FontWeight::NORMAL
-                                    },
-                                    style: if run.style.italic {
-                                        FontStyle::Italic
-                                    } else {
-                                        FontStyle::Normal
-                                    },
-                                    ..base_font.clone()
-                                };
-                                let color: Hsla = rgba(fg).into();
-                                let shaped = text_system.shape_line(
-                                    run.text.clone().into(),
-                                    font_size,
-                                    &[TextRun {
-                                        len: run.text.len(),
-                                        font,
-                                        color,
-                                        background_color: None,
-                                        underline: run.style.underline.then_some(UnderlineStyle {
-                                            color: Some(color),
-                                            thickness: ui_px(1.0),
-                                            wavy: false,
-                                        }),
-                                        strikethrough: None,
-                                    }],
-                                    Some(measured_cell),
-                                );
+                            let hit = cache.rows[row].as_ref().is_some_and(|cached| {
+                                cached.keys.len() == render_row.runs.len()
+                                    && cached.keys.iter().zip(render_row.runs.iter()).all(
+                                        |(key, run)| {
+                                            key.text == run.text
+                                                && key.start_col == run.start_col
+                                                && key.cells == run.cells
+                                                && key.fg == run.style.fg
+                                                && key.bold == run.style.bold
+                                                && key.italic == run.style.italic
+                                                && key.underline == run.style.underline
+                                                && key.dim == run.style.dim
+                                        },
+                                    )
+                            });
+                            if !hit {
+                                let keys = render_row
+                                    .runs
+                                    .iter()
+                                    .map(|run| CachedRunKey {
+                                        text: run.text.clone(),
+                                        start_col: run.start_col,
+                                        cells: run.cells,
+                                        fg: run.style.fg,
+                                        bold: run.style.bold,
+                                        italic: run.style.italic,
+                                        underline: run.style.underline,
+                                        dim: run.style.dim,
+                                    })
+                                    .collect();
+                                let shaped = render_row
+                                    .runs
+                                    .iter()
+                                    .map(|run| {
+                                        let fg = if run.style.fg == 0x2a2e38ff {
+                                            term_theme.fg0
+                                        } else if run.style.dim {
+                                            dim_u32(run.style.fg)
+                                        } else {
+                                            run.style.fg
+                                        };
+                                        let font = Font {
+                                            weight: if run.style.bold {
+                                                FontWeight::BOLD
+                                            } else {
+                                                FontWeight::NORMAL
+                                            },
+                                            style: if run.style.italic {
+                                                FontStyle::Italic
+                                            } else {
+                                                FontStyle::Normal
+                                            },
+                                            ..base_font.clone()
+                                        };
+                                        let color: Hsla = rgba(fg).into();
+                                        text_system.shape_line(
+                                            run.text.clone().into(),
+                                            font_size,
+                                            &[TextRun {
+                                                len: run.text.len(),
+                                                font,
+                                                color,
+                                                background_color: None,
+                                                underline: run.style.underline.then_some(
+                                                    UnderlineStyle {
+                                                        color: Some(color),
+                                                        thickness: ui_px(1.0),
+                                                        wavy: false,
+                                                    },
+                                                ),
+                                                strikethrough: None,
+                                            }],
+                                            Some(measured_cell),
+                                        )
+                                    })
+                                    .collect();
+                                cache.rows[row] = Some(CachedShapedRow { keys, shaped });
+                            }
+                            let cached = cache.rows[row].as_ref().expect("row shaped above");
+                            for (run, shaped) in render_row.runs.iter().zip(cached.shaped.iter()) {
                                 runs.push(PaintRun {
-                                    shaped,
+                                    shaped: shaped.clone(),
                                     start_col: run.start_col,
                                     row,
                                     cells: run.cells,
@@ -1284,12 +1481,28 @@ impl Render for TermView {
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                         this.scroll_wheel(event, cx)
                     }))
-                    .on_mouse_move(cx.listener(
-                        |this, event: &gpui::MouseMoveEvent, _window, cx| {
+                    .on_mouse_move(
+                        cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
                             if this.selecting {
                                 if let Some((line, col, right)) = this.grid_point(event.position) {
-                                    this.vterm.update_selection(line, col, right);
-                                    cx.notify();
+                                    // 帧节流：mousemove 60-120Hz，每帧最多应用一次选区更新。
+                                    this.pending_selection = Some((line, col, right));
+                                    if !this.selection_flush_scheduled {
+                                        this.selection_flush_scheduled = true;
+                                        let weak = cx.weak_entity();
+                                        window.on_next_frame(move |_window, cx| {
+                                            weak.update(cx, |this, cx| {
+                                                this.selection_flush_scheduled = false;
+                                                if let Some((line, col, right)) =
+                                                    this.pending_selection.take()
+                                                {
+                                                    this.vterm.update_selection(line, col, right);
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                        });
+                                    }
                                 }
                                 cx.stop_propagation();
                                 return;
@@ -1322,8 +1535,8 @@ impl Render for TermView {
                                 cx.notify();
                             }
                             cx.stop_propagation();
-                        },
-                    ))
+                        }),
+                    )
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, event, _window, cx| {

@@ -113,25 +113,25 @@ impl MuxlaneApp {
                 AcpViewEvent::RefreshContexts => {
                     this.refresh_acp_thread_contexts(cx);
                 }
+                AcpViewEvent::PromptCompleted => {
+                    if !this.acp_views.get(&id).is_some_and(|view| view == _view) {
+                        return;
+                    }
+                    let draft = this.notification_draft(
+                        id.clone(),
+                        muxlane_core::model::AgentStatus::Working,
+                        muxlane_core::model::AgentStatus::Done,
+                        None,
+                    );
+                    this.notifications
+                        .update(cx, |center, cx| center.push_notification(draft, cx));
+                    cx.notify();
+                }
                 AcpViewEvent::OpenSubagent(session_id) => {
                     let parent_id = id.clone();
                     let session_id = session_id.clone();
                     cx.defer_in(window, move |this, window, cx| {
                         this.spawn_acp_subagent(&parent_id, session_id.clone(), window, cx);
-                    });
-                }
-                AcpViewEvent::ImportSession { session_id, title } => {
-                    let source_id = id.clone();
-                    let session_id = session_id.clone();
-                    let title = title.clone();
-                    cx.defer_in(window, move |this, window, cx| {
-                        this.spawn_acp_import(
-                            &source_id,
-                            session_id.clone(),
-                            title.clone(),
-                            window,
-                            cx,
-                        );
                     });
                 }
                 AcpViewEvent::ToggleMaximize => {
@@ -161,12 +161,7 @@ impl MuxlaneApp {
     }
 
     fn refresh_acp_thread_contexts(&mut self, cx: &mut Context<Self>) {
-        let records: Vec<_> = self
-            .acp_records
-            .values()
-            .filter(|record| !record.archived)
-            .cloned()
-            .collect();
+        let records: Vec<_> = self.acp_records.values().cloned().collect();
         let local_machine_id = self.local_machine_id();
         let terminal_contexts: Vec<_> = self
             .terms
@@ -191,12 +186,12 @@ impl MuxlaneApp {
                 }
                 Some((
                     key.project_id,
-                    ContextItem {
-                        relative_path: format!("terminal:{agent}"),
-                        path: std::path::PathBuf::new(),
-                        kind: ContextKind::Terminal,
-                        content: Some(content),
-                    },
+                    ContextItem::new(
+                        format!("terminal:{agent}"),
+                        std::path::PathBuf::new(),
+                        ContextKind::Terminal,
+                        Some(content),
+                    ),
                 ))
             })
             .collect();
@@ -207,11 +202,13 @@ impl MuxlaneApp {
                 .filter(|record| {
                     record.metadata.ui_id != *view_id && record.metadata.project_id == project_id
                 })
-                .map(|record| ContextItem {
-                    relative_path: format!("thread:{}", record.metadata.title),
-                    path: std::path::PathBuf::new(),
-                    kind: ContextKind::Thread,
-                    content: Some(thread_context_text(record)),
+                .map(|record| {
+                    ContextItem::new(
+                        format!("thread:{}", record.metadata.title),
+                        std::path::PathBuf::new(),
+                        ContextKind::Thread,
+                        Some(thread_context_text(record)),
+                    )
                 })
                 .collect();
             contexts.extend(
@@ -235,7 +232,6 @@ impl MuxlaneApp {
         }
         let changed = if let Some(existing) = self.acp_records.get(&id) {
             data.created_at = existing.created_at;
-            data.archived = existing.archived;
             data.write_revision = existing.write_revision;
             data.updated_at = existing.updated_at;
             if data != *existing {
@@ -294,10 +290,10 @@ impl MuxlaneApp {
         let Some(view) = self.acp_views.get(agent).cloned() else {
             return false;
         };
-        let (profile, project_id, protocol_session_id, auth_method, started, start_allowed) = {
+        let (profile_id, project_id, protocol_session_id, auth_method, started, start_allowed) = {
             let view = view.read(cx);
             (
-                view.profile,
+                view.profile_id.clone(),
                 view.project_id.clone(),
                 view.protocol_session_id.clone(),
                 view.pending_auth_method.clone(),
@@ -311,10 +307,33 @@ impl MuxlaneApp {
         if !start_allowed {
             return false;
         }
-        let (Some(profile), Some(project)) = (profile, self.last_snapshot.project(&project_id))
-        else {
+        let Some(project) = self.last_snapshot.project(&project_id) else {
             return false;
         };
+        let profile = match self.acp_launch_profile(&profile_id) {
+            Ok(profile) => profile,
+            Err(error) => {
+                view.update(cx, |view, cx| {
+                    // Configuration errors remain retryable after a successful recheck.
+                    if self.acp_registry_error.is_none() {
+                        view.start_allowed = false;
+                    }
+                    view.apply(
+                        muxlane_acp::Event::Connection(muxlane_acp::ConnectionPhase::Failed),
+                        cx,
+                    );
+                    view.apply(
+                        muxlane_acp::Event::Error(muxlane_acp::SessionError {
+                            kind: muxlane_acp::ErrorKind::Connection,
+                            message: format!("{error:#}"),
+                        }),
+                        cx,
+                    );
+                });
+                return false;
+            }
+        };
+        view.update(cx, |view, _cx| view.profile = Some(profile.clone()));
         let session = muxlane_acp::spawn_on_with_auth(
             &self.server.runtime_handle(),
             profile,
@@ -332,6 +351,9 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.prepare_acp_creation(profile.id(), cx) {
+            return;
+        }
         let project_id = match self.new_session_target.as_ref() {
             Some(NewSessionTarget::Local(project_id)) => project_id.clone(),
             _ => {
@@ -358,6 +380,9 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.prepare_acp_creation(profile.id(), cx) {
+            return;
+        }
         let Some(project_path) = self
             .last_snapshot
             .project(&project_id)
@@ -383,6 +408,7 @@ impl MuxlaneApp {
                     ui_id: id.clone(),
                     project_id: project_id.clone(),
                     project_path,
+                    profile_id: profile.id().into(),
                     profile: Some(profile),
                     protocol_session_id: None,
                     parent_ui_id: None,
@@ -406,165 +432,6 @@ impl MuxlaneApp {
         self.place_async_agent(&key, id, Some(pane), None, window, cx);
     }
 
-    pub(crate) fn archive_acp_session(
-        &mut self,
-        agent: &AgentId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(record) = self.acp_records.get_mut(agent) else {
-            return;
-        };
-        record.archived = true;
-        record.write_revision = record.write_revision.saturating_add(1);
-        record.updated_at = muxlane_core::model::now_secs();
-        self.acp_dirty.insert(agent.clone());
-        if let Some(view) = self.acp_views.remove(agent) {
-            view.update(cx, |view, _cx| view.shutdown());
-        }
-        let removed = std::collections::HashSet::from([agent.clone()]);
-        self.workspace.remove_agents(&removed);
-        if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
-            self.pane_tree.close_tab(&pane, agent);
-        }
-        self.acp_metadata.remove(agent);
-        if self.active.as_ref() == Some(agent) {
-            self.active = self
-                .pane_tree
-                .group(&self.active_pane)
-                .and_then(|group| group.active.clone());
-        }
-        self.session_menu = None;
-        self.schedule_acp_persist(cx);
-        if let Some(active) = self.active.clone() {
-            let pane = self.active_pane.clone();
-            self.activate_agent(&pane, &active, window, cx);
-        }
-        self.persist();
-        cx.notify();
-    }
-
-    pub(crate) fn unarchive_acp_session(
-        &mut self,
-        agent: &AgentId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(mut data) = self.acp_records.get(agent).cloned() else {
-            return;
-        };
-        let Some(project) = self
-            .last_snapshot
-            .project(&data.metadata.project_id)
-            .cloned()
-        else {
-            return;
-        };
-        let Some(profile) = muxlane_acp::Profile::from_id(&data.metadata.profile_id) else {
-            return;
-        };
-        data.archived = false;
-        data.write_revision = data.write_revision.saturating_add(1);
-        data.updated_at = muxlane_core::model::now_secs();
-        self.acp_dirty.insert(agent.clone());
-        self.acp_records.insert(agent.clone(), data.clone());
-        let key = ProjectKey::new(self.local_machine_id(), project.id.clone());
-        let preferred_pane = self.active_pane.clone();
-        let pane = self.capture_spawn_target(&key, Some(&preferred_pane));
-        let metadata = data.metadata.clone();
-        let view = cx.new(|cx| {
-            AcpView::new(
-                AcpViewInit {
-                    ui_id: metadata.ui_id.clone(),
-                    project_id: metadata.project_id.clone(),
-                    project_path: project.path.clone(),
-                    profile: Some(profile),
-                    protocol_session_id: metadata.protocol_session_id.clone(),
-                    parent_ui_id: metadata.parent_ui_id.clone(),
-                    title: metadata.title.clone(),
-                    draft: metadata.draft.clone(),
-                    snapshot: data.snapshot.clone(),
-                    queued_prompts: data.queued_prompts.clone(),
-                    queue_paused: data.queue_paused,
-                    theme_mode: self.theme_mode,
-                    language: self.language,
-                },
-                window,
-                cx,
-            )
-        });
-        self.register_acp_view(agent.clone(), view, window, cx);
-        self.jump_to_project_if_needed(&key, cx);
-        self.place_async_agent(&key, agent.clone(), Some(pane), None, window, cx);
-        self.schedule_acp_persist(cx);
-    }
-
-    pub(crate) fn spawn_acp_import(
-        &mut self,
-        source_id: &AgentId,
-        protocol_session_id: String,
-        title: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(existing_id) = self
-            .acp_records
-            .values()
-            .find(|record| {
-                record.metadata.protocol_session_id.as_deref() == Some(protocol_session_id.as_str())
-            })
-            .map(|record| record.metadata.ui_id.clone())
-        {
-            if self.acp_views.contains_key(&existing_id) {
-                self.open_agent(&existing_id, window, cx);
-            } else {
-                self.unarchive_acp_session(&existing_id, window, cx);
-            }
-            return;
-        }
-        let Some(source) = self.acp_views.get(source_id).cloned() else {
-            return;
-        };
-        let (project_id, project_path, profile) = {
-            let source = source.read(cx);
-            let Some(profile) = source.profile else {
-                return;
-            };
-            (
-                source.project_id.clone(),
-                source.project_path.clone(),
-                profile,
-            )
-        };
-        let id = muxlane_core::model::new_id("acp");
-        let view = cx.new(|cx| {
-            AcpView::new(
-                AcpViewInit {
-                    ui_id: id.clone(),
-                    project_id: project_id.clone(),
-                    project_path,
-                    profile: Some(profile),
-                    protocol_session_id: Some(protocol_session_id),
-                    parent_ui_id: None,
-                    title,
-                    draft: String::new(),
-                    snapshot: muxlane_acp::ThreadSnapshot::default(),
-                    queued_prompts: Vec::new(),
-                    queue_paused: false,
-                    theme_mode: self.theme_mode,
-                    language: self.language,
-                },
-                window,
-                cx,
-            )
-        });
-        self.register_acp_view(id.clone(), view, window, cx);
-        let key = ProjectKey::new(self.local_machine_id(), project_id);
-        let pane = self.active_pane.clone();
-        self.jump_to_project_if_needed(&key, cx);
-        self.place_async_agent(&key, id, Some(pane), None, window, cx);
-    }
-
     pub(crate) fn spawn_acp_subagent(
         &mut self,
         parent_id: &AgentId,
@@ -577,7 +444,7 @@ impl MuxlaneApp {
         };
         let (project_id, profile, project_path) = {
             let parent = parent.read(cx);
-            let Some(profile) = parent.profile else {
+            let Some(profile) = parent.profile.clone() else {
                 return;
             };
             (
@@ -598,8 +465,6 @@ impl MuxlaneApp {
         {
             if self.acp_views.contains_key(&existing_id) {
                 self.open_agent(&existing_id, window, cx);
-            } else {
-                self.unarchive_acp_session(&existing_id, window, cx);
             }
             return;
         }
@@ -610,6 +475,7 @@ impl MuxlaneApp {
                     ui_id: id.clone(),
                     project_id: project_id.clone(),
                     project_path,
+                    profile_id: profile.id().into(),
                     profile: Some(profile),
                     protocol_session_id: Some(protocol_session_id),
                     parent_ui_id: Some(parent_id.clone()),
@@ -1042,6 +908,9 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.is_acp_session(agent) && self.find_agent_terminal(agent).is_none() {
+            return;
+        }
         if let Some(key) = self.project_key_for_agent(agent) {
             self.select_project_workspace_inner(key, cx);
         }
@@ -1186,7 +1055,7 @@ impl MuxlaneApp {
         .detach();
     }
 
-    fn finish_delete_session(
+    pub(crate) fn finish_delete_session(
         &mut self,
         agent: &AgentId,
         window: &mut Window,
@@ -1410,19 +1279,7 @@ impl MuxlaneApp {
         let Some(project) = self.last_snapshot.project(&target_key.project_id).cloned() else {
             return;
         };
-        let params = muxlane_core::protocol::AgentSpawnParams {
-            project: project.id.clone(),
-            agent_type: Some(preset.agent_type),
-            program: (preset.agent_type != muxlane_core::model::AgentType::Shell).then(|| {
-                preset
-                    .executable_in(&project.path)
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| preset.program.clone())
-            }),
-            args: Some(preset.args.clone()),
-            env: Some(preset.env.clone().into_iter().collect()),
-            preset_name: Some(preset.label.clone()),
-        };
+        let params = local_preset_params(preset, &project);
         let server = Arc::clone(&self.server);
         let preferred_pane = self.active_pane.clone();
         let pane = self.capture_spawn_target(&target_key, Some(&preferred_pane));
@@ -1473,6 +1330,25 @@ impl MuxlaneApp {
     }
 }
 
+pub(crate) fn local_preset_params(
+    preset: &muxlane_core::AgentPreset,
+    project: &muxlane_core::model::Project,
+) -> muxlane_core::protocol::AgentSpawnParams {
+    muxlane_core::protocol::AgentSpawnParams {
+        project: project.id.clone(),
+        agent_type: Some(preset.agent_type),
+        program: (preset.agent_type != muxlane_core::model::AgentType::Shell).then(|| {
+            preset
+                .executable_in(&project.path)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| preset.program.clone())
+        }),
+        args: Some(preset.args.clone()),
+        env: Some(preset.env.clone().into_iter().collect()),
+        preset_name: Some(preset.label.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1507,5 +1383,55 @@ mod tests {
             Some(TerminalLocation::Remote("host".into()))
         );
         assert_eq!(terminal_location(&local, &remotes, &"missing".into()), None);
+    }
+
+    #[test]
+    fn local_terminal_preset_params_resolve_project_binary_without_changing_raw_preset() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin_dir = directory.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let executable = bin_dir.join("muxlane-test-preset");
+        std::fs::write(&executable, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let project = muxlane_core::model::Project {
+            id: "params-test".into(),
+            name: "Params Test".into(),
+            path: directory.path().into(),
+            branch: None,
+            agents: vec![],
+        };
+        let presets = muxlane_core::builtin_presets("/unused-shell");
+        let shell = local_preset_params(&presets[0], &project);
+        assert_eq!(shell.program, None);
+        assert_eq!(shell.agent_type, Some(AgentType::Shell));
+        for id in ["claude", "codex", "pi", "opencode"] {
+            let mut preset = presets
+                .iter()
+                .find(|preset| preset.id == id)
+                .unwrap()
+                .clone();
+            preset.program = "muxlane-test-preset".into();
+            preset.args = vec!["--test".into(), "literal argument".into()];
+            preset.env.insert("PRESET_TEST".into(), "value".into());
+            let params = local_preset_params(&preset, &project);
+            assert_eq!(params.project, project.id);
+            assert_eq!(params.program.as_deref(), executable.to_str());
+            assert_eq!(params.agent_type, Some(preset.agent_type));
+            assert_eq!(params.preset_name, Some(preset.label.clone()));
+            assert_eq!(params.args, Some(preset.args.clone()));
+            assert_eq!(
+                params.env,
+                Some(vec![("PRESET_TEST".into(), "value".into())])
+            );
+            assert_eq!(preset.program, "muxlane-test-preset");
+            preset.program = "muxlane-definitely-missing-test-preset".into();
+            let missing = local_preset_params(&preset, &project);
+            assert_eq!(missing.program, Some(preset.program.clone()));
+            assert_eq!(missing.agent_type, Some(preset.agent_type));
+        }
     }
 }

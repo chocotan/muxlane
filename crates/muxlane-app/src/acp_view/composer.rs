@@ -1,11 +1,134 @@
 use super::*;
 use gpui::MouseButton;
 
+#[derive(Debug, PartialEq)]
+struct UsageSummary {
+    label: String,
+    tooltip: String,
+    fraction: Option<f32>,
+    warning: bool,
+}
+
+fn compact_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.).replace(".0M", "M")
+    } else if tokens >= 1_000 {
+        format!("{:.0}k", tokens as f64 / 1_000.)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn usage_summary(usage: Option<&muxlane_acp::Usage>) -> UsageSummary {
+    let Some(usage) = usage else {
+        return UsageSummary {
+            label: "Context —".into(),
+            tooltip: "Context usage has not been reported by this agent.".into(),
+            fraction: None,
+            warning: false,
+        };
+    };
+    let ratio = (usage.size > 0).then(|| usage.used as f64 / usage.size as f64);
+    let mut tooltip = match ratio {
+        Some(ratio) => {
+            let percentage = if ratio > 0. && ratio < 0.001 {
+                "<0.1%".into()
+            } else {
+                format!("{:.1}%", ratio * 100.)
+            };
+            format!("Context: {} / {} tokens ({percentage})", usage.used, usage.size)
+        }
+        None => format!("Context: {} tokens used; total capacity has not been reported.", usage.used),
+    };
+    if let Some(cost) = &usage.cost {
+        // Display the reported value without rounding small nonzero costs to zero.
+        tooltip.push_str(&format!("\nCost: {} {}", cost.currency, cost.amount));
+    }
+    UsageSummary {
+        label: format!("{} / {}", compact_tokens(usage.used),
+            if usage.size > 0 { compact_tokens(usage.size) } else { "?".into() }),
+        tooltip,
+        fraction: ratio.map(|ratio| ratio.clamp(0., 1.) as f32),
+        warning: ratio.is_some_and(|ratio| ratio >= 0.85),
+    }
+}
+
+fn render_usage(usage: Option<&muxlane_acp::Usage>, theme: Theme) -> gpui::Stateful<gpui::Div> {
+    let summary = usage_summary(usage);
+    let color = if summary.warning { theme.yellow } else { theme.accent };
+    div().id("acp-token-usage")
+        .debug_selector(|| "acp-token-usage".into())
+        .min_w_0().max_w(ui_px(140.)).flex_shrink(1.)
+        .font_family("Noto Sans")
+        .flex().flex_col().gap_1()
+        .tooltip(crate::widgets::hover_tip(summary.tooltip, theme))
+        .child(meta(theme, summary.label).min_w_0().overflow_hidden().text_ellipsis())
+        .child(div().h(ui_px(2.)).w_full().bg(rgba(theme.line))
+            .when_some(summary.fraction, |track, fraction| track.child(
+                div().h_full().w(gpui::relative(fraction)).bg(rgba(color))
+            )))
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn absent_usage_is_unknown_not_zero() {
+        let summary = usage_summary(None);
+        assert_eq!(summary.label, "Context —");
+        assert!(summary.tooltip.contains("not been reported"));
+        assert_eq!(summary.fraction, None);
+        assert!(!summary.warning);
+    }
+
+    #[test]
+    fn unknown_zero_and_overflow_usage_remain_truthful() {
+        let mut usage = muxlane_acp::Usage { used: 42, size: 0, cost: None };
+        let summary = usage_summary(Some(&usage));
+        assert_eq!(summary.label, "42 / ?");
+        assert_eq!(summary.fraction, None);
+        assert!(!summary.tooltip.contains('%'));
+        usage.size = 100;
+        usage.used = 0;
+        let summary = usage_summary(Some(&usage));
+        assert_eq!(summary.label, "0 / 100");
+        assert_eq!(summary.fraction, Some(0.));
+        assert!(!summary.warning);
+        usage.used = 150;
+        let summary = usage_summary(Some(&usage));
+        assert_eq!(summary.label, "150 / 100");
+        assert!(summary.tooltip.contains("150.0%"));
+        assert_eq!(summary.fraction, Some(1.));
+        assert!(summary.warning);
+        usage.used = 84;
+        assert!(!usage_summary(Some(&usage)).warning);
+        usage.used = 85;
+        assert!(usage_summary(Some(&usage)).warning);
+    }
+
+    #[test]
+    fn compact_context_keeps_exact_values_and_cost_in_tooltip() {
+        let usage = muxlane_acp::Usage { used: 75_786, size: 300_000,
+            cost: Some(muxlane_acp::Cost { currency: "USD".into(), amount: 0.000000123 }) };
+        let summary = usage_summary(Some(&usage));
+        assert_eq!(summary.label, "76k / 300k");
+        assert!(summary.tooltip.contains("75786 / 300000"));
+        assert!(summary.tooltip.contains("USD 0.000000123"));
+        assert!(!summary.label.contains("USD"));
+        assert!(!usage_summary(Some(&muxlane_acp::Usage { cost: None, ..usage })).tooltip.contains("Cost:"));
+        for value in [1, 999, 1_000, 10_000, 999_999, 1_000_000, u64::MAX] {
+            assert!(!compact_tokens(value).starts_with('0'));
+        }
+    }
+}
+
+
 fn selector_popup_layer(menu: Entity<SelectorMenu>) -> impl IntoElement {
     deferred(
         anchored()
             .anchor(Anchor::TopLeft)
-            .offset(gpui::point(ui_px(0.), ui_px(24.)))
+            .offset(gpui::point(ui_px(0.), ui_px(POPUP_OFFSET)))
             .child(div().occlude().child(menu)),
     )
     .priority(2)
@@ -20,11 +143,13 @@ fn selector_button(
 ) -> gpui::Stateful<gpui::Div> {
     let mouse_target = target.clone();
     semantic_button(id, label.clone(), theme)
-        .px_1()
+        .text_size(ui_px(BUTTON_SIZE))
+        .min_w_0()
+        .max_w(ui_px(180.))
+        .px_2()
         .py_1()
-        .text_size(ui_px(11.))
         .text_color(rgba(theme.fg1))
-        .hover(|style| style.text_color(rgba(theme.fg0)))
+        .hover(move |style| style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _event, _window, cx| {
@@ -42,7 +167,16 @@ fn selector_button(
         .when_some(menu, |button, menu| {
             button.child(selector_popup_layer(menu))
         })
-        .child(format!("{label} ⌄"))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .min_w_0()
+                .w_full()
+                .gap_1()
+                .child(div().min_w_0().flex_1().overflow_hidden().text_ellipsis().child(label))
+                .child(div().flex_none().text_color(rgba(theme.fg2)).child("⌄")),
+        )
 }
 
 fn is_mode_config(option: &muxlane_acp::ConfigOption) -> bool {
@@ -155,12 +289,12 @@ impl AcpView {
                     .iter()
                     .any(|selected| selected.relative_path == relative)
             {
-                self.selected_contexts.push(ContextItem {
-                    relative_path: relative.to_string(),
-                    path: std::path::PathBuf::new(),
-                    kind: ContextKind::Url,
-                    content: None,
-                });
+                self.selected_contexts.push(ContextItem::new(
+                    relative,
+                    std::path::PathBuf::new(),
+                    ContextKind::Url,
+                    None,
+                ));
             }
         }
         self.draft.update(cx, |field, cx| field.set_text(text, cx));
@@ -415,35 +549,6 @@ impl AcpView {
         let mut items = Vec::new();
         let view = cx.entity().downgrade();
         match selector {
-            SelectorTarget::Sessions => {
-                if self.available_sessions.is_empty() {
-                    items.push(SelectorMenuItem::informational(i18n::text(
-                        self.language,
-                        "acp.sessions_loading",
-                    )));
-                }
-                for session in self.available_sessions.clone() {
-                    let session_id = session.id.clone();
-                    let title = session.title.clone();
-                    let label = match session.updated_at {
-                        Some(updated_at) if !updated_at.is_empty() => {
-                            format!("{}  {}", title, updated_at)
-                        }
-                        _ => title.clone(),
-                    };
-                    let view = view.clone();
-                    items.push(SelectorMenuItem::action(
-                        label,
-                        false,
-                        move |_window, app| {
-                            view.update(app, |this, cx| {
-                                this.import_session(session_id.clone(), title.clone(), cx);
-                            })
-                            .ok();
-                        },
-                    ));
-                }
-            }
             SelectorTarget::Mode => {
                 if let Some(modes) = snapshot.modes.as_ref() {
                     for mode in &modes.available {
@@ -452,9 +557,10 @@ impl AcpView {
                         items.push(SelectorMenuItem::action(
                             mode.name.clone(),
                             mode.id == modes.current,
-                            move |_window, app| {
+                            move |window, app| {
                                 view.update(app, |this, cx| {
                                     this.select_mode(id.clone(), cx);
+                                    this.draft.focus_handle(cx).focus(window, cx);
                                 })
                                 .ok();
                             },
@@ -463,87 +569,22 @@ impl AcpView {
                 }
             }
             SelectorTarget::More => {
-                let can_history = self.connection_phase == ConnectionPhase::Connected
-                    && self
-                        .capabilities
-                        .as_ref()
-                        .is_some_and(|capabilities| capabilities.sessions.list);
                 let can_logout = self.connection_phase == ConnectionPhase::Connected
                     && self
                         .capabilities
                         .as_ref()
                         .is_some_and(|capabilities| capabilities.logout);
-                let can_checkpoint_restore = self.can_restore_checkpoint();
-                let can_checkpoint_undo = self.checkpoint_undo.is_some()
-                    && self.turn_state == TurnState::Idle
-                    && matches!(self.prompt_queue.phase, DispatchPhase::Idle)
-                    && !self.checkpoint_busy;
-                if can_checkpoint_restore {
-                    let view = view.clone();
-                    items.push(SelectorMenuItem::action(
-                        i18n::text(self.language, "acp.checkpoint_restore"),
-                        false,
-                        move |_window, app| {
-                            view.update(app, |this, cx| {
-                                this.request_checkpoint_restore(cx);
-                            })
-                            .ok();
-                        },
-                    ));
-                }
-                if can_checkpoint_undo {
-                    let view = view.clone();
-                    items.push(SelectorMenuItem::action(
-                        i18n::text(self.language, "acp.checkpoint_undo"),
-                        false,
-                        move |_window, app| {
-                            view.update(app, |this, cx| {
-                                this.undo_checkpoint_restore(cx);
-                            })
-                            .ok();
-                        },
-                    ));
-                }
-                if can_history {
-                    let action_view = view.clone();
-                    let reopen_view = view.clone();
-                    let requested = Rc::new(std::cell::Cell::new(false));
-                    let action_requested = requested.clone();
-                    items.push(SelectorMenuItem::action(
-                        i18n::text(self.language, "acp.session_history"),
-                        false,
-                        move |window, app| {
-                            action_view
-                                .update(app, |this, cx| {
-                                    this.request_session_list(cx);
-                                    action_requested
-                                        .set(this.open_selector == Some(SelectorTarget::Sessions));
-                                })
-                                .ok();
-                            if requested.get() {
-                                let reopen_view = reopen_view.clone();
-                                window.on_next_frame(move |_window, app| {
-                                    reopen_view
-                                        .update(app, |this, cx| {
-                                            if this.open_selector.is_none() {
-                                                this.open_selector = Some(SelectorTarget::Sessions);
-                                                this.clear_selector_menu();
-                                                cx.notify();
-                                            }
-                                        })
-                                        .ok();
-                                });
-                            }
-                        },
-                    ));
-                }
                 if can_logout {
                     let view = view.clone();
                     items.push(SelectorMenuItem::action(
                         i18n::text(self.language, "acp.logout"),
                         false,
-                        move |_window, app| {
-                            view.update(app, |this, cx| this.logout(cx)).ok();
+                        move |window, app| {
+                            view.update(app, |this, cx| {
+                                this.logout(cx);
+                                this.draft.focus_handle(cx).focus(window, cx);
+                            })
+                            .ok();
                         },
                     ));
                 }
@@ -563,13 +604,14 @@ impl AcpView {
                                 items.push(SelectorMenuItem::action(
                                     choice.name.clone(),
                                     choice.id == *current,
-                                    move |_window, app| {
+                                    move |window, app| {
                                         view.update(app, |this, cx| {
                                             this.select_config(
                                                 id.clone(),
                                                 ConfigValue::Select(value.clone()),
                                                 cx,
                                             );
+                                            this.draft.focus_handle(cx).focus(window, cx);
                                         })
                                         .ok();
                                     },
@@ -588,13 +630,14 @@ impl AcpView {
                                 items.push(SelectorMenuItem::action(
                                     label,
                                     value == *current,
-                                    move |_window, app| {
+                                    move |window, app| {
                                         view.update(app, |this, cx| {
                                             this.select_config(
                                                 id.clone(),
                                                 ConfigValue::Boolean(value),
                                                 cx,
                                             );
+                                            this.draft.focus_handle(cx).focus(window, cx);
                                         })
                                         .ok();
                                     },
@@ -607,20 +650,37 @@ impl AcpView {
         }
 
         let menu = cx.new(|cx| SelectorMenu::new(items, cx, Theme::for_mode(self.theme_mode)));
-        let subscription = cx.subscribe(&menu, |this, menu, _: &gpui::DismissEvent, cx| {
-            if this
-                .selector_menu
-                .as_ref()
-                .is_some_and(|current| current.entity_id() == menu.entity_id())
-            {
-                this.close_selector();
-                cx.notify();
-            }
-        });
+        let subscription = cx.subscribe_in(
+            &menu,
+            window,
+            |this, menu, _: &gpui::DismissEvent, window, cx| {
+                if this
+                    .selector_menu
+                    .as_ref()
+                    .is_some_and(|current| current.entity_id() == menu.entity_id())
+                {
+                    let restore_focus = menu.read(cx).restore_focus_on_dismiss;
+                    this.close_selector();
+                    if restore_focus {
+                        this.draft.focus_handle(cx).focus(window, cx);
+                    }
+                    cx.notify();
+                }
+            },
+        );
         self.selector_menu = Some(menu.clone());
         self._selector_menu_subscription = Some(subscription);
         window.on_next_frame(move |window, cx| {
-            menu.read(cx).focus_handle(cx).focus(window, cx);
+            view.update(cx, |this, cx| {
+                if this
+                    .selector_menu
+                    .as_ref()
+                    .is_some_and(|current| current.entity_id() == menu.entity_id())
+                {
+                    menu.read(cx).focus_handle(cx).focus(window, cx);
+                }
+            })
+            .ok();
         });
     }
 
@@ -654,28 +714,6 @@ impl AcpView {
         cx.notify();
     }
 
-    pub(crate) fn request_session_list(&mut self, cx: &mut Context<Self>) {
-        if self.open_selector == Some(SelectorTarget::Sessions) {
-            self.close_selector();
-            cx.notify();
-            return;
-        }
-        self.clear_selector_menu();
-        if let Some(handle) = &self.handle {
-            if let Err(error) = handle.list_sessions() {
-                self.push_entry(Entry::Error(error.to_string()));
-            } else {
-                self.open_selector = Some(SelectorTarget::Sessions);
-            }
-        }
-        cx.notify();
-    }
-
-    fn import_session(&mut self, session_id: String, title: String, cx: &mut Context<Self>) {
-        self.close_selector();
-        cx.emit(AcpViewEvent::ImportSession { session_id, title });
-    }
-
     pub(super) fn render_composer(
         &mut self,
         window: &mut Window,
@@ -695,13 +733,14 @@ impl AcpView {
             .flex_col()
             .mx_3()
             .mb_1()
-            .max_h(ui_px(220.))
+            .max_h(ui_px(POPUP_MAX_HEIGHT))
             .overflow_y_scroll()
             .border_1()
             .border_color(rgba(theme.line))
             .bg(rgba(theme.bg1));
         for (index, item) in self.completions.clone().into_iter().enumerate() {
             let label = item.label.clone();
+            let selected = index == self.completion_index;
             completion_popup = completion_popup.child(
                 semantic_button(
                     gpui::ElementId::Name(format!("acp-completion-{index}").into()),
@@ -713,102 +752,79 @@ impl AcpView {
                 .gap_2()
                 .px_3()
                 .py_2()
-                .when(index == self.completion_index, |row| {
-                    row.bg(rgba(theme.bg2))
-                })
+                .border_0()
+                .border_l_2()
+                .border_color(rgba(if selected { theme.accent } else { 0x00000000 }))
+                .text_size(ui_px(BODY_SIZE))
+                .when(selected, |row| row.bg(rgba(theme.bg2)))
                 .hover(|style| style.bg(rgba(theme.bg2)))
                 .on_click(
                     cx.listener(move |this, _event, _window, cx| this.choose_completion(index, cx)),
                 )
                 .child(div().text_color(rgba(theme.fg0)).child(label))
                 .child(
-                    div()
+                    meta(theme, item.description)
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_ellipsis()
-                        .text_size(ui_px(10.))
-                        .text_color(rgba(theme.fg2))
-                        .child(item.description),
+                        .text_ellipsis(),
                 )
-                .child(
-                    div()
-                        .text_size(ui_px(9.))
-                        .text_color(rgba(theme.fg2))
-                        .child(item.source),
-                ),
+                .child(meta(theme, item.source).flex_none()),
             );
         }
         let mut context_chips = div().flex().flex_wrap().gap_1().px_3().py_1();
         for context in self.selected_contexts.clone() {
             let context_kind = context.kind;
             let context_id = context.relative_path.clone();
-            let label = format!("@{} ×", context.relative_path);
+            let label = format!("@{}", context.relative_path);
             context_chips = context_chips.child(
-                semantic_button(
+                chip(
                     gpui::ElementId::Name(format!("acp-context-{}", context.relative_path).into()),
                     format!("Remove context {}", context.relative_path),
+                    label,
                     theme,
                 )
-                .px_2()
-                .py_1()
-                .border_1()
-                .border_color(rgba(theme.line))
-                .text_size(ui_px(10.))
-                .text_color(rgba(theme.fg1))
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.remove_context(context_kind, &context_id, cx)
-                }))
-                .child(label),
+                })),
             );
         }
         let mut attachment_chips = div().flex().flex_wrap().gap_1().px_3().py_1();
         for attachment in self.selected_attachments.clone() {
             let path = attachment.path.clone();
-            let label = format!("{} · {} KB ×", attachment.name, attachment.size / 1024);
+            let label = format!("{} · {} KB", attachment.name, attachment.size / 1024);
             attachment_chips = attachment_chips.child(
-                semantic_button(
+                chip(
                     gpui::ElementId::Name(format!("acp-attachment-{}", attachment.name).into()),
                     format!("Remove attachment {}", attachment.name),
+                    label,
                     theme,
                 )
-                .px_2()
-                .py_1()
-                .border_1()
-                .border_color(rgba(theme.line))
-                .text_size(ui_px(10.))
-                .text_color(rgba(theme.fg1))
                 .on_click(
                     cx.listener(move |this, _event, _window, cx| this.remove_attachment(&path, cx)),
-                )
-                .child(label),
+                ),
             );
         }
         let modes = self.thread.snapshot().modes.clone();
         let config_options = self.thread.snapshot().config_options.clone();
         let control_groups = footer_control_groups(&config_options);
-        let can_history = self.connection_phase == ConnectionPhase::Connected
-            && self
-                .capabilities
-                .as_ref()
-                .is_some_and(|capabilities| capabilities.sessions.list);
         let can_logout = self.connection_phase == ConnectionPhase::Connected
             && self
                 .capabilities
                 .as_ref()
                 .is_some_and(|capabilities| capabilities.logout);
-        let can_checkpoint_restore = self.can_restore_checkpoint();
-        let can_checkpoint_undo = self.checkpoint_undo.is_some()
-            && self.turn_state == TurnState::Idle
-            && matches!(self.prompt_queue.phase, DispatchPhase::Idle)
-            && !self.checkpoint_busy;
         self.ensure_selector_menu(window, cx);
         let mut selector_menu = self.selector_menu.clone();
-        let mut selector_controls = div().flex().items_center().flex_wrap().gap_2().ml_auto();
-        let has_modes = modes
+        let usage = render_usage(self.thread.snapshot().usage.as_ref(), theme);
+        let mut selector_controls = div().min_w_0().flex_1().flex().justify_end().items_center().flex_wrap().gap_1();
+        let has_modes = config_options.is_empty()
+            && modes
+                .as_ref()
+                .is_some_and(|modes| !modes.available.is_empty());
+        if let Some(modes) = modes
             .as_ref()
-            .is_some_and(|modes| !modes.available.is_empty());
-        if let Some(modes) = modes.as_ref().filter(|modes| !modes.available.is_empty()) {
+            .filter(|modes| config_options.is_empty() && !modes.available.is_empty())
+        {
             let current = modes
                 .available
                 .iter()
@@ -922,24 +938,17 @@ impl AcpView {
                 cx,
             ));
         }
-        if can_checkpoint_restore || can_checkpoint_undo || can_history || can_logout {
-            let popup = matches!(
-                self.open_selector.as_ref(),
-                Some(SelectorTarget::More | SelectorTarget::Sessions)
-            )
-            .then(|| selector_menu.take())
-            .flatten();
+        if can_logout {
+            let popup = matches!(self.open_selector.as_ref(), Some(SelectorTarget::More))
+                .then(|| selector_menu.take())
+                .flatten();
             selector_controls = selector_controls.child(
-                semantic_button(
+                icon_button(
                     "acp-more-options",
                     i18n::text(self.language, "acp.more"),
                     theme,
                 )
-                .px_2()
-                .py_1()
-                .text_size(ui_px(13.))
-                .text_color(rgba(theme.fg2))
-                .hover(|style| style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                .text_size(ui_px(BODY_SIZE))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _event, _window, cx| {
@@ -959,6 +968,11 @@ impl AcpView {
             );
         }
         div()
+            .debug_selector(|| "acp-composer".into())
+            .min_w_0()
+            .w_full()
+            .flex_none()
+            .bg(rgba(theme.bg0))
             .flex()
             .flex_col()
             .border_t_1()
@@ -1005,31 +1019,11 @@ impl AcpView {
             })
             .child(
                 div()
-                    .flex()
-                    .items_start()
                     .w_full()
+                    .min_w_0()
                     .px_3()
                     .pt_2()
-                    .child(div().flex_1().min_w_0().child(draft))
-                    .child(
-                        semantic_button(
-                            "acp-expand-editor",
-                            i18n::text(self.language, "palette.maximize"),
-                            theme,
-                        )
-                        .w(ui_px(28.))
-                        .h(ui_px(28.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(rgba(theme.fg2))
-                        .hover(|style| style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                        .on_click(cx.listener(|_this, _event, _window, cx| {
-                            cx.emit(AcpViewEvent::ToggleMaximize)
-                        }))
-                        .child(panel_icon(MAXIMIZE_ICON, theme.fg2)),
-                    ),
+                    .child(draft),
             )
             .child(
                 div()
@@ -1042,54 +1036,61 @@ impl AcpView {
                     .py_1()
                     .when(supports_attachments, |bar| {
                         bar.child(
-                            semantic_button(
+                            icon_button(
                                 "acp-add-attachment",
                                 i18n::text(self.language, "acp.add_attachment"),
                                 theme,
                             )
-                            .w(ui_px(30.))
-                            .h(ui_px(30.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgba(theme.fg1))
-                            .hover(|style| style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.open_attachment_picker(cx)
                             }))
                             .child(panel_icon(PLUS_ICON, theme.fg1)),
                         )
                     })
+                    .child(usage)
                     .child(selector_controls)
+                    .child(
+                        icon_button("acp-expand-editor", i18n::text(self.language, "palette.maximize"), theme)
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(AcpViewEvent::ToggleMaximize)))
+                            .child(panel_icon(MAXIMIZE_ICON, theme.fg2)),
+                    )
                     .child(if generating {
-                        semantic_button(
-                            "acp-cancel",
-                            i18n::text(self.language, "acp.cancel"),
-                            theme,
-                        )
-                        .w(ui_px(30.))
-                        .h(ui_px(30.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(rgba(theme.red))
-                        .hover(|style| style.bg(rgba(theme.bg2)))
-                        .on_click(cx.listener(|this, _event, _window, cx| this.cancel(cx)))
-                        .child("■")
+                        icon_button("acp-cancel", i18n::text(self.language, "acp.cancel"), theme)
+                            .text_size(ui_px(BUTTON_SIZE))
+                            .text_color(rgba(theme.red))
+                            .on_click(cx.listener(|this, _event, _window, cx| this.cancel(cx)))
+                            .child("■")
                     } else {
-                        semantic_button("acp-send", i18n::text(self.language, "common.send"), theme)
-                            .w(ui_px(30.))
-                            .h(ui_px(30.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
+                        icon_button("acp-send", i18n::text(self.language, "common.send"), theme)
                             .bg(rgba(theme.bg2))
-                            .text_color(rgba(theme.fg1))
-                            .hover(|style| style.bg(rgba(theme.line)).text_color(rgba(theme.fg0)))
                             .on_click(cx.listener(|this, _event, _window, cx| this.send_prompt(cx)))
                             .child(panel_icon(SEND_ICON, theme.fg1))
                     }),
             )
     }
+}
+
+/// 上下文 / 附件 chip：标签 + 独立关闭图标（hover 时 red）。
+fn chip(
+    id: impl Into<gpui::ElementId>,
+    aria: impl Into<gpui::SharedString>,
+    label: String,
+    theme: Theme,
+) -> gpui::Stateful<gpui::Div> {
+    semantic_button(id, aria, theme)
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .border_color(rgba(theme.line))
+        .text_size(ui_px(META_SIZE))
+        .text_color(rgba(theme.fg1))
+        .hover(move |style| style.bg(rgba(theme.bg2)))
+        .child(label)
+        .child(
+            panel_icon(CLOSE_ICON, theme.fg2)
+                .size(ui_px(12.))
+                .hover(move |style| style.text_color(rgba(theme.red))),
+        )
 }

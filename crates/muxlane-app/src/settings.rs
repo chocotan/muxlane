@@ -26,6 +26,53 @@ pub(crate) enum SettingsPage {
     Shortcuts,
 }
 
+#[derive(Default)]
+pub(crate) struct SettingsFocus {
+    handles: std::collections::HashMap<String, gpui::FocusHandle>,
+    order: Vec<gpui::FocusHandle>,
+    previous: Option<gpui::WeakFocusHandle>,
+}
+
+impl SettingsFocus {
+    #[cfg(test)]
+    pub(crate) fn existing_control(&self, id: &str) -> gpui::FocusHandle {
+        self.handles
+            .get(id)
+            .unwrap_or_else(|| panic!("missing settings control: {id}"))
+            .clone()
+    }
+
+    fn control(&mut self, id: impl Into<String>, cx: &gpui::App) -> gpui::FocusHandle {
+        let handle = self
+            .handles
+            .entry(id.into())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
+        if !self.order.contains(&handle) {
+            self.order.push(handle.clone());
+        }
+        handle
+    }
+
+    fn cycle(&self, backwards: bool, window: &mut Window, cx: &mut gpui::App) {
+        let len = self.order.len();
+        if len == 0 {
+            return;
+        }
+        let current = self
+            .order
+            .iter()
+            .position(|handle| handle.is_focused(window));
+        let index = match current {
+            Some(index) if backwards => (index + len - 1) % len,
+            Some(index) => (index + 1) % len,
+            None if backwards => len - 1,
+            None => 0,
+        };
+        self.order[index].focus(window, cx);
+    }
+}
+
 fn setting_row(
     id: &'static str,
     title: &'static str,
@@ -101,6 +148,25 @@ fn render_switch(id: &'static str, label: &'static str, on: bool, theme: Theme) 
 }
 
 impl MuxlaneApp {
+    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            return;
+        }
+        self.settings_focus.previous = window.focused(cx).map(|focus| focus.downgrade());
+        self.settings_open = true;
+        self.palette_open = false;
+        cx.notify();
+    }
+
+    pub(crate) fn cycle_settings_focus(
+        &mut self,
+        backwards: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_focus.cycle(backwards, window, cx);
+    }
+
     pub(crate) fn toggle_theme(&mut self, cx: &mut Context<Self>) {
         self.theme_mode = if self.theme_mode.is_dark() {
             ThemeMode::Light
@@ -144,6 +210,7 @@ impl MuxlaneApp {
         self.settings_theme_menu = false;
         self.settings_font_menu = false;
         self.settings_language_menu = false;
+        self.settings_terminal_preset_menu = false;
         self.settings_scale_menu = false;
     }
 
@@ -181,6 +248,16 @@ impl MuxlaneApp {
         cx.notify();
     }
 
+    fn set_default_terminal_preset(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.presets.iter().any(|preset| preset.id == id) {
+            return;
+        }
+        self.default_terminal_preset = id.to_string();
+        self.dismiss_settings_menus();
+        self.persist();
+        cx.notify();
+    }
+
     fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
         self.language = language;
         self.notifications.update(cx, |center, cx| {
@@ -209,7 +286,23 @@ impl MuxlaneApp {
         self.cancel_shortcut_capture();
         self.settings_open = false;
         self.dismiss_settings_menus();
-        self.focus.focus(window, cx);
+        if let Some(previous) = self
+            .settings_focus
+            .previous
+            .take()
+            .and_then(|focus| focus.upgrade())
+            .filter(|focus| self.focus.contains(focus, window))
+        {
+            previous.focus(window, cx);
+        } else if let Some(active) = self
+            .active
+            .clone()
+            .filter(|agent| self.terms.contains_key(agent) || self.acp_views.contains_key(agent))
+        {
+            self.focus_agent(&active, window, cx);
+        } else {
+            self.focus.focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -222,8 +315,12 @@ impl MuxlaneApp {
         self.cancel_shortcut_capture();
         self.shortcut_capture = Some(action);
         self.shortcut_error = None;
-        let listener = cx.listener(|this, event: &gpui::KeystrokeEvent, _window, cx| {
+        let listener = cx.listener(|this, event: &gpui::KeystrokeEvent, window, cx| {
             cx.stop_propagation();
+            if matches!(event.keystroke.key.as_str(), "tab" | "f6") {
+                this.cycle_settings_focus(event.keystroke.modifiers.shift, window, cx);
+                return;
+            }
             if event.keystroke.key.as_str() == "escape" {
                 this.cancel_shortcut_capture();
                 cx.notify();
@@ -294,6 +391,7 @@ impl MuxlaneApp {
     fn render_general_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
         let project_workspaces_enabled = self.workspace.enabled();
+        let preset_select = self.render_terminal_preset_select(cx);
 
         div()
             .flex()
@@ -310,6 +408,13 @@ impl MuxlaneApp {
                     .child(i18n::text(self.language, "settings.general")),
             )
             .child(setting_row(
+                "settings-row-terminal-preset",
+                i18n::text(self.language, "settings.default_terminal_preset"),
+                None,
+                preset_select,
+                theme,
+            ))
+            .child(setting_row(
                 "settings-row-project-workspaces",
                 i18n::text(self.language, "settings.project_workspaces"),
                 Some(i18n::text(
@@ -321,6 +426,11 @@ impl MuxlaneApp {
                     i18n::text(self.language, "settings.project_workspaces"),
                     project_workspaces_enabled,
                     theme,
+                )
+                .track_focus(
+                    &self
+                        .settings_focus
+                        .control("settings-project-workspaces-toggle", cx),
                 )
                 .on_click(cx.listener(|this, _event, window, cx| {
                     this.set_project_workspaces_enabled(!this.workspace.enabled(), window, cx);
@@ -340,6 +450,7 @@ impl MuxlaneApp {
                     self.sound_enabled,
                     theme,
                 )
+                .track_focus(&self.settings_focus.control("settings-sound-toggle", cx))
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.sound_enabled = !this.sound_enabled;
                     this.persist();
@@ -357,6 +468,7 @@ impl MuxlaneApp {
                     self.osc52_clipboard_enabled,
                     theme,
                 )
+                .track_focus(&self.settings_focus.control("settings-osc52-toggle", cx))
                 .on_click(cx.listener(|this, _event, _window, cx| {
                     this.toggle_osc52_clipboard(cx);
                 })),
@@ -365,71 +477,65 @@ impl MuxlaneApp {
             .into_any_element()
     }
 
-    fn render_appearance_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_terminal_preset_select(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
-        let current_mode = self.theme_mode;
-        let current_font = self.font_family.clone();
-        let current_language = self.language;
-
-        let theme_select = div()
+        let selected = self.selected_terminal_preset();
+        let presets = self.presets.clone();
+        div()
             .relative()
             .child(
                 semantic_button(
-                    "settings-theme-select",
-                    self.theme_mode.label(self.language),
+                    "settings-terminal-preset-select",
+                    selected.label.clone(),
                     theme,
                 )
-                .w(ui_px(210.))
+                .track_focus(
+                    &self
+                        .settings_focus
+                        .control("settings-terminal-preset-select", cx),
+                )
+                .w(ui_px(180.))
                 .h(ui_px(28.))
                 .px_2()
                 .flex()
                 .items_center()
-                .gap_2()
                 .border_1()
                 .border_color(rgba(theme.line))
                 .bg(rgba(theme.bg0))
                 .hover(|style| style.bg(rgba(theme.bg2)))
                 .on_click(cx.listener(|this, _event, _window, cx| {
-                    let open = !this.settings_theme_menu;
+                    let open = !this.settings_terminal_preset_menu;
                     this.dismiss_settings_menus();
-                    this.settings_theme_menu = open;
+                    this.settings_terminal_preset_menu = open;
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .w(ui_px(24.))
-                        .h(ui_px(16.))
-                        .bg(rgba(theme.bg0))
-                        .border_1()
-                        .border_color(rgba(theme.accent)),
-                )
                 .child(
                     div()
                         .flex_1()
                         .text_size(ui_px(11.))
                         .text_color(rgba(theme.fg0))
-                        .child(self.theme_mode.label(self.language)),
+                        .child(selected.label),
                 )
                 .child(
                     div()
                         .text_size(ui_px(12.))
                         .text_color(rgba(theme.fg1))
-                        .child(if self.settings_theme_menu {
+                        .child(if self.settings_terminal_preset_menu {
                             "⌃"
                         } else {
                             "⌄"
                         }),
                 ),
             )
-            .when(self.settings_theme_menu, |anchor| {
+            .when(self.settings_terminal_preset_menu, |anchor| {
                 anchor.child(
                     deferred(
                         div()
-                            .id("settings-theme-menu")
+                            .id("settings-terminal-preset-menu")
                             .absolute()
                             .top_full()
                             .left_0()
-                            .w(ui_px(210.))
+                            .w(ui_px(180.))
                             .max_h(ui_px(280.))
                             .overflow_y_scroll()
                             .bg(rgba(theme.bg1))
@@ -446,59 +552,188 @@ impl MuxlaneApp {
                                     cx.stop_propagation();
                                 },
                             ))
-                            .children(ThemeMode::ALL.into_iter().map(|mode| {
-                                let selected = mode == current_mode;
-                                let swatch = Theme::for_mode(mode);
+                            .children(presets.into_iter().map(|preset| {
+                                let is_selected = preset.id == selected.id;
+                                let id = format!("settings-terminal-preset-option-{}", preset.id);
                                 semantic_button(
-                                    gpui::ElementId::Name(
-                                        format!("settings-theme-option-{}", mode.id()).into(),
-                                    ),
-                                    mode.label(current_language),
+                                    gpui::ElementId::Name(id.clone().into()),
+                                    preset.label.clone(),
                                     theme,
                                 )
+                                .track_focus(&self.settings_focus.control(id, cx))
                                 .h(ui_px(28.))
                                 .px_2()
                                 .flex()
                                 .items_center()
-                                .gap_2()
-                                .when(selected, |item| item.bg(rgba(theme.selection())))
-                                .when(!selected, |item| {
+                                .when(is_selected, |item| item.bg(rgba(theme.selection())))
+                                .when(!is_selected, |item| {
                                     item.hover(|style| style.bg(rgba(theme.bg2)))
                                 })
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.set_theme(mode, cx);
+                                    this.set_default_terminal_preset(&preset.id, cx);
                                 }))
-                                .child(
-                                    div()
-                                        .w(ui_px(22.))
-                                        .h(ui_px(14.))
-                                        .bg(rgba(swatch.bg0))
-                                        .border_1()
-                                        .border_color(rgba(swatch.accent)),
-                                )
                                 .child(
                                     div()
                                         .flex_1()
                                         .text_size(ui_px(11.))
                                         .text_color(rgba(theme.fg0))
-                                        .child(mode.label(current_language)),
+                                        .child(preset.label),
                                 )
                                 .child(
                                     div()
                                         .text_size(ui_px(11.))
                                         .text_color(rgba(theme.accent))
-                                        .child(if selected { "✓" } else { "" }),
+                                        .child(if is_selected { "✓" } else { "" }),
                                 )
                             })),
                     )
                     .with_priority(1),
                 )
-            });
+            })
+            .into_any_element()
+    }
+
+    fn render_appearance_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = Theme::for_mode(self.theme_mode);
+        let current_mode = self.theme_mode;
+        let current_font = self.font_family.clone();
+        let current_language = self.language;
+
+        let theme_select =
+            div()
+                .relative()
+                .child(
+                    semantic_button(
+                        "settings-theme-select",
+                        self.theme_mode.label(self.language),
+                        theme,
+                    )
+                    .track_focus(&self.settings_focus.control("settings-theme-select", cx))
+                    .w(ui_px(210.))
+                    .h(ui_px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .bg(rgba(theme.bg0))
+                    .hover(|style| style.bg(rgba(theme.bg2)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        let open = !this.settings_theme_menu;
+                        this.dismiss_settings_menus();
+                        this.settings_theme_menu = open;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(ui_px(24.))
+                            .h(ui_px(16.))
+                            .bg(rgba(theme.bg0))
+                            .border_1()
+                            .border_color(rgba(theme.accent)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(ui_px(11.))
+                            .text_color(rgba(theme.fg0))
+                            .child(self.theme_mode.label(self.language)),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_px(12.))
+                            .text_color(rgba(theme.fg1))
+                            .child(if self.settings_theme_menu {
+                                "⌃"
+                            } else {
+                                "⌄"
+                            }),
+                    ),
+                )
+                .when(self.settings_theme_menu, |anchor| {
+                    anchor.child(
+                        deferred(
+                            div()
+                                .id("settings-theme-menu")
+                                .absolute()
+                                .top_full()
+                                .left_0()
+                                .w(ui_px(210.))
+                                .max_h(ui_px(280.))
+                                .overflow_y_scroll()
+                                .bg(rgba(theme.bg1))
+                                .border_1()
+                                .border_color(rgba(theme.line))
+                                .shadow_lg()
+                                .occlude()
+                                .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                                    this.dismiss_settings_menus();
+                                    cx.notify();
+                                }))
+                                .on_any_mouse_down(cx.listener(
+                                    |_this, _event: &gpui::MouseDownEvent, _window, cx| {
+                                        cx.stop_propagation();
+                                    },
+                                ))
+                                .children(ThemeMode::ALL.into_iter().map(|mode| {
+                                    let selected = mode == current_mode;
+                                    let swatch = Theme::for_mode(mode);
+                                    semantic_button(
+                                        gpui::ElementId::Name(
+                                            format!("settings-theme-option-{}", mode.id()).into(),
+                                        ),
+                                        mode.label(current_language),
+                                        theme,
+                                    )
+                                    .track_focus(&self.settings_focus.control(
+                                        format!("settings-theme-option-{}", mode.id()),
+                                        cx,
+                                    ))
+                                    .h(ui_px(28.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when(selected, |item| item.bg(rgba(theme.selection())))
+                                    .when(!selected, |item| {
+                                        item.hover(|style| style.bg(rgba(theme.bg2)))
+                                    })
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.set_theme(mode, cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .w(ui_px(22.))
+                                            .h(ui_px(14.))
+                                            .bg(rgba(swatch.bg0))
+                                            .border_1()
+                                            .border_color(rgba(swatch.accent)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(ui_px(11.))
+                                            .text_color(rgba(theme.fg0))
+                                            .child(mode.label(current_language)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(ui_px(11.))
+                                            .text_color(rgba(theme.accent))
+                                            .child(if selected { "✓" } else { "" }),
+                                    )
+                                })),
+                        )
+                        .with_priority(1),
+                    )
+                });
 
         let font_select = div()
             .relative()
             .child(
                 semantic_button("settings-font-select", self.font_family.clone(), theme)
+                    .track_focus(&self.settings_focus.control("settings-font-select", cx))
                     .w(ui_px(260.))
                     .h(ui_px(28.))
                     .px_2()
@@ -572,6 +807,11 @@ impl MuxlaneApp {
                                     family.clone(),
                                     theme,
                                 )
+                                .track_focus(
+                                    &self
+                                        .settings_focus
+                                        .control(format!("settings-font-option-{family}"), cx),
+                                )
                                 .h(ui_px(28.))
                                 .px_2()
                                 .flex()
@@ -612,6 +852,7 @@ impl MuxlaneApp {
                 .relative()
                 .child(
                     semantic_button("settings-scale-select", format!("{current_scale}%"), theme)
+                        .track_focus(&self.settings_focus.control("settings-scale-select", cx))
                         .w(ui_px(180.))
                         .h(ui_px(28.))
                         .px_2()
@@ -683,6 +924,10 @@ impl MuxlaneApp {
                                                 format!("{percent}%"),
                                                 theme,
                                             )
+                                            .track_focus(&self.settings_focus.control(
+                                                format!("settings-scale-option-{percent}"),
+                                                cx,
+                                            ))
                                             .h(ui_px(28.))
                                             .px_2()
                                             .flex()
@@ -715,6 +960,7 @@ impl MuxlaneApp {
             .relative()
             .child(
                 semantic_button("settings-language-select", self.language.label(), theme)
+                    .track_focus(&self.settings_focus.control("settings-language-select", cx))
                     .w(ui_px(180.))
                     .h(ui_px(28.))
                     .px_2()
@@ -781,6 +1027,10 @@ impl MuxlaneApp {
                                     language.label(),
                                     theme,
                                 )
+                                .track_focus(&self.settings_focus.control(
+                                    format!("settings-language-option-{}", language.id()),
+                                    cx,
+                                ))
                                 .h(ui_px(28.))
                                 .px_2()
                                 .flex()
@@ -887,6 +1137,11 @@ impl MuxlaneApp {
                             i18n::text(self.language, "settings.shortcuts_restore"),
                             theme,
                         )
+                        .track_focus(
+                            &self
+                                .settings_focus
+                                .control("settings-shortcuts-restore", cx),
+                        )
                         .h(ui_px(26.))
                         .px_2()
                         .flex()
@@ -941,7 +1196,7 @@ impl MuxlaneApp {
                             .gap_2()
                             .child(
                                 semantic_button(
-                                    gpui::ElementId::Name(record_id.into()),
+                                    gpui::ElementId::Name(record_id.clone().into()),
                                     if recording {
                                         i18n::text(self.language, "settings.shortcut_recording")
                                             .to_string()
@@ -953,6 +1208,7 @@ impl MuxlaneApp {
                                     },
                                     theme,
                                 )
+                                .track_focus(&self.settings_focus.control(record_id, cx))
                                 .w(ui_px(170.))
                                 .h(ui_px(28.))
                                 .px_2()
@@ -985,10 +1241,11 @@ impl MuxlaneApp {
                             )
                             .child(
                                 semantic_button(
-                                    gpui::ElementId::Name(clear_id.into()),
+                                    gpui::ElementId::Name(clear_id.clone().into()),
                                     i18n::text(self.language, "common.clear"),
                                     theme,
                                 )
+                                .track_focus(&self.settings_focus.control(clear_id, cx))
                                 .w(ui_px(52.))
                                 .h(ui_px(28.))
                                 .flex_none()
@@ -1021,7 +1278,36 @@ impl MuxlaneApp {
             .into_any_element()
     }
 
-    pub(crate) fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.settings_focus.order.clear();
+        for id in [
+            "settings-close",
+            "settings-nav-general",
+            "settings-nav-appearance",
+            "settings-nav-shortcuts",
+        ] {
+            self.settings_focus.control(id, cx);
+        }
+        // Reconcile after painting: newly opened pages and dismissed menus may remove focus.
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            view.update(cx, |this, cx| {
+                if this.settings_open
+                    && !this
+                        .settings_focus
+                        .order
+                        .iter()
+                        .any(|focus| focus.is_focused(window))
+                {
+                    this.cycle_settings_focus(false, window, cx);
+                }
+            })
+            .ok();
+        });
         let theme = Theme::for_mode(self.theme_mode);
         let current_page = self.settings_page;
         let content_id = match current_page {
@@ -1075,6 +1361,7 @@ impl MuxlaneApp {
                     .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                         if event.keystroke.key.as_str() == "escape" {
                             this.close_settings(window, cx);
+                            cx.stop_propagation();
                         }
                     }))
                     .child(
@@ -1096,6 +1383,7 @@ impl MuxlaneApp {
                             )
                             .child(
                                 semantic_button("settings-close", "Close settings", theme)
+                                    .track_focus(&self.settings_focus.control("settings-close", cx))
                                     .w(ui_px(24.))
                                     .h(ui_px(24.))
                                     .flex()
@@ -1155,6 +1443,7 @@ impl MuxlaneApp {
                                                     i18n::text(self.language, label_key),
                                                     theme,
                                                 )
+                                                .track_focus(&self.settings_focus.control(id, cx))
                                                 .h(ui_px(28.))
                                                 .px_3()
                                                 .flex()

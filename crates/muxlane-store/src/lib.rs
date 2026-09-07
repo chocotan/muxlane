@@ -68,11 +68,27 @@ fn default_next_workspace_shortcut() -> Option<String> {
 }
 
 fn default_previous_tab_shortcut() -> Option<String> {
-    Some("platform-left".into())
+    Some("platform-alt-up".into())
 }
 
 fn default_next_tab_shortcut() -> Option<String> {
-    Some("platform-right".into())
+    Some("platform-alt-down".into())
+}
+
+fn default_new_tab_shortcut() -> Option<String> {
+    Some("platform-alt-t".into())
+}
+
+fn default_split_right_shortcut() -> Option<String> {
+    Some("platform-alt-r".into())
+}
+
+fn default_split_down_shortcut() -> Option<String> {
+    Some("platform-alt-d".into())
+}
+
+fn default_terminal_preset() -> String {
+    "shell".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,6 +103,12 @@ pub struct PersistedShortcutBindings {
     pub previous_tab: Option<String>,
     #[serde(default = "default_next_tab_shortcut")]
     pub next_tab: Option<String>,
+    #[serde(default = "default_new_tab_shortcut")]
+    pub new_tab: Option<String>,
+    #[serde(default = "default_split_right_shortcut")]
+    pub split_right: Option<String>,
+    #[serde(default = "default_split_down_shortcut")]
+    pub split_down: Option<String>,
 }
 
 impl Default for PersistedShortcutBindings {
@@ -97,6 +119,9 @@ impl Default for PersistedShortcutBindings {
             next_workspace: default_next_workspace_shortcut(),
             previous_tab: default_previous_tab_shortcut(),
             next_tab: default_next_tab_shortcut(),
+            new_tab: default_new_tab_shortcut(),
+            split_right: default_split_right_shortcut(),
+            split_down: default_split_down_shortcut(),
         }
     }
 }
@@ -117,10 +142,16 @@ impl PersistedShortcutBindings {
         ) {
             self.next_workspace = default_next_workspace_shortcut();
         }
-        if self.previous_tab.as_deref() == Some("platform-up") {
+        if matches!(
+            self.previous_tab.as_deref(),
+            Some("platform-up" | "platform-left")
+        ) {
             self.previous_tab = default_previous_tab_shortcut();
         }
-        if self.next_tab.as_deref() == Some("platform-down") {
+        if matches!(
+            self.next_tab.as_deref(),
+            Some("platform-down" | "platform-right")
+        ) {
             self.next_tab = default_next_tab_shortcut();
         }
     }
@@ -168,6 +199,8 @@ pub struct PersistedApp {
     pub osc52_clipboard_enabled: Option<bool>,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default = "default_terminal_preset")]
+    pub default_terminal_preset: String,
     #[serde(default)]
     pub project_workspaces_enabled: bool,
     #[serde(default)]
@@ -225,6 +258,7 @@ impl PersistedApp {
         self.sound_enabled = previous.sound_enabled;
         self.osc52_clipboard_enabled = previous.osc52_clipboard_enabled;
         self.language = previous.language.clone();
+        self.default_terminal_preset = previous.default_terminal_preset.clone();
         self.project_workspaces_enabled = previous.project_workspaces_enabled;
         self.project_workspaces = previous.project_workspaces.clone();
         self.active_project_workspace = previous.active_project_workspace.clone();
@@ -259,6 +293,7 @@ impl Default for PersistedApp {
             sound_enabled: None,
             osc52_clipboard_enabled: None,
             language: None,
+            default_terminal_preset: default_terminal_preset(),
             project_workspaces_enabled: false,
             project_workspaces: vec![],
             active_project_workspace: None,
@@ -365,8 +400,6 @@ pub struct PersistedAcpThreadData {
     #[serde(default)]
     pub queue_paused: bool,
     #[serde(default)]
-    pub archived: bool,
-    #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
@@ -383,7 +416,6 @@ impl PersistedAcpThreadData {
             snapshot: muxlane_acp::ThreadSnapshot::default(),
             queued_prompts: Vec::new(),
             queue_paused: false,
-            archived: false,
             created_at: now,
             updated_at: now,
             write_revision: 1,
@@ -391,7 +423,7 @@ impl PersistedAcpThreadData {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AcpThreadLoad {
     pub records: Vec<PersistedAcpThreadData>,
     pub errors: Vec<String>,
@@ -1051,8 +1083,11 @@ mod tests {
         assert_eq!(bindings.close_tab.as_deref(), Some("ctrl-q"));
         assert_eq!(bindings.previous_workspace, None);
         assert_eq!(bindings.next_workspace, None);
-        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-left"));
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-up"));
         assert_eq!(bindings.next_tab, None);
+        assert_eq!(bindings.new_tab.as_deref(), Some("platform-alt-t"));
+        assert_eq!(bindings.split_right.as_deref(), Some("platform-alt-r"));
+        assert_eq!(bindings.split_down.as_deref(), Some("platform-alt-d"));
     }
 
     #[test]
@@ -1130,6 +1165,7 @@ mod tests {
         let record: PersistedAcpThreadData = serde_json::from_str(
             r#"{
                 "schema_version": 1,
+                "archived": true,
                 "metadata": {"ui_id":"acp_legacy"},
                 "queued_prompts": [{"text":"keep me","blocks":[]}]
             }"#,
@@ -1139,6 +1175,92 @@ mod tests {
         assert_eq!(record.queued_prompts.len(), 1);
         assert_eq!(record.queued_prompts[0].payload.text, "keep me");
         assert!(!record.queued_prompts[0].id.to_string().is_empty());
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert!(!encoded.contains("archived"));
+    }
+
+    #[test]
+    fn legacy_archive_flag_does_not_discard_local_thread_data() {
+        let mut record = PersistedAcpThreadData::new(PersistedAcpThread {
+            ui_id: "acp_legacy_archive".into(),
+            project_id: "project_1".into(),
+            profile_id: "claude".into(),
+            protocol_session_id: Some("restorable_session".into()),
+            title: "Real restored title".into(),
+            draft: "unsent draft".into(),
+            ..Default::default()
+        });
+        record
+            .snapshot
+            .items
+            .push(muxlane_acp::ThreadItem::Message(muxlane_acp::Message {
+                protocol_id: None,
+                id: "user_1".into(),
+                role: muxlane_acp::MessageRole::User,
+                text: "Original prompt".into(),
+            }));
+        record
+            .queued_prompts
+            .push(muxlane_acp::PromptSubmission::new(
+                muxlane_acp::PromptPayload::new("queued prompt"),
+            ));
+        record.queue_paused = true;
+        for archived in [None, Some(false), Some(true)] {
+            let mut json = serde_json::to_value(&record).unwrap();
+            if let Some(archived) = archived {
+                json["archived"] = serde_json::json!(archived);
+            }
+            let restored: PersistedAcpThreadData = serde_json::from_value(json).unwrap();
+            assert_eq!(restored, record);
+            assert!(serde_json::to_value(&restored)
+                .unwrap()
+                .get("archived")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn acp_protocol_aliases_survive_store_roundtrip_without_changing_item_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state.json");
+        let mut reducer = muxlane_acp::ThreadReducer::new();
+        for (id, text) in [(None, "hello"), (Some("protocol-answer"), " world")] {
+            reducer.apply(muxlane_acp::ThreadDelta::MessageChunk {
+                id: id.map(str::to_string), role: muxlane_acp::MessageRole::Assistant, text: text.into(),
+            });
+        }
+        let mut record = PersistedAcpThreadData::new(PersistedAcpThread {
+            ui_id: "acp_protocol_alias".into(), ..Default::default()
+        });
+        record.snapshot = reducer.into_snapshot();
+        save_acp_thread(&state_path, &record).unwrap();
+        let loaded = load_acp_threads(&state_path);
+        assert!(loaded.errors.is_empty());
+        assert_eq!(loaded.records, vec![record]);
+        let muxlane_acp::ThreadItem::Message(message) = &loaded.records[0].snapshot.items[0] else { panic!("expected message") };
+        assert_eq!(message.id, "local-message-1");
+        assert_eq!(message.protocol_id.as_deref(), Some("protocol-answer"));
+    }
+
+    #[test]
+    fn unknown_acp_agent_id_survives_restore_and_resave() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_path = directory.path().join("state.json");
+        let record = PersistedAcpThreadData::new(PersistedAcpThread {
+            ui_id: "acp_unknown".into(),
+            profile_id: "removed-custom-agent".into(),
+            protocol_session_id: Some("original-session".into()),
+            title: "Original title".into(),
+            draft: "unsent prompt".into(),
+            ..Default::default()
+        });
+        save_acp_thread(&state_path, &record).unwrap();
+        let restored = load_acp_threads(&state_path).records.remove(0);
+        assert!(muxlane_acp::AgentRegistry::default()
+            .require(&restored.metadata.profile_id)
+            .is_err());
+        save_acp_thread(&state_path, &restored).unwrap();
+        assert_eq!(load_acp_threads(&state_path).records, vec![record]);
     }
 
     #[test]
@@ -1271,8 +1393,8 @@ mod tests {
         bindings.migrate_legacy_defaults();
         assert_eq!(bindings.previous_workspace, None);
         assert_eq!(bindings.next_workspace, None);
-        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-left"));
-        assert_eq!(bindings.next_tab.as_deref(), Some("platform-right"));
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-up"));
+        assert_eq!(bindings.next_tab.as_deref(), Some("platform-alt-down"));
 
         let mut partial = PersistedShortcutBindings {
             previous_workspace: Some("platform-left".into()),
@@ -1285,7 +1407,7 @@ mod tests {
         assert_eq!(partial.previous_workspace, None);
         assert_eq!(partial.next_workspace, None);
         assert_eq!(partial.previous_tab.as_deref(), Some("ctrl-alt-p"));
-        assert_eq!(partial.next_tab.as_deref(), Some("platform-right"));
+        assert_eq!(partial.next_tab.as_deref(), Some("platform-alt-down"));
     }
 
     #[test]
@@ -1293,6 +1415,9 @@ mod tests {
         let mut app = PersistedApp::default();
         app.shortcut_bindings.close_tab = None;
         app.shortcut_bindings.previous_tab = Some("ctrl-alt-b".into());
+        app.shortcut_bindings.new_tab = None;
+        app.shortcut_bindings.split_right = Some("ctrl-alt-r".into());
+        app.shortcut_bindings.split_down = None;
         let json = serde_json::to_string(&app).unwrap();
         let restored: PersistedApp = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.shortcut_bindings, app.shortcut_bindings);
@@ -1303,6 +1428,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = load(&dir.path().join("missing.json")).unwrap();
         assert_eq!(app.version, STORE_VERSION);
+    }
+
+    #[test]
+    fn default_terminal_preset_survives_load_and_ui_preference_merge() {
+        let legacy: PersistedApp = serde_json::from_str(r#"{"version":3}"#).unwrap();
+        assert_eq!(legacy.default_terminal_preset, "shell");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        for id in [
+            "shell",
+            "claude",
+            "codex",
+            "pi",
+            "opencode",
+            "unknown-preset",
+        ] {
+            let previous = PersistedApp {
+                default_terminal_preset: id.into(),
+                ..Default::default()
+            };
+            save(&path, &previous).unwrap();
+            let restored = load(&path).unwrap();
+            let merged =
+                PersistedApp::from_snapshot(&Snapshot::default()).with_ui_prefs_from(&restored);
+            assert_eq!(merged.default_terminal_preset, id);
+        }
+    }
+
+    #[test]
+    fn left_right_defaults_migrate_but_custom_and_disabled_values_survive_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(&path, r#"{"version":3,"shortcut_bindings":{"previous_tab":"platform-left","next_tab":"platform-right","new_tab":null,"split_right":"ctrl-alt-r","split_down":null}}"#).unwrap();
+        let bindings = load(&path).unwrap().shortcut_bindings;
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-up"));
+        assert_eq!(bindings.next_tab.as_deref(), Some("platform-alt-down"));
+        assert_eq!(bindings.new_tab, None);
+        assert_eq!(bindings.split_right.as_deref(), Some("ctrl-alt-r"));
+        assert_eq!(bindings.split_down, None);
     }
     #[test]
     fn future_version_is_rejected() {

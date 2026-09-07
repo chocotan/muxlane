@@ -26,6 +26,7 @@ impl SelectorMenuItem {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn informational(label: impl Into<SharedString>) -> Self {
         Self {
             label: label.into(),
@@ -41,6 +42,7 @@ pub(crate) struct SelectorMenu {
     focus_handle: FocusHandle,
     theme: Theme,
     scroll: ScrollHandle,
+    pub(crate) restore_focus_on_dismiss: bool,
 }
 
 impl SelectorMenu {
@@ -56,6 +58,7 @@ impl SelectorMenu {
             focus_handle: cx.focus_handle(),
             theme,
             scroll: ScrollHandle::new(),
+            restore_focus_on_dismiss: true,
         }
     }
 
@@ -154,7 +157,8 @@ impl Render for SelectorMenu {
             .border_color(rgba(theme.line))
             .bg(rgba(theme.bg1))
             .shadow_lg()
-            .on_mouse_down_out(cx.listener(|_this, _event, _window, cx| {
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.restore_focus_on_dismiss = false;
                 cx.emit(DismissEvent);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {

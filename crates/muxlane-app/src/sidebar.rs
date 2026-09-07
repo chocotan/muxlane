@@ -26,6 +26,38 @@ struct SessionRowData {
     remote: bool,
 }
 
+enum SidebarSession<'a> {
+    Terminal(&'a muxlane_core::model::AgentInstance),
+    Acp(&'a AgentId),
+}
+
+impl SidebarSession<'_> {
+    fn id(&self) -> &AgentId {
+        match self {
+            Self::Terminal(agent) => &agent.id,
+            Self::Acp(id) => id,
+        }
+    }
+}
+
+struct SidebarProject<'a> {
+    project: &'a muxlane_core::model::Project,
+    collapse_key: String,
+    sessions: Vec<SidebarSession<'a>>,
+}
+
+struct SidebarMachine<'a> {
+    remote: Option<&'a Arc<muxlane_client::RemoteHost>>,
+    collapse_key: String,
+    projects: Vec<SidebarProject<'a>>,
+}
+
+pub(super) struct SidebarSessionTarget {
+    pub(super) agent: AgentId,
+    pub(super) machine_collapse_key: String,
+    pub(super) project_collapse_key: String,
+}
+
 /// 侧栏项目行拖拽负载：仅同机器内重排。
 #[derive(Clone)]
 pub(crate) struct DragProject {
@@ -94,6 +126,101 @@ mod tests {
 }
 
 impl MuxlaneApp {
+    // This logical tree is shared by rendering and navigation, independent of collapse state.
+    fn sidebar_machines(&self) -> Vec<SidebarMachine<'_>> {
+        let mut machines = vec![SidebarMachine {
+            remote: None,
+            collapse_key: "local".into(),
+            projects: self.sidebar_projects(&self.last_snapshot, &self.local_machine_id(), None),
+        }];
+        for remote in &self.remotes {
+            let host = &remote.cfg.name;
+            machines.push(SidebarMachine {
+                remote: Some(remote),
+                collapse_key: format!("remote:{host}"),
+                projects: self
+                    .remote_snaps
+                    .get(host)
+                    .map(|snapshot| {
+                        let machine_id = snapshot
+                            .machine
+                            .as_ref()
+                            .map(|machine| machine.machine_id.as_str())
+                            .unwrap_or_default();
+                        self.sidebar_projects(snapshot, machine_id, Some(host))
+                    })
+                    .unwrap_or_default(),
+            });
+        }
+        machines
+    }
+
+    fn sidebar_projects<'a>(
+        &'a self,
+        snapshot: &'a muxlane_core::model::Snapshot,
+        machine_id: &str,
+        remote_host: Option<&str>,
+    ) -> Vec<SidebarProject<'a>> {
+        self.ordered_projects(machine_id, &snapshot.projects)
+            .into_iter()
+            .map(|project| {
+                let mut sessions: Vec<_> = snapshot
+                    .agents_of(&project.id)
+                    .into_iter()
+                    .map(SidebarSession::Terminal)
+                    .collect();
+                if remote_host.is_none() {
+                    let mut acp: Vec<_> = self
+                        .acp_metadata
+                        .iter()
+                        .filter(|(_, thread)| thread.project_id == project.id)
+                        .map(|(id, _)| id)
+                        .collect();
+                    acp.sort();
+                    sessions.extend(acp.into_iter().map(SidebarSession::Acp));
+                }
+                SidebarProject {
+                    project,
+                    collapse_key: match remote_host {
+                        Some(host) => format!("remote:{host}:{}", project.id),
+                        None => format!("local:{}", project.id),
+                    },
+                    sessions,
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn adjacent_sidebar_session(&self, next: bool) -> Option<SidebarSessionTarget> {
+        let machines = self.sidebar_machines();
+        let sessions: Vec<_> = machines
+            .iter()
+            .flat_map(|machine| {
+                machine.projects.iter().flat_map(move |project| {
+                    project.sessions.iter().map(move |session| (machine, project, session))
+                })
+            })
+            .collect();
+        if sessions.is_empty() {
+            return None;
+        }
+        let current = self.active.as_ref().and_then(|active| {
+            sessions.iter().position(|(_, _, session)| session.id() == active)
+        });
+        let index = match (current, next) {
+            (Some(index), true) => (index + 1) % sessions.len(),
+            (Some(index), false) => (index + sessions.len() - 1) % sessions.len(),
+            (None, true) => 0,
+            (None, false) => sessions.len() - 1,
+        };
+        let (machine, project, session) = sessions[index];
+        Some(SidebarSessionTarget {
+            agent: session.id().clone(),
+            machine_collapse_key: machine.collapse_key.clone(),
+            project_collapse_key: project.collapse_key.clone(),
+        })
+    }
+
     /// 按自定义顺序返回项目；未记录的保持原顺序排在尾部。
     pub(crate) fn ordered_projects<'a>(
         &self,
@@ -266,7 +393,7 @@ impl MuxlaneApp {
                 }
                 cx.stop_propagation();
             }))
-            .tooltip(hover_tip(project_path))
+            .tooltip(hover_tip(project_path, theme))
             .on_click(cx.listener(move |this, _event, window, cx| {
                 if let Some(workspace_key) = workspace_key.clone() {
                     let is_current = this.workspace.current_project() == Some(&workspace_key);
@@ -372,6 +499,21 @@ impl MuxlaneApp {
             )
     }
 
+    fn render_sidebar_session(
+        &self,
+        session: &SidebarSession<'_>,
+        remote: bool,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        match session {
+            SidebarSession::Terminal(agent) => {
+                self.render_agent_row(agent, remote, theme, cx).into_any_element()
+            }
+            SidebarSession::Acp(id) => self.render_acp_row(id, theme, cx).into_any_element(),
+        }
+    }
+
     fn render_agent_row(
         &self,
         agent: &muxlane_core::model::AgentInstance,
@@ -416,45 +558,6 @@ impl MuxlaneApp {
             theme,
             cx,
         )
-    }
-
-    fn render_archived_row(
-        &self,
-        id: AgentId,
-        title: String,
-        project: String,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id(gpui::ElementId::Name(format!("archived-{id}").into()))
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(ui_px(26.))
-            .pl_4()
-            .pr_2()
-            .text_size(ui_px(11.))
-            .text_color(rgba(theme.fg1))
-            .hover(|style| style.bg(rgba(theme.bg2)))
-            .on_click(cx.listener(move |this, _event, window, cx| {
-                this.unarchive_acp_session(&id, window, cx)
-            }))
-            .child(div().w(ui_px(6.)).h(ui_px(6.)).bg(rgba(theme.fg2)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_size(ui_px(9.))
-                    .text_color(rgba(theme.fg2))
-                    .child(project),
-            )
     }
 
     fn render_session_row(
@@ -558,7 +661,9 @@ impl MuxlaneApp {
             .unwrap_or_else(|| "local".into());
 
         // ── 侧栏：机器树（统一 Machines 树：Local Machine + Projects + Sessions）
-        let local_machine_key = "local".to_string();
+        let machines = self.sidebar_machines();
+        let local_machine = &machines[0];
+        let local_machine_key = local_machine.collapse_key.clone();
         let local_collapsed = self.collapsed_machines.contains(&local_machine_key);
         let mut tree = div().flex().flex_col().py_1();
         tree = tree.child(
@@ -595,10 +700,10 @@ impl MuxlaneApp {
                     .text_color(rgba(theme.fg1))
                     .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
                     .active(|s| s.bg(rgba(theme.bg3)))
-                    .tooltip(hover_tip(i18n::text(
-                        self.language,
-                        "sidebar.connect_remote",
-                    )))
+                    .tooltip(hover_tip(
+                        i18n::text(self.language, "sidebar.connect_remote"),
+                        theme,
+                    ))
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         this.open_connect_dialog(window, cx);
                     }))
@@ -678,66 +783,22 @@ impl MuxlaneApp {
                 ),
         );
         if !local_collapsed {
-            let local_machine_id = self.local_machine_id();
-            for project in self.ordered_projects(&local_machine_id, &snap.projects) {
-                let project_key = format!("local:{}", project.id);
-                let project_collapsed = self.collapsed_projects.contains(&project_key);
+            for node in &local_machine.projects {
+                let project_collapsed = self.collapsed_projects.contains(&node.collapse_key);
                 let mut pnode = div().flex().flex_col();
-                pnode = pnode.child(self.render_project_row(project, None, theme, cx));
+                pnode = pnode.child(self.render_project_row(node.project, None, theme, cx));
                 if !project_collapsed {
-                    for agent in snap.agents_of(&project.id) {
-                        pnode = pnode.child(self.render_agent_row(agent, false, theme, cx));
-                    }
-                    for id in self
-                        .acp_metadata
-                        .iter()
-                        .filter(|(_, thread)| thread.project_id == project.id)
-                        .map(|(id, _)| id.clone())
-                        .collect::<Vec<_>>()
-                    {
-                        pnode = pnode.child(self.render_acp_row(&id, theme, cx));
+                    for session in &node.sessions {
+                        pnode = pnode.child(self.render_sidebar_session(session, false, theme, cx));
                     }
                 }
                 tree = tree.child(pnode);
             }
         }
 
-        let mut archived: Vec<_> = self
-            .acp_records
-            .values()
-            .filter(|record| record.archived)
-            .map(|record| {
-                let project = snap
-                    .project(&record.metadata.project_id)
-                    .map(|project| project.name.clone())
-                    .unwrap_or_else(|| record.metadata.project_id.clone());
-                (
-                    record.updated_at,
-                    record.metadata.ui_id.clone(),
-                    record.metadata.title.clone(),
-                    project,
-                )
-            })
-            .collect();
-        archived.sort_by_key(|(updated_at, _, _, _)| std::cmp::Reverse(*updated_at));
-        if !archived.is_empty() {
-            tree = tree.child(
-                div()
-                    .px_3()
-                    .pt_3()
-                    .pb_1()
-                    .text_size(ui_px(9.))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgba(theme.fg2))
-                    .child(i18n::text(self.language, "sidebar.archived_threads")),
-            );
-            for (_, id, title, project) in archived {
-                tree = tree.child(self.render_archived_row(id, title, project, theme, cx));
-            }
-        }
-
         // ── 远程机器分组
-        for host in &self.remotes {
+        for machine in machines.iter().skip(1) {
+            let host = machine.remote.expect("non-local sidebar machine");
             let name = host.cfg.name.clone();
             let machine_target = DeleteTarget::RemoteMachine { host: name.clone() };
             let (dot_color, status_text, remediation) = match self.remote_states.get(&name) {
@@ -816,7 +877,7 @@ impl MuxlaneApp {
             } else {
                 status_text.to_string()
             };
-            let machine_key = format!("remote:{name}");
+            let machine_key = machine.collapse_key.clone();
             let machine_collapsed = self.collapsed_machines.contains(&machine_key);
             let snap_ref = self.remote_snaps.get(&name);
             let machine_attention = snap_ref
@@ -1111,25 +1172,16 @@ impl MuxlaneApp {
                 );
             }
             if !machine_collapsed {
-                if let Some(rsnap) = snap_ref {
-                    let machine_id = rsnap
-                        .machine
-                        .as_ref()
-                        .map(|machine| machine.machine_id.clone())
-                        .unwrap_or_default();
-                    for project in self.ordered_projects(&machine_id, &rsnap.projects) {
-                        let project_key = format!("remote:{name}:{}", project.id);
-                        let project_collapsed = self.collapsed_projects.contains(&project_key);
-                        let mut pnode = div().flex().flex_col();
-                        pnode =
-                            pnode.child(self.render_project_row(project, Some(&name), theme, cx));
-                        if !project_collapsed {
-                            for agent in rsnap.agents_of(&project.id) {
-                                pnode = pnode.child(self.render_agent_row(agent, true, theme, cx));
-                            }
+                for node in &machine.projects {
+                    let project_collapsed = self.collapsed_projects.contains(&node.collapse_key);
+                    let mut pnode = div().flex().flex_col();
+                    pnode = pnode.child(self.render_project_row(node.project, Some(&name), theme, cx));
+                    if !project_collapsed {
+                        for session in &node.sessions {
+                            pnode = pnode.child(self.render_sidebar_session(session, true, theme, cx));
                         }
-                        rnode = rnode.child(pnode);
                     }
+                    rnode = rnode.child(pnode);
                 }
             }
             tree = tree.child(rnode);
@@ -1165,7 +1217,7 @@ impl MuxlaneApp {
                 .cursor_pointer()
                 .hover(|s| s.bg(rgba(theme.bg2)))
                 .active(|s| s.bg(rgba(theme.bg3)))
-                .tooltip(hover_tip(i18n::text(self.language, "sidebar.hide")))
+                .tooltip(hover_tip(i18n::text(self.language, "sidebar.hide"), theme))
                 .on_click(cx.listener(|this, _ev, window, cx| {
                     this.set_sidebar_visible(false, window, cx);
                 }))
@@ -1200,10 +1252,10 @@ impl MuxlaneApp {
                 .cursor_pointer()
                 .hover(|s| s.bg(rgba(theme.bg2)))
                 .active(|s| s.bg(rgba(theme.bg3)))
-                .tooltip(hover_tip(i18n::text(
-                    self.language,
-                    "sidebar.notifications",
-                )))
+                .tooltip(hover_tip(
+                    i18n::text(self.language, "sidebar.notifications"),
+                    theme,
+                ))
                 .when(unread_count > 0, |el| {
                     el.bg(rgba(Theme::with_alpha(badge_color, 0x18)))
                 })
@@ -1234,7 +1286,11 @@ impl MuxlaneApp {
                             .when_some(badge_glow, |b, glow| b.border_1().border_color(rgba(glow)))
                             .text_size(ui_px(9.))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgba(theme.on_accent))
+                            .text_color(rgba(if has_blocked {
+                                theme.on_warning
+                            } else {
+                                theme.on_accent
+                            }))
                             .child(if unread_count > 99 {
                                 "99+".to_string()
                             } else {
@@ -1249,6 +1305,9 @@ impl MuxlaneApp {
                     i18n::text(self.language, "common.settings"),
                     theme,
                 )
+                .when(cfg!(test), |button| {
+                    button.debug_selector(|| "ux-open-settings".into())
+                })
                 .w(ui_px(32.))
                 .h(ui_px(32.))
                 .flex()
@@ -1258,12 +1317,13 @@ impl MuxlaneApp {
                 .hover(|s| s.bg(rgba(theme.bg2)))
                 .active(|s| s.bg(rgba(theme.bg3)))
                 .when(self.settings_open, |el| el.bg(rgba(theme.bg2)))
-                .tooltip(hover_tip(i18n::text(self.language, "common.settings")))
+                .tooltip(hover_tip(
+                    i18n::text(self.language, "common.settings"),
+                    theme,
+                ))
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .on_click(cx.listener(|this, _ev, window, cx| {
-                    this.settings_open = true;
-                    this.palette_open = false;
-                    this.focus.focus(window, cx);
-                    cx.notify();
+                    this.open_settings(window, cx);
                 }))
                 .child(panel_icon(
                     SETTINGS_ICON,

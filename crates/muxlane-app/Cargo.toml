@@ -27,6 +27,11 @@ base64.workspace = true
 pulldown-cmark = "0.13"
 regex.workspace = true
 url = "2"
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+
+similar = "2.7"
 
 [dev-dependencies]
+muxlane-acp = { path = "../muxlane-acp", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

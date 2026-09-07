@@ -24,6 +24,7 @@ pub(crate) struct NotificationDraft {
     pub(crate) to: AgentStatus,
     pub(crate) message: Option<String>,
     pub(crate) sound_enabled: bool,
+    pub(crate) desktop_enabled: bool,
 }
 
 pub(crate) enum NotificationCenterEvent {
@@ -169,7 +170,9 @@ impl NotificationCenter {
         };
 
         if draft.focused {
-            sound::send_desktop_notification(&toast_title, &body);
+            if draft.desktop_enabled {
+                sound::send_desktop_notification(&toast_title, &body);
+            }
             cx.notify();
             return;
         }
@@ -196,7 +199,9 @@ impl NotificationCenter {
                 _ => {}
             }
         }
-        sound::send_desktop_notification(&toast_title, &body);
+        if draft.desktop_enabled {
+            sound::send_desktop_notification(&toast_title, &body);
+        }
         cx.notify();
     }
 
@@ -209,6 +214,11 @@ impl NotificationCenter {
         self.theme_mode = theme_mode;
         self.language = language;
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entries(&self) -> &[Notification] {
+        &self.notifications
     }
 
     pub(crate) fn summary(&self) -> (usize, bool, bool) {
@@ -444,6 +454,9 @@ impl NotificationCenter {
                                     .id(gpui::ElementId::Name(
                                         format!("notif-popover-item-{idx}").into(),
                                     ))
+                                    .when(cfg!(test), |el| {
+                                        el.debug_selector(move || format!("notif-popover-item-{idx}"))
+                                    })
                                     .relative()
                                     .flex()
                                     .flex_col()
@@ -551,6 +564,9 @@ impl Render for NotificationCenter {
                         let toast_id = toast.id;
                         div()
                             .id(gpui::ElementId::Name(format!("toast-{toast_id}").into()))
+                            .when(cfg!(test), |el| {
+                                el.debug_selector(move || format!("toast-{toast_id}"))
+                            })
                             .relative()
                             .overflow_hidden()
                             .flex()

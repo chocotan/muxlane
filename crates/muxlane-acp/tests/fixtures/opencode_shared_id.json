@@ -1,0 +1,25 @@
+{
+  "revision": 25,
+  "items": [
+    {"Message":{"id":"local-message-1","role":"User","text":"示例"}},
+    {"Thought":{"id":"msg_fixture","text":"Sanitized reasoning"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"你"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"好"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"。"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"我"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"是"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"示"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"例"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"助"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"手"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"，"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"请"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"提"}},
+    {"Message":{"id":"msg_fixture","role":"Assistant","text":"问。"}}
+  ],
+  "plan": null,
+  "usage": {"used":75786,"size":300000,"cost":{"amount":0.0,"currency":"USD"}},
+  "available_commands": [],
+  "modes": null,
+  "config_options": []
+}

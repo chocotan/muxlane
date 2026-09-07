@@ -23,6 +23,12 @@ struct DragTab {
 #[derive(Clone)]
 pub(super) struct DividerDrag;
 
+#[derive(Default)]
+pub(crate) struct PaneTabScroll {
+    pub(super) scroll: gpui::ScrollHandle,
+    active: Option<AgentId>,
+}
+
 #[derive(Clone)]
 pub(crate) struct SplitDrag {
     split_id: String,
@@ -66,28 +72,6 @@ impl MuxlaneApp {
         self.persist();
     }
 
-    fn activate_edge_tab(&mut self, first: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let agent = if first {
-            self.pane_tree
-                .all_groups()
-                .into_iter()
-                .find_map(|group| group.tabs.first().cloned())
-        } else {
-            self.pane_tree
-                .all_groups()
-                .into_iter()
-                .rev()
-                .find_map(|group| group.tabs.last().cloned())
-        };
-        if let Some(agent) = agent {
-            let pane = self
-                .pane_tree
-                .pane_for_agent(&agent)
-                .unwrap_or_else(|| self.active_pane.clone());
-            self.activate_agent(&pane, &agent, window, cx);
-        }
-    }
-
     pub(super) fn select_tab_n(
         &mut self,
         index: usize,
@@ -103,90 +87,25 @@ impl MuxlaneApp {
     }
 
     pub(super) fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((cur, len)) = self.pane_tree.group(&self.active_pane).map(|group| {
-            (
-                group
-                    .active
-                    .as_ref()
-                    .and_then(|agent| group.tabs.iter().position(|tab| tab == agent))
-                    .unwrap_or(0),
-                group.tabs.len(),
-            )
-        }) else {
-            return;
-        };
-        if cur + 1 < len {
-            if let Some(agent) = self
-                .pane_tree
-                .group(&self.active_pane)
-                .and_then(|group| group.tabs.get(cur + 1))
-                .cloned()
-            {
-                let pane = self.active_pane.clone();
-                self.activate_agent(&pane, &agent, window, cx);
-            }
-            return;
-        }
-
-        let target = crate::workspace::adjacent_project_target(
-            &self.available_project_keys(),
-            self.workspace.current_project(),
-            true,
-        );
-        if let Some(target) = target {
-            self.select_project_workspace(target, window, cx);
-            self.activate_edge_tab(true, window, cx);
-        } else if let Some(agent) = self
-            .pane_tree
-            .group(&self.active_pane)
-            .and_then(|group| group.tabs.first())
-            .cloned()
-        {
-            let pane = self.active_pane.clone();
-            self.activate_agent(&pane, &agent, window, cx);
-        }
+        self.navigate_sidebar_session(true, window, cx);
     }
 
     pub(super) fn prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(cur) = self.pane_tree.group(&self.active_pane).map(|group| {
-            group
-                .active
-                .as_ref()
-                .and_then(|agent| group.tabs.iter().position(|tab| tab == agent))
-                .unwrap_or(0)
-        }) else {
+        self.navigate_sidebar_session(false, window, cx);
+    }
+
+    fn navigate_sidebar_session(
+        &mut self,
+        next: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.adjacent_sidebar_session(next) else {
             return;
         };
-        if cur > 0 {
-            if let Some(agent) = self
-                .pane_tree
-                .group(&self.active_pane)
-                .and_then(|group| group.tabs.get(cur - 1))
-                .cloned()
-            {
-                let pane = self.active_pane.clone();
-                self.activate_agent(&pane, &agent, window, cx);
-            }
-            return;
-        }
-
-        let target = crate::workspace::adjacent_project_target(
-            &self.available_project_keys(),
-            self.workspace.current_project(),
-            false,
-        );
-        if let Some(target) = target {
-            self.select_project_workspace(target, window, cx);
-            self.activate_edge_tab(false, window, cx);
-        } else if let Some(agent) = self
-            .pane_tree
-            .group(&self.active_pane)
-            .and_then(|group| group.tabs.last())
-            .cloned()
-        {
-            let pane = self.active_pane.clone();
-            self.activate_agent(&pane, &agent, window, cx);
-        }
+        self.collapsed_machines.remove(&target.machine_collapse_key);
+        self.collapsed_projects.remove(&target.project_collapse_key);
+        self.jump_to_agent(&target.agent, window, cx);
     }
 
     pub(super) fn close_tab(
@@ -203,7 +122,7 @@ impl MuxlaneApp {
                 .and_then(|group| group.active.as_ref())
                 == Some(agent);
         if self.is_acp_session(agent) {
-            self.archive_acp_session(agent, window, cx);
+            self.finish_delete_session(agent, window, cx);
         } else {
             let remote = self.remote_snaps.values().any(|snapshot| {
                 snapshot
@@ -233,6 +152,16 @@ impl MuxlaneApp {
         {
             self.activate_agent(target_pane, &drag.agent, window, cx);
         }
+    }
+
+    pub(crate) fn selected_terminal_preset(&self) -> muxlane_core::AgentPreset {
+        self.presets
+            .iter()
+            .find(|preset| preset.id == self.default_terminal_preset)
+            .cloned()
+            .unwrap_or_else(|| {
+                muxlane_core::builtin_presets(muxlane_term::default_shell_program()).remove(0)
+            })
     }
 
     pub(super) fn spawn_shell_for_pane(
@@ -268,6 +197,7 @@ impl MuxlaneApp {
                     .map(|project| ProjectKey::new(self.local_machine_id(), project.id.clone()))
             });
         let Some(target_key) = target_key else { return };
+        let preset = self.selected_terminal_preset();
         if target_key.machine_id != self.local_machine_id() {
             let Some(host) = self.remote_host_for_key(&target_key) else {
                 return;
@@ -276,7 +206,7 @@ impl MuxlaneApp {
                 crate::remotes::RemoteAgentSpawnRequest {
                     host,
                     project: target_key.project_id,
-                    preset: None,
+                    preset: Some(preset),
                     preferred_pane: Some(pane.clone()),
                     split_axis,
                 },
@@ -288,14 +218,7 @@ impl MuxlaneApp {
         let Some(project) = self.last_snapshot.project(&target_key.project_id).cloned() else {
             return;
         };
-        let params = muxlane_core::protocol::AgentSpawnParams {
-            project: project.id.clone(),
-            agent_type: Some(muxlane_core::model::AgentType::Shell),
-            program: None,
-            args: None,
-            env: None,
-            preset_name: None,
-        };
+        let params = crate::sessions::local_preset_params(&preset, &project);
         let server = Arc::clone(&self.server);
         let pane = self.capture_spawn_target(&target_key, Some(pane));
         let collapse_key = format!("local:{}", project.id);
@@ -336,7 +259,7 @@ impl MuxlaneApp {
                 Err(error) => {
                     this.notifications.update(cx, |center, cx| {
                         center.show_error(
-                            i18n::text(this.language, "error.create_shell")
+                            i18n::text(this.language, "error.create_session")
                                 .replace("{error}", &error.to_string()),
                             cx,
                         )
@@ -361,7 +284,7 @@ impl MuxlaneApp {
             .and_then(|id| self.acp_views.get(id))
             .and_then(|view| {
                 let view = view.read(cx);
-                Some((view.project_id.clone(), view.profile?))
+                Some((view.project_id.clone(), view.profile.clone()?))
             });
         if let Some((project_id, profile)) = acp_target {
             self.spawn_acp_view_in_pane(project_id, profile, Some(pane.clone()), window, cx);
@@ -379,7 +302,7 @@ impl MuxlaneApp {
         self.spawn_shell_for_pane(pane, None, window, cx);
     }
 
-    /// 显式分屏：新 pane 始终启动普通 Shell，不复制当前 agent 类型。
+    /// 显式分屏：新 pane 使用默认终端预设，不复制当前 agent 类型。
     pub(super) fn split_pane(
         &mut self,
         pane: &PaneId,
@@ -635,13 +558,27 @@ impl MuxlaneApp {
                 let pane_id = group.id.clone();
                 let active_id = group.active.clone();
                 let is_focused_pane = group.id == self.active_pane;
+                let tab_scroll = self.pane_tab_scrolls.entry(pane_id.clone()).or_default();
+                if tab_scroll.active != active_id {
+                    if let Some(index) = group
+                        .tabs
+                        .iter()
+                        .position(|id| Some(id) == active_id.as_ref())
+                    {
+                        tab_scroll.scroll.scroll_to_item(index);
+                    }
+                    tab_scroll.active = active_id.clone();
+                }
+                let scroll = tab_scroll.scroll.clone();
                 let mut tabs = div()
+                    .id(gpui::ElementId::Name(format!("pane-tabs-{pane_id}").into()))
+                    .track_scroll(&scroll)
                     .flex()
+                    .flex_shrink_1()
+                    .min_w_0()
                     .items_center()
-                    .h(ui_px(28.))
-                    .bg(rgba(theme.bg1))
-                    .border_b_1()
-                    .border_color(rgba(theme.line));
+                    .h_full()
+                    .overflow_x_scroll();
                 for tab_id in group.tabs.clone() {
                     let is_active = active_id.as_ref() == Some(&tab_id);
                     let pane_for_tab = pane_id.clone();
@@ -672,6 +609,7 @@ impl MuxlaneApp {
                     let tab = div()
                         .id(gpui::ElementId::Name(format!("tab-{tab_id}").into()))
                         .flex()
+                        .flex_none()
                         .items_center()
                         .gap_1p5()
                         .h_full()
@@ -738,12 +676,20 @@ impl MuxlaneApp {
                                 this.move_dragged_tab(drag, &pane, slot, window, cx)
                             }
                         }))
-                        .child(render_status_indicator(
+                        .child(div().flex_none().child(render_status_indicator(
                             status,
                             format!("pane-{pane_id}-agent-{tab_id}"),
                             theme,
-                        ))
-                        .child(div().line_height(ui_px(14.)).child(tab_title.clone()))
+                        )))
+                        .child(
+                            div()
+                                .max_w(ui_px(180.))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .line_height(ui_px(14.))
+                                .child(tab_title.clone()),
+                        )
+                        .tooltip(hover_tip(tab_title.clone(), theme))
                         .child(
                             semantic_button(
                                 gpui::ElementId::Name(format!("tab-close-{tab_id}").into()),
@@ -751,9 +697,10 @@ impl MuxlaneApp {
                                 theme,
                             )
                             .text_color(rgba(theme.fg2))
+                            .flex_none()
                             .px_1()
                             .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                            .tooltip(hover_tip(format!("Close tab {tab_title}")))
+                            .tooltip(hover_tip(format!("Close tab {tab_title}"), theme))
                             .on_click(cx.listener({
                                 let id = tab_id.clone();
                                 let pane = pane_id.clone();
@@ -770,14 +717,15 @@ impl MuxlaneApp {
                 {
                     i18n::text(self.language, "acp.new_thread").to_string()
                 } else {
-                    i18n::text(self.language, "palette.new").replace("{name}", "shell tab")
+                    i18n::text(self.language, "settings.shortcut.new_tab").to_string()
                 };
-                tabs = tabs.child(
+                let new_tab = div().flex().flex_none().h_full().items_center().child(
                     semantic_button(
                         gpui::ElementId::Name(format!("new-tab-{pane_id}").into()),
                         new_tab_label.clone(),
                         theme,
                     )
+                    .when(cfg!(test), |button| button.debug_selector(|| "ux-new-tab".into()))
                     .w(ui_px(28.))
                     .h_full()
                     .flex()
@@ -786,7 +734,7 @@ impl MuxlaneApp {
                     .text_size(ui_px(14.))
                     .text_color(rgba(theme.fg1))
                     .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                    .tooltip(hover_tip(new_tab_label))
+                    .tooltip(hover_tip(new_tab_label, theme))
                     .on_click(cx.listener({
                         let pane = pane_id.clone();
                         move |this, _ev, window, cx| this.new_contextual_tab(&pane, window, cx)
@@ -798,18 +746,67 @@ impl MuxlaneApp {
                     .as_ref()
                     .filter(|id| self.is_acp_session(id))
                     .cloned();
-                tabs = tabs.child(
-                    div()
-                        .ml_auto()
-                        .flex()
-                        .items_center()
-                        .h_full()
-                        .text_color(rgba(theme.fg1))
-                        .when_some(active_acp_id, |controls, agent| {
-                            controls.child(
+                let tools = div().flex().flex_none().h_full().items_center()
+                    .when(cfg!(test), |tools| {
+                        tools.debug_selector(|| "ux-pane-tools".into())
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .h_full()
+                            .text_color(rgba(theme.fg1))
+                            .when_some(active_acp_id, |controls, agent| {
+                                controls.child(
+                                    semantic_button(
+                                        gpui::ElementId::Name(format!("acp-more-{pane_id}").into()),
+                                        i18n::text(self.language, "acp.more"),
+                                        theme,
+                                    )
+                                    .w(ui_px(28.))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|style| {
+                                        style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0))
+                                    })
+                                    .tooltip(hover_tip(
+                                        i18n::text(self.language, "acp.more"),
+                                        theme,
+                                    ))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            move |this,
+                                                  event: &gpui::MouseDownEvent,
+                                                  window,
+                                                  cx| {
+                                                this.tree_menu = None;
+                                                this.session_menu =
+                                                    Some(crate::menus::SessionMenu {
+                                                        agent: agent.clone(),
+                                                        position: crate::menus::clamp_menu_position(
+                                                            event.position,
+                                                            window.viewport_size(),
+                                                            size(ui_px(180.), ui_px(44.)),
+                                                        ),
+                                                        remote: false,
+                                                    });
+                                                this.palette_open = false;
+                                                cx.stop_propagation();
+                                                cx.notify();
+                                            },
+                                        ),
+                                    )
+                                    .child(panel_icon(MORE_ICON, theme.fg1)),
+                                )
+                            })
+                            .child(
                                 semantic_button(
-                                    gpui::ElementId::Name(format!("acp-more-{pane_id}").into()),
-                                    i18n::text(self.language, "acp.more"),
+                                    gpui::ElementId::Name(format!("split-h-{pane_id}").into()),
+                                    i18n::text(self.language, "palette.horizontal_split"),
                                     theme,
                                 )
                                 .w(ui_px(28.))
@@ -817,135 +814,115 @@ impl MuxlaneApp {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .hover(|style| {
-                                    style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0))
-                                })
-                                .tooltip(hover_tip(i18n::text(self.language, "acp.more")))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(
-                                        move |this, event: &gpui::MouseDownEvent, window, cx| {
-                                            this.tree_menu = None;
-                                            this.session_menu = Some(crate::menus::SessionMenu {
-                                                agent: agent.clone(),
-                                                position: crate::menus::clamp_menu_position(
-                                                    event.position,
-                                                    window.viewport_size(),
-                                                    size(ui_px(180.), ui_px(44.)),
-                                                ),
-                                                remote: false,
-                                            });
-                                            this.palette_open = false;
-                                            cx.stop_propagation();
-                                            cx.notify();
-                                        },
-                                    ),
-                                )
-                                .child(panel_icon(MORE_ICON, theme.fg1)),
-                            )
-                        })
-                        .child(
-                            semantic_button(
-                                gpui::ElementId::Name(format!("split-h-{pane_id}").into()),
-                                i18n::text(self.language, "palette.horizontal_split"),
-                                theme,
-                            )
-                            .w(ui_px(28.))
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                            .tooltip(hover_tip(i18n::text(
-                                self.language,
-                                "palette.horizontal_split",
-                            )))
-                            .on_click(cx.listener({
-                                let pane = pane_id.clone();
-                                move |this, _ev, window, cx| {
-                                    this.split_pane(&pane, SplitAxis::Horizontal, window, cx)
-                                }
-                            }))
-                            .child(panel_icon(SPLIT_HORIZONTAL_ICON, theme.fg1)),
-                        )
-                        .child(
-                            semantic_button(
-                                gpui::ElementId::Name(format!("split-v-{pane_id}").into()),
-                                i18n::text(self.language, "palette.vertical_split"),
-                                theme,
-                            )
-                            .w(ui_px(28.))
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                            .tooltip(hover_tip(i18n::text(
-                                self.language,
-                                "palette.vertical_split",
-                            )))
-                            .on_click(cx.listener({
-                                let pane = pane_id.clone();
-                                move |this, _ev, window, cx| {
-                                    this.split_pane(&pane, SplitAxis::Vertical, window, cx)
-                                }
-                            }))
-                            .child(panel_icon(SPLIT_VERTICAL_ICON, theme.fg1)),
-                        )
-                        .child(
-                            semantic_button(
-                                gpui::ElementId::Name(format!("maximize-{pane_id}").into()),
-                                i18n::text(self.language, "palette.maximize"),
-                                theme,
-                            )
-                            .w(ui_px(28.))
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
-                            .tooltip(hover_tip(i18n::text(self.language, "palette.maximize")))
-                            .on_click(cx.listener({
-                                let pane = pane_id.clone();
-                                move |this, _ev, _window, cx| this.toggle_maximize(&pane, cx)
-                            }))
-                            .child(panel_icon(
-                                if self.maximized_pane.as_ref() == Some(&pane_id) {
-                                    RESTORE_ICON
-                                } else {
-                                    MAXIMIZE_ICON
-                                },
-                                theme.fg1,
-                            )),
-                        )
-                        .when(self.pane_tree.leaf_count() > 1, |controls| {
-                            controls.child(
-                                semantic_button(
-                                    gpui::ElementId::Name(format!("close-pane-{pane_id}").into()),
-                                    i18n::text(self.language, "palette.close_split"),
+                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                                .tooltip(hover_tip(
+                                    i18n::text(self.language, "palette.horizontal_split"),
                                     theme,
-                                )
-                                .w(ui_px(28.))
-                                .h_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(rgba(theme.fg1))
-                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.red)))
-                                .tooltip(hover_tip(i18n::text(
-                                    self.language,
-                                    "palette.close_split",
-                                )))
+                                ))
                                 .on_click(cx.listener({
                                     let pane = pane_id.clone();
                                     move |this, _ev, window, cx| {
-                                        this.close_split_pane(&pane, window, cx)
+                                        this.split_pane(&pane, SplitAxis::Horizontal, window, cx)
                                     }
                                 }))
-                                .child(panel_icon(CLOSE_ICON, theme.red)),
+                                .child(panel_icon(SPLIT_HORIZONTAL_ICON, theme.fg1)),
                             )
-                        }),
-                );
+                            .child(
+                                semantic_button(
+                                    gpui::ElementId::Name(format!("split-v-{pane_id}").into()),
+                                    i18n::text(self.language, "palette.vertical_split"),
+                                    theme,
+                                )
+                                .w(ui_px(28.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                                .tooltip(hover_tip(
+                                    i18n::text(self.language, "palette.vertical_split"),
+                                    theme,
+                                ))
+                                .on_click(cx.listener({
+                                    let pane = pane_id.clone();
+                                    move |this, _ev, window, cx| {
+                                        this.split_pane(&pane, SplitAxis::Vertical, window, cx)
+                                    }
+                                }))
+                                .child(panel_icon(SPLIT_VERTICAL_ICON, theme.fg1)),
+                            )
+                            .child(
+                                semantic_button(
+                                    gpui::ElementId::Name(format!("maximize-{pane_id}").into()),
+                                    i18n::text(self.language, "palette.maximize"),
+                                    theme,
+                                )
+                                .w(ui_px(28.))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0)))
+                                .tooltip(hover_tip(
+                                    i18n::text(self.language, "palette.maximize"),
+                                    theme,
+                                ))
+                                .on_click(cx.listener({
+                                    let pane = pane_id.clone();
+                                    move |this, _ev, _window, cx| this.toggle_maximize(&pane, cx)
+                                }))
+                                .child(panel_icon(
+                                    if self.maximized_pane.as_ref() == Some(&pane_id) {
+                                        RESTORE_ICON
+                                    } else {
+                                        MAXIMIZE_ICON
+                                    },
+                                    theme.fg1,
+                                )),
+                            )
+                            .when(self.pane_tree.leaf_count() > 1, |controls| {
+                                controls.child(
+                                    semantic_button(
+                                        gpui::ElementId::Name(
+                                            format!("close-pane-{pane_id}").into(),
+                                        ),
+                                        i18n::text(self.language, "palette.close_split"),
+                                        theme,
+                                    )
+                                    .w(ui_px(28.))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgba(theme.fg1))
+                                    .hover(|s| s.bg(rgba(theme.bg2)).text_color(rgba(theme.red)))
+                                    .tooltip(hover_tip(
+                                        i18n::text(self.language, "palette.close_split"),
+                                        theme,
+                                    ))
+                                    .on_click(cx.listener({
+                                        let pane = pane_id.clone();
+                                        move |this, _ev, window, cx| {
+                                            this.close_split_pane(&pane, window, cx)
+                                        }
+                                    }))
+                                    .child(panel_icon(CLOSE_ICON, theme.red)),
+                                )
+                            }),
+                    );
+
+                let tabs = div()
+                    .flex()
+                    .flex_none()
+                    .min_w_0()
+                    .h(ui_px(28.))
+                    .bg(rgba(theme.bg1))
+                    .border_b_1()
+                    .border_color(rgba(theme.line))
+                    .child(tabs)
+                    .child(new_tab)
+                    .child(div().flex_1())
+                    .child(tools);
 
                 let active_summary = active_id
                     .as_ref()

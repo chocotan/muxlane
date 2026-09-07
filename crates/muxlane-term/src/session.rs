@@ -308,6 +308,15 @@ impl PtySession {
             .unwrap_or_default()
     }
 
+    /// 回放尾部 n 字节：锁内只拷尾部，供屏幕采样等热路径使用
+    pub fn replay_tail(&self, n: usize) -> bytes::Bytes {
+        self.shared
+            .replay
+            .lock()
+            .map(|r| r.tail(n))
+            .unwrap_or_default()
+    }
+
     /// 回放快照的 base64（wire 协议直发）
     pub fn replay_b64(&self) -> String {
         let snap = self
@@ -440,18 +449,53 @@ impl PtySession {
 }
 
 fn update_tmux_environment(server: &str, session: &str, env: &[(String, String)]) {
-    for (key, value) in env {
-        let _ = std::process::Command::new("tmux")
-            .args(["-L", server, "set-environment", "-t", session, key, value])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+    // 单次 tmux 调用批量设置（`\;` 分隔多条命令），避免每变量一次 fork+exec。
+    if env.is_empty() {
+        return;
+    }
+    let mut args: Vec<String> = vec!["-L".into(), server.into()];
+    for (index, (key, value)) in env.iter().enumerate() {
+        if index > 0 {
+            args.push(";".into());
+        }
+        args.push("set-environment".into());
+        args.push("-t".into());
+        args.push(session.into());
+        args.push(key.clone());
+        args.push(value.clone());
+    }
+    let _ = std::process::Command::new("tmux")
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// tmux server 全局配置是幂等的且与会话无关：每个 tmux server 每进程只配置一次，
+/// 避免每次 spawn/attach 都 fork 8+ 个子进程（启动恢复 N 个会话时放大为 N×13 次）。
+/// 仅在全部命令成功后才缓存；首次 spawn 时 server 尚未启动属预期失败，
+/// 不缓存、下次 spawn 重试（此时 server 已由 new-session -f 拉起并读取配置）。
+fn configure_tmux_server(server: &str, config_path: &Path) {
+    use std::sync::{Mutex, OnceLock};
+    static CONFIGURED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let configured = CONFIGURED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    {
+        let done = configured.lock().unwrap_or_else(|e| e.into_inner());
+        if done.contains(server) {
+            return;
+        }
+    }
+    if configure_tmux_server_inner(server, config_path) {
+        let mut done = configured.lock().unwrap_or_else(|e| e.into_inner());
+        done.insert(server.to_string());
     }
 }
 
-fn configure_tmux_server(server: &str, config_path: &Path) {
+/// 返回全部命令是否成功。
+fn configure_tmux_server_inner(server: &str, config_path: &Path) -> bool {
     // tmux 接管鼠标：滚轮可浏览历史，并在全屏应用中透传；
     // 按住 Shift 时仍可在前端直接划词复制。
+    let mut all_ok = true;
     for (option, value) in [
         ("status", "off"),
         ("mouse", "on"),
@@ -461,20 +505,24 @@ fn configure_tmux_server(server: &str, config_path: &Path) {
         ("set-clipboard", "external"),
         ("set-titles", "off"),
     ] {
-        let _ = std::process::Command::new("tmux")
+        let ok = std::process::Command::new("tmux")
             .args(["-L", server, "set-option", "-g", option, value])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
+            .status()
+            .is_ok_and(|status| status.success());
+        all_ok &= ok;
     }
 
     // `-f` 只在 server 首次启动时读取；常驻 server 需要主动刷新按键绑定。
-    let _ = std::process::Command::new("tmux")
+    let sourced = std::process::Command::new("tmux")
         .args(["-L", server, "source-file"])
         .arg(config_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+        .is_ok_and(|status| status.success());
+    all_ok && sourced
 }
 
 fn tmux_config_path() -> PathBuf {

@@ -1,7 +1,15 @@
 #![forbid(unsafe_code)]
 
+pub mod catalog;
 mod host;
+#[cfg(test)]
+mod completion_tests;
+mod registry;
 mod thread;
+
+pub use registry::{
+    local_profile, AgentDefinition, AgentEntry, AgentRegistry, Availability, LocalProbe,
+};
 
 use host::HostServices;
 
@@ -180,36 +188,50 @@ pub fn project_prompt(payload: PromptPayload) -> Vec<v1::ContentBlock> {
     payload.into_content_blocks()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Profile {
     Claude,
     Codex,
     Pi,
+    Custom(AgentDefinition),
 }
 
 impl Profile {
-    pub fn id(self) -> &'static str {
+    pub fn id(&self) -> &str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Pi => "pi",
+            Self::Custom(definition) => &definition.id,
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Pi => "Pi",
+            Self::Custom(definition) => &definition.label,
         }
     }
 
-    pub fn command(self) -> &'static str {
-        match self {
-            Self::Claude => "npx -y @agentclientprotocol/claude-agent-acp@latest",
-            Self::Codex => "npx -y @agentclientprotocol/codex-acp@latest",
-            Self::Pi => "npx pi-acp",
+    pub fn definition(&self) -> AgentDefinition {
+        if let Self::Custom(definition) = self {
+            return definition.clone();
         }
+        catalog::LOCAL_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == self.id())
+            .expect("every built-in profile has a local recipe")
+            .definition()
+    }
+
+    /// Display only; launching always uses the structured definition.
+    pub fn command(&self) -> String {
+        let definition = self.definition();
+        format!("{} {}", definition.command, definition.args.join(" "))
+            .trim_end()
+            .to_owned()
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
@@ -352,12 +374,36 @@ pub enum ElicitationResponse {
     Cancel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TerminalCommand {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalSnapshot {
     pub id: String,
     pub output: String,
     pub truncated: bool,
     pub exit_code: Option<u32>,
+    #[serde(default)]
+    pub command: Option<TerminalCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalOutputState {
+    /// A query has been submitted; only used by the local view.
+    Pending,
+    Ready(TerminalSnapshot),
+    Unavailable,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalQueryResult {
+    pub id: String,
+    pub state: TerminalOutputState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,6 +432,9 @@ pub enum Event {
     PromptAccepted {
         id: PromptId,
     },
+    PromptCompleted {
+        id: PromptId,
+    },
     PromptRejected {
         id: PromptId,
         error: SessionError,
@@ -394,10 +443,11 @@ pub enum Event {
     Permission {
         id: String,
         title: String,
+        tool_id: String,
         options: Vec<PermissionOption>,
     },
     Elicitation(ElicitationRequest),
-    TerminalOutput(TerminalSnapshot),
+    TerminalOutput(TerminalQueryResult),
     Error(SessionError),
 }
 
@@ -429,6 +479,30 @@ enum Command {
 #[derive(Clone)]
 pub struct AcpHandle {
     tx: mpsc::UnboundedSender<Command>,
+}
+
+/// An in-memory worker endpoint for exercising the real handle without spawning an agent.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::*;
+
+    pub struct CommandReceiver(mpsc::UnboundedReceiver<Command>);
+
+    impl CommandReceiver {
+        pub fn try_permission(&mut self) -> Option<(String, Option<String>)> {
+            match self.0.try_recv() {
+                Ok(Command::Permission { id, option }) => Some((id, option)),
+                Ok(command) => panic!("expected permission command, got {command:?}"),
+                Err(mpsc::error::TryRecvError::Empty) => None,
+                Err(mpsc::error::TryRecvError::Disconnected) => panic!("handle dropped"),
+            }
+        }
+    }
+
+    pub fn command_channel() -> (AcpHandle, CommandReceiver) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (AcpHandle { tx }, CommandReceiver(rx))
+    }
 }
 
 impl AcpHandle {
@@ -553,7 +627,7 @@ pub fn spawn_on_with_auth(
 ) -> ActiveSession {
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
-    let agent = match profile_agent(profile) {
+    let agent = match local_profile(&profile, &LocalProbe::current()).and_then(profile_agent) {
         Ok(agent) => agent,
         Err(error) => {
             let _ = event_tx.send(Event::Connection(ConnectionPhase::Failed));
@@ -580,20 +654,40 @@ pub fn spawn_on_with_auth(
 }
 
 fn profile_agent(profile: Profile) -> Result<AcpAgent> {
+    effective_definition(&profile)?.agent()
+}
+
+/// Explicit user overrides are parsed, never executed during discovery.
+pub fn effective_definition(profile: &Profile) -> Result<AgentDefinition> {
     let override_name = match profile {
         Profile::Claude => "MUXLANE_ACP_CLAUDE_COMMAND",
         Profile::Codex => "MUXLANE_ACP_CODEX_COMMAND",
         Profile::Pi => "MUXLANE_ACP_PI_COMMAND",
+        Profile::Custom(definition) => return Ok(definition.clone()),
     };
-    if let Ok(command) = std::env::var(override_name) {
-        match AcpAgent::from_str(&command) {
-            Ok(agent) => return Ok(agent),
-            Err(error) => {
-                tracing::warn!(%error, variable = override_name, "invalid ACP command override");
-            }
+    match std::env::var(override_name) {
+        Ok(command) => {
+            let agent = parse_override(override_name, &command)?;
+            return Ok(AgentDefinition {
+                command: agent
+                    .config()
+                    .command()
+                    .to_str()
+                    .context("non-UTF8 ACP command")?
+                    .into(),
+                args: agent.config().arguments().to_vec(),
+                env: agent.config().environment().clone(),
+                ..profile.definition()
+            });
         }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => return Err(error).context(format!("invalid {override_name}")),
     }
-    AcpAgent::from_str(profile.command()).context("invalid default ACP command")
+    Ok(profile.definition())
+}
+
+fn parse_override(name: &str, command: &str) -> Result<AcpAgent> {
+    AcpAgent::from_str(command).with_context(|| format!("invalid ACP command override {name}"))
 }
 
 pub fn spawn(
@@ -612,6 +706,20 @@ pub fn spawn(
 type PermissionWaiters = Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>;
 type ElicitationWaiters = Arc<Mutex<HashMap<String, oneshot::Sender<ElicitationResponse>>>>;
 
+// Hooks also recover missing credentials from tmux; disable that fallback for ACP children.
+const TERMINAL_HOOK_ENV: [&str; 5] = [
+    "MUXLANE_AGENT_ID",
+    "MUXLANE_SOCKET",
+    "MUXLANE_HOOK_TOKEN",
+    "TMUX",
+    "TMUX_PANE",
+];
+
+fn isolate_agent_hooks(agent: AcpAgent) -> AcpAgent {
+    // The SDK supports overrides, not env_remove. Empty values disable hook reporting.
+    AcpAgent::new(agent.into_config().envs(TERMINAL_HOOK_ENV.map(|key| (key, ""))))
+}
+
 async fn run(
     agent: AcpAgent,
     cwd: PathBuf,
@@ -620,9 +728,10 @@ async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<Event>,
 ) {
+    let agent = isolate_agent_hooks(agent);
     let _ = events.send(Event::Connection(ConnectionPhase::Connecting));
     let host = match HostServices::new(&cwd) {
-        Ok(host) => host,
+        Ok(host) => host.with_events(events.clone()),
         Err(error) => {
             let _ = events.send(Event::Connection(ConnectionPhase::Failed));
             let _ = events.send(Event::Error(SessionError::worker(error, false)));
@@ -744,10 +853,15 @@ async fn run(
                         .unwrap_or_else(|| "Permission required".into());
                     let (tx, rx) = oneshot::channel();
                     waiters.lock().await.insert(id.clone(), tx);
+                    let tool_id = request.tool_call.tool_call_id.to_string();
+                    for event in project_update(v1::SessionUpdate::ToolCallUpdate(request.tool_call)) {
+                        let _ = events.send(event);
+                    }
                     if events
                         .send(Event::Permission {
                             id: id.clone(),
                             title,
+                            tool_id,
                             options,
                         })
                         .is_err()
@@ -893,7 +1007,9 @@ async fn run(
             let _ = session_events.send(Event::Turn(TurnState::Idle));
 
             let mut generating = false;
-            let (finished_tx, mut finished_rx) = mpsc::unbounded_channel::<Result<(), String>>();
+            let mut active_prompt = None;
+            let mut cancelled = false;
+            let (finished_tx, mut finished_rx) = mpsc::unbounded_channel::<(PromptId, Result<v1::StopReason, String>)>();
             let finished_sender = finished_tx.clone();
             loop {
                 tokio::select! {
@@ -908,19 +1024,22 @@ async fn run(
                                 v1::PromptRequest::new(session.session_id().clone(), blocks),
                             );
                             let callback_sender = finished_sender.clone();
+                            let callback_id = id.clone();
                             match session_connection.spawn(async move {
                                 let result = sent
                                     .block_task()
                                     .await
-                                    .map(|_| ())
+                                    .map(|response| response.stop_reason)
                                     .map_err(|error| error.to_string());
-                                if callback_sender.send(result).is_err() {
+                                if callback_sender.send((callback_id, result)).is_err() {
                                     tracing::debug!("ACP prompt completion receiver dropped");
                                 }
                                 Ok(())
                             }) {
                                 Ok(()) => {
                                     generating = true;
+                                    active_prompt = Some(id.clone());
+                                    cancelled = false;
                                     let _ = session_events.send(Event::PromptAccepted { id });
                                     let _ = session_events.send(Event::Delta(ThreadDelta::MessageChunk { id: None, role: MessageRole::User, text }));
                                     let _ = session_events.send(Event::Turn(TurnState::Generating));
@@ -940,6 +1059,7 @@ async fn run(
                             });
                         }
                         Some(Command::Cancel) => {
+                            cancelled = generating;
                             if let Err(error) = session_connection.send_notification_to(
                                 Agent,
                                 v1::CancelNotification::new(session.session_id().clone()),
@@ -954,34 +1074,11 @@ async fn run(
                             resolve_elicitation(&session_elicitation_waiters, &id, response).await;
                         }
                         Some(Command::PollTerminal(id)) => {
-                            match session_host
-                                .terminal_output_if_present(v1::TerminalOutputRequest::new(
-                                    session.session_id().clone(),
-                                    id.clone(),
-                                ))
-                                .await
-                            {
-                                Ok(Some(output)) => {
-                                    let _ = session_events.send(Event::TerminalOutput(
-                                        TerminalSnapshot {
-                                            id,
-                                            output: output.output,
-                                            truncated: output.truncated,
-                                            exit_code: output
-                                                .exit_status
-                                                .and_then(|status| status.exit_code),
-                                        },
-                                    ));
-                                }
-                                Ok(None) => {
-                                    tracing::debug!(terminal_id = %id, "skipping poll for released terminal");
-                                }
-                                Err(error) => {
-                                    let _ = session_events.send(Event::Error(
-                                        SessionError::request(error.to_string()),
-                                    ));
-                                }
-                            }
+                            let result = session_host.query_terminal(v1::TerminalOutputRequest::new(
+                                session.session_id().clone(),
+                                id,
+                            )).await;
+                            let _ = session_events.send(Event::TerminalOutput(result));
                         }
                         Some(Command::Logout) => {
                             let connection = session_connection.clone();
@@ -1188,29 +1285,26 @@ async fn run(
                         }
                     },
                     finished = finished_rx.recv() => match finished {
-                        Some(Ok(())) => {
-                            if generating {
-                                generating = false;
-                                let _ = session_events.send(Event::Turn(TurnState::Idle));
-                            }
-                        }
-                        Some(Err(error)) => {
-                            let was_generating = generating;
+                        Some((id, result)) if active_prompt.as_ref() == Some(&id) => {
+                            active_prompt = None;
                             generating = false;
-                            let _ = session_events.send(Event::Error(SessionError::request(error)));
-                            if was_generating {
-                                let _ = session_events.send(Event::Turn(TurnState::Idle));
+                            match result {
+                                Ok(v1::StopReason::EndTurn) if !cancelled => {
+                                    let _ = session_events.send(Event::PromptCompleted { id });
+                                }
+                                Err(error) => {
+                                    let _ = session_events.send(Event::Error(SessionError::request(error)));
+                                }
+                                _ => {}
                             }
+                            let _ = session_events.send(Event::Turn(TurnState::Idle));
                         }
+                        Some(_) => {}
                         None => return Ok(()),
                     },
                     update = session.read_update() => match update? {
-                        SessionMessage::StopReason(_) => {
-                            if generating {
-                                generating = false;
-                                let _ = session_events.send(Event::Turn(TurnState::Idle));
-                            }
-                        }
+                        // Only the correlated response above owns completion and queue release.
+                        SessionMessage::StopReason(_) => {}
                         SessionMessage::SessionMessage(dispatch) => {
                             project_dispatch(dispatch, &session_events).await?;
                         }
@@ -1655,7 +1749,6 @@ fn project_capabilities(init: &v1::InitializeResponse) -> Capabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
     use v1::{ContentBlock, ContentChunk, ImageContent, SessionUpdate, TextContent, ToolCall};
 
     #[test]
@@ -1667,19 +1760,26 @@ mod tests {
     }
 
     #[test]
-    fn profile_commands_parse_to_expected_launchers() {
-        for profile in [Profile::Claude, Profile::Codex, Profile::Pi] {
-            let agent = AcpAgent::from_str(profile.command()).expect("profile command parses");
-            assert_eq!(agent.config().command(), std::path::Path::new("npx"));
+    fn profile_commands_use_local_adapters_without_download_launchers() {
+        for (profile, command) in [
+            (Profile::Claude, "claude-agent-acp"),
+            (Profile::Codex, "codex-acp"),
+            (Profile::Pi, "pi-acp"),
+        ] {
+            let agent = profile
+                .definition()
+                .agent()
+                .expect("profile command builds");
+            assert_eq!(agent.config().command(), Path::new(command));
+            assert!(agent.config().arguments().is_empty());
         }
-        let pi = AcpAgent::from_str(Profile::Pi.command()).expect("Pi command parses");
-        assert_eq!(pi.config().arguments(), ["pi-acp"]);
     }
 
     #[test]
     fn profiles_serialize_and_deserialize_without_changing_legacy_values() {
         for profile in [Profile::Claude, Profile::Codex, Profile::Pi] {
             let json = serde_json::to_string(&profile).expect("profile serializes");
+            assert_eq!(json, format!("\"{}\"", profile.label()));
             assert_eq!(
                 serde_json::from_str::<Profile>(&json).expect("profile deserializes"),
                 profile
@@ -1695,14 +1795,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_command_overrides_parse_without_shell_execution() {
+        let agent = parse_override(
+            "TEST_OVERRIDE",
+            "MODE='a b' adapter 'two words' '$HOME;touch nope'",
+        )
+        .unwrap();
+        assert_eq!(agent.config().command(), Path::new("adapter"));
+        assert_eq!(
+            agent.config().arguments(),
+            ["two words", "$HOME;touch nope"]
+        );
+        assert_eq!(agent.config().environment()["MODE"], "a b");
+        let error = parse_override("TEST_OVERRIDE", "").unwrap_err();
+        assert!(format!("{error:#}").contains("TEST_OVERRIDE"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn worker_creates_session_and_streams_typed_prompt_response() {
         let directory = tempfile::tempdir().unwrap();
-        let script = directory.path().join("fake_acp.py");
+        let script = directory.path().join("fake acp.py");
         let request_log = directory.path().join("requests.log");
         std::fs::write(
             &script,
-            r#"import json, sys
+            r#"import json, os, sys
+assert sys.argv[3] == "two words; $HOME $(touch nope)"
+assert os.environ["MUXLANE_TEST_ENV"] == "literal $HOME ; value"
 for line in sys.stdin:
     message = json.loads(line)
     request_id = message.get("id")
@@ -1712,7 +1831,10 @@ for line in sys.stdin:
     if request_id is None:
         continue
     if method == "initialize":
-        result = {"protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {"list": {}}}}
+        result = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"list": {}}}}
+    elif method == "session/load":
+        assert message["params"]["sessionId"] == "fake-session"
+        result = {}
     elif method == "session/new":
         result = {"sessionId": "fake-session", "modes": {"currentModeId": "fast", "availableModes": [{"id": "fast", "name": "Fast"}]}, "configOptions": [{"id": "model", "name": "Model", "type": "select", "currentValue": "small", "options": [{"value": "small", "name": "Small"}]}]}
     elif method == "session/list":
@@ -1724,9 +1846,9 @@ for line in sys.stdin:
         result = {}
     elif method == "session/prompt":
         for update in [
-            {"sessionUpdate": "agent_message_chunk", "messageId": "m1", "content": {"type": "text", "text": "fake reply"}},
-            {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "run", "status": "in_progress", "kind": "execute"},
+            {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "run", "status": "in_progress", "kind": "execute", "content": [{"type": "terminal", "terminalId": "tool_fixture"}]},
             {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"},
+            {"sessionUpdate": "agent_message_chunk", "messageId": "m1", "content": {"type": "text", "text": "fake reply"}},
             {"sessionUpdate": "available_commands_update", "availableCommands": [{"name": "test", "description": "Test"}]},
         ]:
             print(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fake-session", "update": update}}), flush=True)
@@ -1737,24 +1859,25 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let agent = AcpAgent::from_str(&format!(
-            "python3 {} {} {}",
-            script.display(),
-            request_log.display(),
-            directory.path().display()
-        ))
-        .unwrap();
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let (event_tx, mut events) = mpsc::unbounded_channel();
-        tokio::spawn(run(
-            agent,
-            directory.path().to_path_buf(),
+        let definition = AgentDefinition {
+            id: "fake-custom".into(),
+            label: "Fake Custom".into(),
+            command: "python3".into(),
+            args: vec![
+                script.display().to_string(),
+                request_log.display().to_string(),
+                directory.path().display().to_string(),
+                "two words; $HOME $(touch nope)".into(),
+            ],
+            env: [("MUXLANE_TEST_ENV".into(), "literal $HOME ; value".into())].into(),
+        };
+        let registry = AgentRegistry::from_definitions(vec![definition]).unwrap();
+        let ActiveSession { handle, mut events } = spawn_on(
+            &tokio::runtime::Handle::current(),
+            registry.require("fake-custom").unwrap(),
+            directory.path(),
             None,
-            None,
-            command_rx,
-            event_tx,
-        ));
-        let handle = AcpHandle { tx: command_tx };
+        );
 
         let ready = loop {
             let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
@@ -1804,6 +1927,22 @@ for line in sys.stdin:
                 }
             }
         }
+        handle.poll_terminal("tool_fixture").unwrap();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    Event::TerminalOutput(result) => break result,
+                    Event::Error(error) => panic!("terminal poll must not emit a global error: {}", error.message),
+                    _ => {}
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(terminal.id, "tool_fixture");
+        assert_eq!(terminal.state, TerminalOutputState::Unavailable);
+        assert!(reducer.snapshot().items.iter().any(|item| matches!(item,
+            ThreadItem::Tool(tool) if tool.state == ToolState::Completed
+                && tool.content == vec![ToolContent::Terminal { id: "tool_fixture".into() }]
+        )));
         handle.set_mode("fast").unwrap();
         handle
             .set_config_option("model", ConfigValue::Select("small".into()))
@@ -1833,6 +1972,50 @@ for line in sys.stdin:
         assert_eq!(listed[0].id, "history-1");
         assert_eq!(listed[1].id, "history-2");
         handle.shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while events.recv().await.is_some() {}
+        })
+        .await
+        .unwrap();
+
+        // Reconnect uses the same custom definition and original protocol session id.
+        let ActiveSession { handle, mut events } = spawn_on(
+            &tokio::runtime::Handle::current(),
+            registry.require("fake-custom").unwrap(),
+            directory.path(),
+            Some("fake-session".into()),
+        );
+        let restored_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    Event::Ready {
+                        protocol_session_id,
+                        restored,
+                        ..
+                    } => {
+                        assert!(restored);
+                        break protocol_session_id;
+                    }
+                    Event::Error(error) => panic!("restore failed: {}", error.message),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(restored_id, "fake-session");
+        handle.shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while events.recv().await.is_some() {}
+        })
+        .await
+        .unwrap();
+        let log = std::fs::read_to_string(&request_log).unwrap();
+        assert_eq!(log.lines().filter(|line| *line == "session/new").count(), 1);
+        assert_eq!(
+            log.lines().filter(|line| *line == "session/load").count(),
+            1
+        );
         assert!(saw_prompt_accepted);
         assert!(saw_tool && saw_command);
         assert!(reducer.snapshot().items.iter().any(|item| matches!(item, ThreadItem::Tool(tool) if tool.id == "t1" && tool.state == ToolState::Completed)));
@@ -1895,6 +2078,44 @@ for line in sys.stdin:
         assert!(matches!(blocks[0], v1::ContentBlock::Text(_)));
         assert!(matches!(blocks[1], v1::ContentBlock::Resource(_)));
         assert!(matches!(blocks[2], v1::ContentBlock::ResourceLink(_)));
+    }
+
+    #[tokio::test]
+    async fn permission_waiter_resolves_only_once() {
+        let waiters = PermissionWaiters::default();
+        let (tx, rx) = oneshot::channel();
+        waiters.lock().await.insert("request".into(), tx);
+        resolve_permission(&waiters, "request", Some("reject".into())).await;
+        resolve_permission(&waiters, "request", Some("allow".into())).await;
+        assert_eq!(rx.await.unwrap(), Some("reject".into()));
+        assert!(waiters.lock().await.is_empty());
+    }
+
+    #[test]
+    fn typed_permission_patch_preserves_omitted_fields_and_incomplete_raw_data() {
+        let mut reducer = ThreadReducer::new();
+        let tool: v1::ToolCallUpdate = serde_json::from_value(serde_json::json!({
+            "toolCallId": "t", "title": "Read file", "kind": "read", "status": "in_progress",
+            "content": [{"type":"diff", "path":"/remote/file", "oldText":"a", "newText":"b"}],
+            "locations": [{"path":"/remote/file", "line":3}], "rawInput": "{incomplete"
+        })).unwrap();
+        for event in project_update(v1::SessionUpdate::ToolCallUpdate(tool)) {
+            if let Event::Delta(delta) = event { reducer.apply(delta); }
+        }
+        let original = reducer.snapshot().items[0].clone();
+        let partial: v1::ToolCallUpdate = serde_json::from_value(serde_json::json!({"toolCallId":"t", "rawOutput":"partial output"})).unwrap();
+        for event in project_update(v1::SessionUpdate::ToolCallUpdate(partial)) {
+            if let Event::Delta(delta) = event { reducer.apply(delta); }
+        }
+        let ThreadItem::Tool(before) = original else { panic!() };
+        let ThreadItem::Tool(after) = &reducer.snapshot().items[0] else { panic!() };
+        assert_eq!(after.title, before.title);
+        assert_eq!(after.state, ToolState::Running);
+        assert_eq!(after.kind, ToolKind::Read);
+        assert_eq!(after.content, before.content);
+        assert_eq!(after.locations, before.locations);
+        assert_eq!(after.raw_input, Some(serde_json::json!("{incomplete")));
+        assert_eq!(after.raw_output, Some(serde_json::json!("partial output")));
     }
 
     #[test]

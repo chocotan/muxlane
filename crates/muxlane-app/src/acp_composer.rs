@@ -121,9 +121,29 @@ pub(crate) enum ContextKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContextItem {
     pub(crate) relative_path: String,
+    pub(crate) search_key: String,
     pub(crate) path: PathBuf,
     pub(crate) kind: ContextKind,
     pub(crate) content: Option<String>,
+}
+
+impl ContextItem {
+    pub(crate) fn new(
+        relative_path: impl Into<String>,
+        path: PathBuf,
+        kind: ContextKind,
+        content: Option<String>,
+    ) -> Self {
+        let relative_path = relative_path.into();
+        let search_key = relative_path.to_ascii_lowercase();
+        Self {
+            relative_path,
+            search_key,
+            path,
+            kind,
+            content,
+        }
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -300,12 +320,12 @@ pub(crate) fn context_items(project_root: &Path) -> Result<Vec<ContextItem>, Str
     if result.len() < MAX_CONTEXT_ITEMS
         && (root.join("Cargo.toml").is_file() || root.join("tsconfig.json").is_file())
     {
-        result.push(ContextItem {
-            relative_path: "diagnostics:project".into(),
-            path: root.clone(),
-            kind: ContextKind::Diagnostic,
-            content: None,
-        });
+        result.push(ContextItem::new(
+            "diagnostics:project",
+            root.clone(),
+            ContextKind::Diagnostic,
+            None,
+        ));
     }
     result.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(result)
@@ -352,16 +372,16 @@ fn visit_context(
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
         let is_directory = file_type.is_dir();
-        result.push(ContextItem {
-            relative_path: relative_path.clone(),
-            path: canonical.clone(),
-            kind: if is_directory {
+        result.push(ContextItem::new(
+            relative_path,
+            canonical.clone(),
+            if is_directory {
                 ContextKind::Directory
             } else {
                 ContextKind::File
             },
-            content: None,
-        });
+            None,
+        ));
         if is_directory && visit_context(root, &canonical, result)? {
             return Ok(true);
         }
@@ -372,10 +392,12 @@ fn visit_context(
 pub(crate) fn filter_context(items: &[ContextItem], query: &str) -> Vec<CompletionItem> {
     let raw_query = query.trim();
     let query = raw_query.to_ascii_lowercase();
-    let mut result: Vec<_> = items
-        .iter()
-        .filter(|item| item.relative_path.to_ascii_lowercase().contains(&query))
-        .map(|item| CompletionItem {
+    let mut result = Vec::with_capacity(MAX_CONTEXT_COMPLETIONS.min(items.len()));
+    for item in items {
+        if !item.search_key.contains(&query) {
+            continue;
+        }
+        result.push(CompletionItem {
             label: format!("@{}", item.relative_path),
             description: match item.kind {
                 ContextKind::File => "file",
@@ -389,9 +411,11 @@ pub(crate) fn filter_context(items: &[ContextItem], query: &str) -> Vec<Completi
             source: "project".into(),
             insert_text: format!("@{} ", item.relative_path),
             kind: CompletionKind::Context,
-        })
-        .take(MAX_CONTEXT_COMPLETIONS)
-        .collect();
+        });
+        if result.len() == MAX_CONTEXT_COMPLETIONS {
+            break;
+        }
+    }
     if valid_context_url(raw_query) {
         if result.len() == MAX_CONTEXT_COMPLETIONS {
             result.pop();
@@ -449,14 +473,14 @@ pub(crate) fn load_project_diagnostics(root: &Path) -> String {
 }
 
 pub(crate) fn replace_active_token(text: &str, insert_text: &str) -> String {
-    let Some((start, _)) = text
+    let Some((start, character)) = text
         .char_indices()
         .rev()
         .find(|(_, character)| character.is_whitespace())
     else {
         return insert_text.to_string();
     };
-    format!("{}{}", &text[..start + 1], insert_text)
+    format!("{}{}", &text[..start + character.len_utf8()], insert_text)
 }
 pub(crate) fn active_token(text: &str) -> Option<(char, String)> {
     if text.chars().next_back().is_some_and(char::is_whitespace) {
@@ -474,6 +498,21 @@ pub(crate) fn active_token(text: &str) -> Option<(char, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_token_preserves_complete_whitespace_characters() {
+        for (text, expected) in [
+            ("ask /old", "ask /new"),
+            ("ask　/old", "ask　/new"),
+            ("ask\u{a0}/old", "ask\u{a0}/new"),
+            ("ask\n/old", "ask\n/new"),
+            ("你好 /old", "你好 /new"),
+            ("/old", "/new"),
+            ("", "/new"),
+        ] {
+            assert_eq!(replace_active_token(text, "/new"), expected);
+        }
+    }
 
     #[test]
     fn frontmatter_reads_name_and_description_without_yaml() {
@@ -568,6 +607,9 @@ mod tests {
         assert!(items
             .iter()
             .any(|item| { item.kind == ContextKind::File && item.relative_path == "main.rs" }));
+        assert!(items
+            .iter()
+            .all(|item| { item.search_key == item.relative_path.to_ascii_lowercase() }));
 
         let url = filter_context(&items, "https://Example.com/Path");
         assert_eq!(url[0].insert_text, "@https://Example.com/Path ");
@@ -614,13 +656,20 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_token_does_not_activate_context_completion() {
+        assert_eq!(active_token("plain text"), None);
+    }
+
+    #[test]
     fn context_filter_is_capped() {
         let items: Vec<_> = (0..150)
-            .map(|index| ContextItem {
-                relative_path: format!("src/file-{index}.rs"),
-                path: PathBuf::new(),
-                kind: ContextKind::File,
-                content: None,
+            .map(|index| {
+                ContextItem::new(
+                    format!("src/file-{index}.rs"),
+                    PathBuf::new(),
+                    ContextKind::File,
+                    None,
+                )
             })
             .collect();
 
@@ -647,12 +696,12 @@ mod tests {
 
     #[test]
     fn context_filter_inserts_relative_path() {
-        let items = vec![ContextItem {
-            relative_path: "src/main.rs".into(),
-            path: PathBuf::new(),
-            kind: ContextKind::File,
-            content: None,
-        }];
+        let items = vec![ContextItem::new(
+            "src/main.rs",
+            PathBuf::new(),
+            ContextKind::File,
+            None,
+        )];
         assert_eq!(
             filter_context(&items, "main")[0].insert_text,
             "@src/main.rs "

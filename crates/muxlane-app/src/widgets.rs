@@ -51,12 +51,16 @@ pub(crate) fn semantic_button(
         .cursor_pointer()
         .role(Role::Button)
         .aria_label(label)
-        .focus_visible(|style| style.border_1().border_color(rgba(theme.accent)))
+        // 基线即带 1px 透明边框，focus 只改颜色，避免 1px 布局跳动。
+        .border_1()
+        .border_color(rgba(0x00000000))
+        .focus_visible(|style| style.border_color(rgba(theme.accent)))
         .active(|style| style.bg(rgba(theme.bg3)))
 }
 
 struct HoverTip {
     text: SharedString,
+    theme: Theme,
 }
 
 impl Render for HoverTip {
@@ -64,20 +68,27 @@ impl Render for HoverTip {
         div()
             .px_2()
             .py_1()
-            .bg(rgba(0x1a1d24f2))
+            .bg(rgba(self.theme.bg2))
             .border_1()
-            .border_color(rgba(0x00000066))
+            .border_color(rgba(self.theme.line))
             .text_size(ui_px(11.))
-            .text_color(rgba(0xffffffff))
+            .text_color(rgba(self.theme.fg0))
             .child(self.text.clone())
     }
 }
 
 pub(crate) fn hover_tip(
     text: impl Into<SharedString>,
+    theme: Theme,
 ) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView {
     let text = text.into();
-    move |_, cx| cx.new(|_| HoverTip { text: text.clone() }).into()
+    move |_, cx| {
+        cx.new(|_| HoverTip {
+            text: text.clone(),
+            theme,
+        })
+        .into()
+    }
 }
 pub(crate) fn format_relative_time(then: u64, lang: Language) -> String {
     let now = muxlane_core::model::now_secs();

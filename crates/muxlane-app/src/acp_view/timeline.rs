@@ -1,3 +1,6 @@
+use super::style::*;
+use super::code_highlight::{CodeHighlightCache, compose_highlights};
+use super::tool_display::{self, DiffCache};
 use super::{AcpView, Entry};
 use crate::acp_markdown::{parse_markdown, MarkdownBlock};
 use crate::i18n;
@@ -8,7 +11,7 @@ use crate::widgets::{render_status_indicator, semantic_button};
 use base64::Engine as _;
 use gpui::{
     div, img, prelude::*, rgba, App, Bounds, Context, Element, FocusHandle, GlobalElementId,
-    HighlightStyle, Image, ImageFormat, InteractiveElement, LayoutId, MouseButton, MouseDownEvent,
+    Image, ImageFormat, InteractiveElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString,
     StatefulInteractiveElement, Styled, StyledText, TextLayout, WeakEntity, Window,
 };
@@ -53,17 +56,26 @@ impl Render for GeneratingIndicator {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_mode(self.theme_mode);
         div()
-            .px_6()
+            .pl(ui_px(GUTTER_PAD))
+            .pr_3()
             .py_1()
             .flex()
             .items_center()
-            .gap_2()
+            .text_size(ui_px(BODY_SIZE))
+            .line_height(ui_px(BODY_LINE))
             .text_color(rgba(theme.fg1))
-            .child(render_status_indicator(
-                AgentStatus::Working,
-                "acp-generating",
-                theme,
-            ))
+            .child(
+                div()
+                    .w(ui_px(GUTTER_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(render_status_indicator(
+                        AgentStatus::Working,
+                        "acp-generating",
+                        theme,
+                    )),
+            )
             .child(i18n::text(self.language, "acp.generating"))
     }
 }
@@ -88,6 +100,13 @@ impl TimelineSelection {
         if self.scope.as_deref() == Some(scope) && self.dragging {
             self.active = offset;
         }
+    }
+
+    fn select_range(&mut self, scope: &str, range: Range<usize>) {
+        self.scope = Some(scope.to_string());
+        self.anchor = range.start;
+        self.active = range.end;
+        self.dragging = false;
     }
 
     fn end_drag(&mut self) {
@@ -122,7 +141,8 @@ impl TimelineSelection {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct TimelineItemTransientState {
     expanded: bool,
-    terminal_outputs: HashMap<String, muxlane_acp::TerminalSnapshot>,
+    raw_expanded: HashSet<String>,
+    terminal_outputs: HashMap<String, muxlane_acp::TerminalOutputState>,
     diff_decisions: HashMap<(String, String), DiffDecision>,
     selection: TimelineSelection,
 }
@@ -141,6 +161,8 @@ struct TimelineLayoutRecord {
     bounds: Bounds<Pixels>,
     layout: TextLayout,
     content: String,
+    #[cfg(test)]
+    painted_highlights: Vec<(Range<usize>, gpui::HighlightStyle)>,
 }
 
 struct TimelineTextElement {
@@ -149,6 +171,8 @@ struct TimelineTextElement {
     content: String,
     scope: String,
     range: Range<usize>,
+    #[cfg(test)]
+    highlights: Vec<(Range<usize>, gpui::HighlightStyle)>,
 }
 
 impl IntoElement for TimelineTextElement {
@@ -213,12 +237,17 @@ impl Element for TimelineTextElement {
             window,
             cx,
         );
-        self.layouts.borrow_mut().push(TimelineLayoutRecord {
+        let mut layouts = self.layouts.borrow_mut();
+        // Repainting after resize need not rerender the entity. Replace this block's geometry.
+        layouts.retain(|record| record.scope != self.scope || record.range.start != self.range.start);
+        layouts.push(TimelineLayoutRecord {
             scope: self.scope.clone(),
             range: self.range.clone(),
             bounds,
             layout: self.text.layout().clone(),
             content: self.content.clone(),
+            #[cfg(test)]
+            painted_highlights: self.highlights.clone(),
         });
     }
 }
@@ -313,6 +342,68 @@ fn nearest_char_boundary(text: &str, offset: usize) -> usize {
     offset
 }
 
+fn clicked_char_start(text: &str, offset: usize) -> Option<usize> {
+    if text.is_empty() {
+        return None;
+    }
+    let offset = nearest_char_boundary(text, offset);
+    if offset == text.len() {
+        return text.char_indices().next_back().map(|(start, _)| start);
+    }
+    Some(offset)
+}
+
+fn surrounding_word_range(text: &str, offset: usize) -> Range<usize> {
+    let Some(start) = clicked_char_start(text, offset) else {
+        return 0..0;
+    };
+    let character = text[start..].chars().next().unwrap_or_default();
+    let is_word = |character: char| character.is_alphanumeric() || character == '_';
+    let is_word_character = is_word(character);
+    let is_selectable = |candidate: char| {
+        if is_word_character {
+            is_word(candidate)
+        } else if character.is_whitespace() {
+            candidate.is_whitespace()
+        } else {
+            false
+        }
+    };
+
+    let mut range_start = start;
+    while range_start > 0 {
+        let Some((previous_start, previous)) = text[..range_start].char_indices().next_back()
+        else {
+            break;
+        };
+        if !is_selectable(previous) {
+            break;
+        }
+        range_start = previous_start;
+    }
+
+    let mut range_end = start + character.len_utf8();
+    while range_end < text.len() {
+        let next = text[range_end..].chars().next().unwrap_or_default();
+        if !is_selectable(next) {
+            break;
+        }
+        range_end += next.len_utf8();
+    }
+    range_start..range_end
+}
+
+fn surrounding_line_range(text: &str, offset: usize) -> Range<usize> {
+    let boundary = nearest_char_boundary(text, offset);
+    let start = text[..boundary]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let end = text[boundary..]
+        .find('\n')
+        .map_or(text.len(), |newline| boundary + newline + 1);
+    start..end
+}
+
 fn timeline_point_to_offset(
     records: &[TimelineLayoutRecord],
     scope: &str,
@@ -361,19 +452,65 @@ pub(crate) struct TimelineItemView {
     theme_mode: ThemeMode,
     language: i18n::Language,
     expanded: bool,
-    terminal_outputs: HashMap<String, muxlane_acp::TerminalSnapshot>,
+    raw_expanded: HashSet<String>,
+    raw_cache: RefCell<HashMap<String, String>>,
+    diff_cache: RefCell<DiffCache>,
+    terminal_outputs: HashMap<String, muxlane_acp::TerminalOutputState>,
     diff_decisions: HashMap<(String, String), DiffDecision>,
     focus: FocusHandle,
     selection: TimelineSelection,
     layouts: Rc<RefCell<Vec<TimelineLayoutRecord>>>,
     texts: RefCell<HashMap<String, String>>,
     markdown_cache: RefCell<HashMap<String, MarkdownCacheEntry>>,
+    code_cache: RefCell<CodeHighlightCache>,
+    code_scrolls: RefCell<HashMap<String, gpui::ScrollHandle>>,
     image_cache: RefCell<HashMap<String, ImageCacheEntry>>,
     image_fingerprints: HashMap<String, u64>,
     image_generation: Cell<u64>,
 }
 
 impl TimelineItemView {
+    #[cfg(test)]
+    pub(super) fn expand_tool_fixture(&mut self, cx: &mut Context<Self>) {
+        self.expanded = true;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_tool_fixture(&self, scope: &str, raw_scope: &str) {
+        assert!(!self.texts.borrow().contains_key(raw_scope), "raw input stays collapsed");
+        let scrolls = self.code_scrolls.borrow();
+        let scroll = scrolls.get(scope).expect("tool code has a persistent scroll handle");
+        assert!(scroll.max_offset().x > ui_px(0.), "long tool lines must scroll horizontally: {scope}");
+        let texts = self.texts.borrow();
+        assert!(texts.get(scope).unwrap().contains("  indented"), "whitespace is preserved");
+    }
+
+    #[cfg(test)]
+    pub(super) fn terminal_state(&self, id: &str) -> muxlane_acp::TerminalOutputState {
+        self.terminal_outputs.get(id).cloned().unwrap_or(muxlane_acp::TerminalOutputState::Unavailable)
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_current_text_geometry(&self) -> Bounds<Pixels> {
+        let records = self.layouts.borrow();
+        let keys: HashSet<_> = records.iter().map(|record| (&record.scope, record.range.start)).collect();
+        assert_eq!(keys.len(), records.len(), "a repaint must replace old block geometry");
+        assert_eq!(records.len(), 3, "fixture contains two paragraphs and one code block");
+        for record in records.iter() {
+            assert_eq!(record.bounds, record.layout.bounds());
+            for index in record.content.char_indices().map(|(index, _)| index).filter(|index| *index > 0).take(24) {
+                let point = record.layout.position_for_index(index).unwrap() + gpui::point(ui_px(0.1), ui_px(1.));
+                assert_eq!(timeline_point_to_offset(&records, &record.scope, point), Some(record.range.start + index));
+            }
+        }
+        let scrolls = self.code_scrolls.borrow();
+        assert_eq!(scrolls.len(), 1);
+        let scroll = scrolls.values().next().unwrap();
+        assert!(scroll.max_offset().x > ui_px(0.), "long code must overflow only its own viewport");
+        records.iter().find(|record| record.range.start == 0).unwrap().bounds
+    }
+
     pub(crate) fn new(
         item: &ThreadItem,
         parent: WeakEntity<AcpView>,
@@ -389,6 +526,9 @@ impl TimelineItemView {
             theme_mode,
             language,
             expanded: false,
+            raw_expanded: HashSet::new(),
+            raw_cache: RefCell::new(HashMap::new()),
+            diff_cache: RefCell::new(DiffCache::default()),
             terminal_outputs: HashMap::new(),
             diff_decisions: HashMap::new(),
             focus: cx.focus_handle(),
@@ -396,6 +536,8 @@ impl TimelineItemView {
             layouts: Rc::new(RefCell::new(Vec::new())),
             texts: RefCell::new(HashMap::new()),
             markdown_cache: RefCell::new(HashMap::new()),
+            code_cache: RefCell::new(CodeHighlightCache::default()),
+            code_scrolls: RefCell::new(HashMap::new()),
             image_cache: RefCell::new(HashMap::new()),
             image_fingerprints: image_fingerprints(item),
             image_generation: Cell::new(0),
@@ -422,6 +564,7 @@ impl TimelineItemView {
     pub(crate) fn transient_state(&self) -> TimelineItemTransientState {
         TimelineItemTransientState {
             expanded: self.expanded,
+            raw_expanded: self.raw_expanded.clone(),
             terminal_outputs: self.terminal_outputs.clone(),
             diff_decisions: self.diff_decisions.clone(),
             selection: self.selection.clone(),
@@ -430,6 +573,7 @@ impl TimelineItemView {
 
     pub(crate) fn restore_transient_state(&mut self, state: TimelineItemTransientState) {
         self.expanded = state.expanded;
+        self.raw_expanded = state.raw_expanded;
         self.terminal_outputs = state.terminal_outputs;
         self.diff_decisions = state.diff_decisions;
         self.selection = state.selection;
@@ -448,6 +592,7 @@ impl TimelineItemView {
 
     pub(crate) fn set_item(&mut self, item: ThreadItem, cx: &mut Context<Self>) {
         if self.item != item {
+            self.raw_cache.borrow_mut().clear();
             self.diff_decisions.clear();
             self.selection = TimelineSelection::default();
         }
@@ -475,12 +620,15 @@ impl TimelineItemView {
         cx.notify();
     }
 
-    pub(crate) fn set_terminal_snapshot(
+    pub(crate) fn set_terminal_result(
         &mut self,
-        snapshot: muxlane_acp::TerminalSnapshot,
+        result: muxlane_acp::TerminalQueryResult,
         cx: &mut Context<Self>,
     ) {
-        self.terminal_outputs.insert(snapshot.id.clone(), snapshot);
+        if !matches!(self.terminal_outputs.get(&result.id), Some(muxlane_acp::TerminalOutputState::Ready(_)))
+            || matches!(&result.state, muxlane_acp::TerminalOutputState::Ready(_)) {
+            self.terminal_outputs.insert(result.id, result.state);
+        }
         cx.notify();
     }
 
@@ -492,6 +640,7 @@ impl TimelineItemView {
         &mut self,
         scope: &str,
         position: Point<Pixels>,
+        click_count: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -502,7 +651,23 @@ impl TimelineItemView {
             timeline_point_to_offset(&layouts, scope, position)
         };
         if let Some(offset) = offset {
-            self.selection.begin(scope, offset);
+            if click_count == 1 {
+                self.selection.begin(scope, offset);
+            } else {
+                let range = self.texts.borrow().get(scope).map(|text| {
+                    if click_count >= 4 {
+                        0..text.len()
+                    } else if click_count >= 3 {
+                        surrounding_line_range(text, offset)
+                    } else {
+                        surrounding_word_range(text, offset)
+                    }
+                });
+                if let Some(range) = range {
+                    self.selection.select_range(scope, range);
+                }
+            }
+            cx.notify();
         }
         cx.stop_propagation();
     }
@@ -555,25 +720,40 @@ impl TimelineItemView {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        self.render_text_with_syntax(scope, text, range, theme, &[], cx)
+    }
+
+    fn render_text_with_syntax(
+        &self,
+        scope: &str,
+        text: &str,
+        range: Range<usize>,
+        theme: Theme,
+        syntax: &[(Range<usize>, u32)],
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let display_text: SharedString = text.to_string().into();
-        let mut styled_text = StyledText::new(display_text.clone());
-        if let Some(selection) = self.selection.highlight(scope, &range) {
-            styled_text = styled_text.with_highlights(vec![(
-                selection,
-                HighlightStyle {
-                    background_color: Some(rgba(theme.selection()).into()),
-                    ..Default::default()
-                },
-            )]);
-        }
+        let highlights = compose_highlights(text, syntax, self.selection.highlight(scope, &range), theme);
+        #[cfg(test)]
+        let painted_highlights = highlights.clone();
+        let styled_text = StyledText::new(display_text.clone()).with_highlights(highlights);
         let scope_for_event = scope.to_string();
         let layouts = self.layouts.clone();
         div()
+            .min_w_0()
+            .w_full()
+            .flex_shrink(1.)
             .cursor(gpui::CursorStyle::IBeam)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.timeline_mouse_down(&scope_for_event, event.position, window, cx);
+                    this.timeline_mouse_down(
+                        &scope_for_event,
+                        event.position,
+                        event.click_count,
+                        window,
+                        cx,
+                    );
                 }),
             )
             .child(TimelineTextElement {
@@ -582,6 +762,8 @@ impl TimelineItemView {
                 content: display_text.to_string(),
                 scope: scope.to_string(),
                 range,
+                #[cfg(test)]
+                highlights: painted_highlights,
             })
     }
 
@@ -610,12 +792,22 @@ impl TimelineItemView {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let mut ranges = flattened.ranges.iter().cloned();
-        let mut content = div().flex().flex_col().gap_2().whitespace_normal();
+        let mut content = div()
+            .debug_selector(|| "acp-markdown".into())
+            .min_w_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .whitespace_normal()
+            .text_size(ui_px(BODY_SIZE))
+            .line_height(ui_px(BODY_LINE));
         for block in blocks {
             content = content.child(match block {
                 MarkdownBlock::Paragraph(text) => {
                     div()
-                        .line_height(ui_px(19.))
+                        .text_size(ui_px(BODY_SIZE))
+                        .line_height(ui_px(BODY_LINE))
                         .child(self.render_selectable_text(
                             scope,
                             text,
@@ -638,33 +830,29 @@ impl TimelineItemView {
                         theme,
                         cx,
                     )),
-                MarkdownBlock::Code { language, text } => div()
-                    .flex()
-                    .flex_col()
-                    .border_1()
-                    .border_color(rgba(theme.line))
-                    .bg(rgba(theme.bg1))
-                    .px_3()
-                    .py_2()
-                    .font_family("monospace")
-                    .text_size(ui_px(11.))
-                    .whitespace_normal()
-                    .when_some(language.clone(), |code, language| {
-                        code.child(
-                            div()
-                                .pb_1()
-                                .text_size(ui_px(9.))
-                                .text_color(rgba(theme.fg2))
-                                .child(language),
-                        )
-                    })
-                    .child(self.render_selectable_text(
-                        scope,
-                        text,
-                        ranges.next().flatten().unwrap_or_default(),
-                        theme,
-                        cx,
-                    )),
+                MarkdownBlock::Code { language, text } => {
+                    let range = ranges.next().flatten().unwrap_or_default();
+                    let id = format!("{scope}:code:{}", range.start);
+                    let syntax = self.code_cache.borrow_mut().highlights(&id, text, language.as_deref(), theme);
+                    let scroll = {
+                        let mut scrolls = self.code_scrolls.borrow_mut();
+                        if scrolls.len() >= 128 && !scrolls.contains_key(&id) { scrolls.clear(); }
+                        scrolls.entry(id.clone()).or_default().clone()
+                    };
+                    let copy_text = text.clone();
+                    div()
+                        .min_w_0().w_full().flex().flex_col()
+                        .border_1().border_color(rgba(theme.line)).bg(rgba(theme.bg0))
+                        .child(div().min_w_0().flex().items_center().justify_between().px_3()
+                            .child(meta(theme, language.clone().unwrap_or_default()).min_w_0().flex_1().overflow_hidden().text_ellipsis())
+                            .child(icon_button(format!("{id}:copy"), i18n::text(self.language, "acp.copy_response"), theme)
+                                .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone())))
+                                .child(panel_icon(COPY_ICON, theme.fg2))))
+                        .child(div().id(gpui::ElementId::Name(id.into())).debug_selector(|| "acp-code-scroll".into()).min_w_0().w_full().flex().overflow_x_scroll().track_scroll(&scroll)
+                            .px_3().pb_2().font_family("monospace")
+                            .text_size(ui_px(CODE_SIZE)).line_height(ui_px(CODE_LINE)).whitespace_nowrap()
+                            .child(self.render_text_with_syntax(scope, text, range, theme, &syntax, cx).w_auto().flex_none()))
+                },
                 MarkdownBlock::ListItem(text) => {
                     div()
                         .flex()
@@ -680,7 +868,7 @@ impl TimelineItemView {
                 }
                 MarkdownBlock::Quote(text) => div()
                     .border_l_2()
-                    .border_color(rgba(theme.fg2))
+                    .border_color(rgba(theme.line))
                     .pl_3()
                     .text_color(rgba(theme.fg1))
                     .child(self.render_selectable_text(
@@ -694,7 +882,7 @@ impl TimelineItemView {
                     let _ = ranges.next();
                     div().h(ui_px(1.)).w_full().bg(rgba(theme.line))
                 }
-            });
+            }.min_w_0().flex_shrink(1.));
         }
         content
     }
@@ -752,8 +940,13 @@ impl TimelineItemView {
             ImageCacheState::Ready(image) => div()
                 .border_1()
                 .border_color(rgba(theme.line))
-                .child(img(image).max_w_full().max_h(ui_px(360.))),
-            ImageCacheState::Error(error) => div().text_color(rgba(theme.red)).child(error),
+                .child(img(image).max_w_full().max_h(ui_px(BODY_MAX_HEIGHT))),
+            ImageCacheState::Error(error) => div()
+                .pl_2()
+                .border_l_2()
+                .border_color(rgba(theme.red))
+                .text_color(rgba(theme.fg1))
+                .child(error),
         }
     }
 
@@ -836,15 +1029,60 @@ impl TimelineItemView {
                 new_text,
             } => self.render_diff(path, old_text.as_deref(), new_text, theme, scope, cx),
             ToolContent::Terminal { id } => self.render_terminal(id, theme, scope, cx),
-            ToolContent::Unknown(value) => {
-                let output = value.to_string();
-                self.register_text(scope, output.clone());
-                div()
-                    .font_family("monospace")
-                    .text_color(rgba(theme.fg2))
-                    .child(self.render_selectable_text(scope, &output, 0..output.len(), theme, cx))
-            }
+            ToolContent::Unknown(value) => self.render_raw("Content", value, theme, scope, cx),
         }
+    }
+
+    fn render_raw(
+        &self,
+        label: &str,
+        value: &serde_json::Value,
+        theme: Theme,
+        scope: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let expanded = self.raw_expanded.contains(scope);
+        let toggle_scope = scope.to_string();
+        let mut view = div().min_w_0().child(
+            semantic_button(format!("{scope}:toggle"), label.to_string(), theme)
+                .flex().items_center().py_1()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.raw_expanded.remove(&toggle_scope) {
+                        this.raw_expanded.insert(toggle_scope.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(disclosure_glyph(theme, expanded))
+                .child(label.to_string()),
+        );
+        if expanded {
+            let text = self.raw_cache.borrow_mut().entry(scope.to_string()).or_insert_with(|| {
+                tool_display::bounded_text(&serde_json::to_string_pretty(value).unwrap_or_default(), 16 * 1024)
+            }).clone();
+            let raw = value.clone();
+            view = view.child(icon_button(format!("{scope}:copy"), "Copy raw data", theme)
+                .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(raw.to_string())))
+                .child(panel_icon(COPY_ICON, theme.fg2)))
+                .child(self.render_plain_code(scope, &text, theme, cx));
+        }
+        view
+    }
+
+    fn code_scroll(&self, scope: &str) -> gpui::ScrollHandle {
+        let mut scrolls = self.code_scrolls.borrow_mut();
+        if scrolls.len() >= 128 && !scrolls.contains_key(scope) { scrolls.clear(); }
+        scrolls.entry(scope.into()).or_default().clone()
+    }
+
+    fn render_plain_code(&self, scope: &str, text: &str, theme: Theme, cx: &mut Context<Self>) -> gpui::Div {
+        self.register_text(scope, text.to_string());
+        let scroll = self.code_scroll(scope);
+        div().min_w_0().w_full().child(div().id(format!("{scope}:scroll")).debug_selector(|| "acp-tool-code-scroll".into()).min_w_0().w_full().max_h(ui_px(TERMINAL_MAX_HEIGHT))
+            .track_scroll(&scroll).flex()
+            .overflow_y_scroll().overflow_x_scroll().px_3().py_2()
+            .font_family("monospace").text_size(ui_px(CODE_SIZE)).line_height(ui_px(CODE_LINE))
+            .whitespace_nowrap()
+            .child(self.render_selectable_text(scope, text, 0..text.len(), theme, cx).w_auto().flex_none()))
     }
 
     fn render_diff(
@@ -858,10 +1096,20 @@ impl TimelineItemView {
     ) -> gpui::Div {
         let key = diff_key(scope, path);
         let decision = self.diff_decisions.get(&key).copied();
-        if let Some(old_text) = old_text {
-            self.register_text(&format!("{scope}:old"), old_text.to_string());
+        let preview = self.diff_cache.borrow_mut().get(scope, old_text.unwrap_or_default(), new_text);
+        self.register_text(scope, preview.text.clone());
+        let mut lines = div().w_auto().flex_none().flex().flex_col();
+        for row in &preview.rows {
+            let color = match row.tag {
+                Some(similar::ChangeTag::Insert) => theme.green,
+                Some(similar::ChangeTag::Delete) => theme.red,
+                _ => theme.bg0,
+            };
+            lines = lines.child(div().px_3().bg(rgba(Theme::with_alpha(color, TINT_ALPHA)))
+                .child(self.render_selectable_text(scope, &preview.text[row.range.clone()].trim_end_matches('\n'), row.range.clone(), theme, cx).w_auto().flex_none()));
         }
-        self.register_text(&format!("{scope}:new"), new_text.to_string());
+        let copy_old = old_text.unwrap_or_default().to_string();
+        let copy_new = new_text.to_string();
         let keep_key = key.clone();
         let reject_key = key;
         let reject_path = path.to_string();
@@ -870,81 +1118,60 @@ impl TimelineItemView {
         div()
             .flex()
             .flex_col()
-            .gap_1()
             .border_1()
             .border_color(rgba(theme.line))
             .child(
                 div()
-                    .px_2()
+                    .px_3()
                     .py_1()
                     .bg(rgba(theme.bg2))
+                    .text_size(ui_px(META_SIZE))
                     .text_color(rgba(theme.fg1))
-                    .child(path.to_string()),
+                    .child(path.to_string())
+                    .child(meta(theme, if preview.limited && preview.added == 0 && preview.removed == 0 {
+                        "Diff preview unavailable".into()
+                    } else {
+                        format!("+{} -{}{}", preview.added, preview.removed, if preview.limited { " | Preview truncated" } else { "" })
+                    })),
             )
-            .when_some(old_text.map(str::to_string), |diff, old_text| {
-                diff.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .bg(rgba(Theme::with_alpha(theme.red, 0x18)))
-                        .font_family("monospace")
-                        .whitespace_normal()
-                        .child(self.render_selectable_text(
-                            &format!("{scope}:old"),
-                            &old_text,
-                            0..old_text.len(),
-                            theme,
-                            cx,
-                        )),
-                )
-            })
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .bg(rgba(Theme::with_alpha(theme.green, 0x18)))
-                    .font_family("monospace")
-                    .whitespace_normal()
-                    .child(self.render_selectable_text(
-                        &format!("{scope}:new"),
-                        new_text,
-                        0..new_text.len(),
-                        theme,
-                        cx,
-                    )),
-            )
+            .child(div().id(format!("{scope}:diff-scroll")).debug_selector(|| "acp-tool-diff-scroll".into()).track_scroll(&self.code_scroll(scope)).min_w_0().w_full().max_h(ui_px(BODY_MAX_HEIGHT))
+                .flex().overflow_x_scroll().overflow_y_scroll().font_family("monospace")
+                .text_size(ui_px(CODE_SIZE)).line_height(ui_px(CODE_LINE)).whitespace_nowrap().child(lines))
+            .child(div().flex().flex_wrap().gap_2().px_3()
+                .child(button(format!("{scope}:copy-old"), "Copy original", theme)
+                    .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_old.clone())))
+                    .child("Copy original"))
+                .child(button(format!("{scope}:copy-new"), "Copy new", theme)
+                    .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_new.clone())))
+                    .child("Copy new")))
             .child(
                 div()
                     .flex()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
                     .when(decision.is_none(), |actions| {
                         actions
                             .child(
-                                semantic_button(
-                                    gpui::ElementId::Name(format!("diff-keep-{path}").into()),
+                                primary_button(
+                                    gpui::ElementId::Name(format!("diff-keep-{scope}-{path}").into()),
                                     i18n::text(self.language, "acp.diff_keep"),
                                     theme,
+                                    theme.green,
                                 )
-                                .px_2()
-                                .py_1()
-                                .border_1()
-                                .border_color(rgba(theme.green))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.keep_diff(keep_key.clone(), cx)
                                 }))
                                 .child(i18n::text(self.language, "acp.diff_keep")),
                             )
                             .child(
-                                semantic_button(
-                                    gpui::ElementId::Name(format!("diff-reject-{path}").into()),
+                                secondary_button(
+                                    gpui::ElementId::Name(format!("diff-reject-{scope}-{path}").into()),
                                     i18n::text(self.language, "acp.diff_reject"),
                                     theme,
+                                    theme.red,
                                 )
-                                .px_2()
-                                .py_1()
-                                .text_color(rgba(theme.red))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.reject_diff(
                                         reject_key.clone(),
@@ -958,12 +1185,15 @@ impl TimelineItemView {
                             )
                     })
                     .when_some(decision, |actions, decision| {
-                        actions.child(match decision {
-                            DiffDecision::Kept => i18n::text(self.language, "acp.diff_kept"),
-                            DiffDecision::Rejected => {
-                                i18n::text(self.language, "acp.diff_rejected")
-                            }
-                        })
+                        actions.child(meta(
+                            theme,
+                            match decision {
+                                DiffDecision::Kept => i18n::text(self.language, "acp.diff_kept"),
+                                DiffDecision::Rejected => {
+                                    i18n::text(self.language, "acp.diff_rejected")
+                                }
+                            },
+                        ))
                     }),
             )
     }
@@ -975,62 +1205,69 @@ impl TimelineItemView {
         scope: &str,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let snapshot = self.terminal_outputs.get(id).cloned();
+        use muxlane_acp::TerminalOutputState;
         let terminal_id = id.to_string();
-        let output = snapshot.map_or_else(
-            || i18n::text(self.language, "acp.terminal_loading").to_string(),
-            |snapshot| {
-                let suffix = match snapshot.exit_code {
-                    Some(code) => format!("\n[exit {code}]"),
-                    None if snapshot.truncated => "\n[output truncated]".into(),
-                    None => String::new(),
-                };
-                format!("{}{suffix}", snapshot.output)
-            },
-        );
-        self.register_text(scope, output.clone());
+        let output = match self.terminal_outputs.get(id) {
+            Some(TerminalOutputState::Pending) => i18n::text(self.language, "acp.terminal_loading").to_string(),
+            None | Some(TerminalOutputState::Unavailable) => i18n::text(self.language, "acp.terminal_unavailable").to_string(),
+            Some(TerminalOutputState::Failed(error)) => format!("{}: {error}", i18n::text(self.language, "acp.terminal_failed")),
+            Some(TerminalOutputState::Ready(snapshot)) => {
+                if snapshot.output.is_empty() {
+                    i18n::text(self.language, "acp.terminal_empty").into()
+                } else {
+                    tool_display::bounded_text(&snapshot.output, 64 * 1024)
+                }
+            }
+        };
+        let snapshot = match self.terminal_outputs.get(id) {
+            Some(TerminalOutputState::Ready(snapshot)) => Some(snapshot),
+            _ => None,
+        };
         div()
             .flex()
             .flex_col()
+            .min_w_0()
             .border_1()
             .border_color(rgba(theme.line))
+            .when_some(snapshot.and_then(|snapshot| snapshot.command.as_ref()), |view, command| {
+                view.child(self.render_plain_code(&format!("{scope}:command"), &tool_display::command_text(command), theme, cx))
+            })
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .px_2()
-                    .py_1()
+                    .pl_3()
+                    .pr_1()
                     .bg(rgba(theme.bg2))
-                    .font_family("monospace")
-                    .child(format!("Terminal {id}"))
+                    .text_size(ui_px(META_SIZE))
+                    .text_color(rgba(theme.fg1))
+                    .child(format!("Output | {id}"))
                     .child(
-                        semantic_button(
+                        icon_button(
                             gpui::ElementId::Name(format!("terminal-refresh-{id}").into()),
                             i18n::text(self.language, "acp.terminal_refresh"),
                             theme,
                         )
                         .ml_auto()
-                        .px_2()
-                        .py_1()
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.poll_terminal(terminal_id.clone(), cx)
                         }))
                         .child("↻"),
                     ),
             )
-            .child(
-                div()
-                    .id(gpui::ElementId::Name(
-                        format!("terminal-output-{id}").into(),
-                    ))
-                    .max_h(ui_px(280.))
-                    .overflow_y_scroll()
-                    .px_2()
-                    .py_1()
-                    .font_family("monospace")
-                    .whitespace_normal()
-                    .child(self.render_selectable_text(scope, &output, 0..output.len(), theme, cx)),
-            )
+            .child(self.render_plain_code(scope, &output, theme, cx))
+            .when_some(snapshot, |view, snapshot| {
+                let copy_id = id.to_string();
+                view.child(div().px_3().flex().items_center().justify_between()
+                    .child(meta(theme, tool_display::terminal_status(snapshot)))
+                    .child(icon_button(format!("{scope}:copy-output"), "Copy retained output", theme)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(TerminalOutputState::Ready(snapshot)) = this.terminal_outputs.get(&copy_id) {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(snapshot.output.clone()));
+                            }
+                        }))
+                        .child(panel_icon(COPY_ICON, theme.fg2))))
+            })
     }
 
     fn keep_diff(&mut self, key: (String, String), cx: &mut Context<Self>) {
@@ -1062,16 +1299,9 @@ impl TimelineItemView {
 
     fn poll_terminal(&mut self, id: String, cx: &mut Context<Self>) {
         let parent = self.parent.clone();
-        parent
-            .update(cx, |view, cx| {
-                if let Some(handle) = &view.handle {
-                    if let Err(error) = handle.poll_terminal(id) {
-                        view.push_entry(Entry::Error(error.to_string()));
-                        cx.notify();
-                    }
-                }
-            })
-            .ok();
+        cx.spawn(async move |_, cx| {
+            parent.update(cx, |view, cx| view.poll_terminal(id, cx)).ok();
+        }).detach();
     }
 
     fn open_subagent(&mut self, session_id: String, cx: &mut Context<Self>) {
@@ -1101,22 +1331,13 @@ impl TimelineItemView {
         let theme = self.theme();
         match &self.item {
             ThreadItem::Message(message) => match message.role {
-                MessageRole::User => div()
-                    .mx_3()
-                    .my_2()
-                    .p_3()
-                    .border_1()
-                    .border_color(rgba(theme.line))
-                    .bg(rgba(theme.bg0))
-                    .font_family("monospace")
-                    .text_size(ui_px(12.))
-                    .child(self.render_cached_markdown(
-                        &format!("message:{}", message.id),
-                        &message.text,
-                        theme,
-                        &format!("message:{}", message.id),
-                        cx,
-                    )),
+                MessageRole::User => user_card(theme).child(self.render_cached_markdown(
+                    &format!("message:{}", message.id),
+                    &message.text,
+                    theme,
+                    &format!("message:{}", message.id),
+                    cx,
+                )),
                 MessageRole::Assistant => {
                     let body = self.render_cached_markdown(
                         &format!("message:{}", message.id),
@@ -1127,70 +1348,74 @@ impl TimelineItemView {
                     );
                     let body_text = message.text.clone();
                     let id = message.id.clone();
-                    div().px_6().py_2().child(body).child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .pt_1()
-                            .child(
-                                semantic_button(
-                                    gpui::ElementId::Name(format!("acp-copy-{id}").into()),
-                                    i18n::text(self.language, "acp.copy_response"),
-                                    theme,
-                                )
-                                .w(ui_px(26.))
-                                .h(ui_px(26.))
+                    div()
+                        .debug_selector(|| "acp-assistant-message".into())
+                        .relative()
+                        .group("msg")
+                        .pl(ui_px(CONTENT_INSET))
+                        .pr(ui_px(76.))
+                        .min_h(ui_px(36.))
+                        .py_1()
+                        .text_size(ui_px(BODY_SIZE))
+                        .line_height(ui_px(BODY_LINE))
+                        .text_color(rgba(theme.fg0))
+                        .child(body)
+                        .child(
+                            div()
+                                .absolute()
+                                .top_1()
+                                .right_3()
                                 .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(rgba(theme.fg2))
-                                .hover(|style| {
-                                    style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0))
-                                })
-                                .on_click(cx.listener(move |_this, _event, _window, cx| {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        body_text.clone(),
-                                    ))
-                                }))
-                                .child(panel_icon(COPY_ICON, theme.fg2)),
-                            )
-                            .child(
-                                semantic_button(
-                                    gpui::ElementId::Name(format!("acp-bottom-{id}").into()),
-                                    i18n::text(self.language, "acp.scroll_bottom"),
-                                    theme,
+                                .justify_end()
+                                .gap_1()
+                                .child(
+                                    icon_button(
+                                        gpui::ElementId::Name(format!("acp-copy-{id}").into()),
+                                        i18n::text(self.language, "acp.copy_response"),
+                                        theme,
+                                    )
+                                    .debug_selector(|| "acp-copy-response".into())
+                                    .opacity(0.)
+                                    .group_hover("msg", |style| style.opacity(1.))
+                                    .focus(|style| style.opacity(1.))
+                                    .in_focus(|style| style.opacity(1.))
+                                    .on_click(cx.listener(move |_this, _event, _window, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            body_text.clone(),
+                                        ))
+                                    }))
+                                    .child(panel_icon(COPY_ICON, theme.fg2)),
                                 )
-                                .w(ui_px(26.))
-                                .h(ui_px(26.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(rgba(theme.fg2))
-                                .hover(|style| {
-                                    style.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0))
-                                })
-                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                    this.resume_follow_tail(cx)
-                                }))
-                                .child(panel_icon(ARROW_DOWN_ICON, theme.fg2)),
-                            ),
-                    )
+                                .child(
+                                    icon_button(
+                                        gpui::ElementId::Name(format!("acp-bottom-{id}").into()),
+                                        i18n::text(self.language, "acp.scroll_bottom"),
+                                        theme,
+                                    )
+                                    .opacity(0.)
+                                    .group_hover("msg", |style| style.opacity(1.))
+                                    .focus(|style| style.opacity(1.))
+                                    .in_focus(|style| style.opacity(1.))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.resume_follow_tail(cx)
+                                    }))
+                                    .child(panel_icon(ARROW_DOWN_ICON, theme.fg2)),
+                                ),
+                        )
                 }
             },
             ThreadItem::Content(content) => {
                 let scope = format!("content:{}", content.id);
                 let body = self.render_tool_content(&content.content, theme, &scope, cx);
                 match content.role {
-                    MessageRole::User => div()
-                        .mx_3()
-                        .my_2()
-                        .p_3()
-                        .border_1()
-                        .border_color(rgba(theme.line))
-                        .bg(rgba(theme.bg1))
+                    MessageRole::User => user_card(theme).child(body),
+                    MessageRole::Assistant => div()
+                        .pl(ui_px(CONTENT_INSET))
+                        .pr_3()
+                        .py_2()
+                        .text_size(ui_px(BODY_SIZE))
+                        .line_height(ui_px(BODY_LINE))
                         .child(body),
-                    MessageRole::Assistant => div().px_3().py_2().child(body),
                 }
             }
             ThreadItem::Thought(thought) => {
@@ -1204,13 +1429,14 @@ impl TimelineItemView {
                     cx,
                 );
                 div()
-                    .px_6()
                     .my_1()
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .min_w_0()
+                            .pl(ui_px(GUTTER_PAD))
+                            .pr_3()
                             .child(
                                 semantic_button(
                                     gpui::ElementId::Name(
@@ -1223,20 +1449,17 @@ impl TimelineItemView {
                                 .min_w_0()
                                 .flex()
                                 .items_center()
-                                .gap_2()
                                 .px_0()
                                 .py_1()
+                                .text_size(ui_px(BODY_SIZE))
+                                .line_height(ui_px(BODY_LINE))
                                 .text_color(rgba(theme.fg1))
                                 .on_click(
                                     cx.listener(|this, _event, _window, cx| {
                                         this.toggle_expanded(cx)
                                     }),
                                 )
-                                .child(div().w(ui_px(14.)).flex_none().child(if self.expanded {
-                                    "▾"
-                                } else {
-                                    "◇"
-                                }))
+                                .child(disclosure_glyph(theme, self.expanded))
                                 .child(
                                     div()
                                         .flex_1()
@@ -1247,16 +1470,11 @@ impl TimelineItemView {
                                 ),
                             )
                             .child(
-                                semantic_button(
+                                icon_button(
                                     gpui::ElementId::Name(format!("acp-thought-copy-{id}").into()),
                                     i18n::text(self.language, "acp.copy_thought"),
                                     theme,
                                 )
-                                .w(ui_px(26.))
-                                .h(ui_px(26.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
                                 .on_click(cx.listener(move |_this, _event, _window, cx| {
                                     cx.stop_propagation();
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -1268,25 +1486,29 @@ impl TimelineItemView {
                     )
                     .when(self.expanded, |view| {
                         view.child(
-                            div()
+                            nested_body(theme)
                                 .id(format!("acp-thought-body-{id}"))
-                                .max_h(ui_px(360.))
+                                .max_h(ui_px(BODY_MAX_HEIGHT))
                                 .overflow_y_scroll()
-                                .min_w_0()
-                                .pb_2()
-                                .text_color(rgba(theme.fg1))
                                 .child(body),
                         )
                     })
             }
             ThreadItem::Tool(tool) => {
                 let id = tool.id.clone();
-                let copy_text = tool_copy_text(tool);
-                let mut view = div().px_6().my_1().child(
+                let state_color = match tool.state {
+                    muxlane_acp::ToolState::Failed | muxlane_acp::ToolState::Rejected => theme.red,
+                    muxlane_acp::ToolState::Completed => theme.green,
+                    muxlane_acp::ToolState::Running | muxlane_acp::ToolState::Pending => theme.yellow,
+                    _ => theme.fg2,
+                };
+                let mut view = div().my_1().child(
                     div()
                         .flex()
                         .items_center()
                         .min_w_0()
+                        .pl(ui_px(GUTTER_PAD))
+                        .pr_3()
                         .child(
                             semantic_button(
                                 gpui::ElementId::Name(format!("acp-tool-toggle-{id}").into()),
@@ -1297,59 +1519,55 @@ impl TimelineItemView {
                             .min_w_0()
                             .flex()
                             .items_center()
-                            .gap_2()
                             .px_0()
                             .py_1()
+                            .text_size(ui_px(BODY_SIZE))
+                            .line_height(ui_px(BODY_LINE))
                             .text_color(rgba(theme.fg1))
                             .on_click(
                                 cx.listener(|this, _event, _window, cx| this.toggle_expanded(cx)),
                             )
-                            .child(div().w(ui_px(14.)).flex_none().child(if self.expanded {
-                                "▾"
-                            } else {
-                                "▸"
-                            }))
+                            .child(disclosure_glyph(theme, self.expanded))
+                            .child(panel_icon(tool_display::kind_icon(&tool.kind), theme.fg2))
                             .child(
                                 div()
+                                    .pl_2()
                                     .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
                                     .text_ellipsis()
-                                    .child(tool.title.clone()),
+                                    .child(tool_display::tool_title(tool)),
                             ),
                         )
+                        .child(div().flex_none().px_2().text_size(ui_px(META_SIZE)).text_color(rgba(state_color))
+                            .child(tool_display::state_label(&tool.state)))
                         .child(
-                            semantic_button(
+                            icon_button(
                                 gpui::ElementId::Name(format!("acp-tool-copy-{id}").into()),
                                 i18n::text(self.language, "acp.copy_tool"),
                                 theme,
                             )
-                            .w(ui_px(26.))
-                            .h(ui_px(26.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .on_click(cx.listener(move |_this, _event, _window, cx| {
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
                                 cx.stop_propagation();
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    copy_text.clone(),
-                                ));
+                                if let ThreadItem::Tool(tool) = &this.item {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(tool_copy_text(tool)));
+                                }
                             }))
                             .child(panel_icon(COPY_ICON, theme.fg2)),
                         ),
                 );
                 if let Some(session_id) = tool.subagent_session_id.clone() {
                     view = view.child(
-                        div().flex().justify_end().py_1().child(
-                            semantic_button(
+                        div().flex().justify_end().py_1().pr_3().child(
+                            button(
                                 gpui::ElementId::Name(format!("open-subagent-{}", tool.id).into()),
                                 i18n::text(self.language, "acp.open_subagent"),
                                 theme,
                             )
-                            .px_2()
+                            .px_3()
                             .py_1()
-                            .border_1()
                             .border_color(rgba(theme.line))
+                            .text_color(rgba(theme.fg1))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.open_subagent(session_id.clone(), cx)
                             }))
@@ -1358,64 +1576,40 @@ impl TimelineItemView {
                     );
                 }
                 if self.expanded {
+                    let mut expanded = nested_body(theme)
+                        .child(meta(theme, tool_display::kind_label(&tool.kind)))
+                        .child(self.render_plain_code(&format!("tool:{id}:title"), &tool.title, theme, cx));
                     for location in &tool.locations {
-                        view = view.child(div().py_1().text_color(rgba(theme.accent)).child(
-                            match location.line {
-                                Some(line) => format!("{}:{line}", location.path),
-                                None => location.path.clone(),
-                            },
-                        ));
+                        expanded = expanded.child(
+                            div()
+                                .py_1()
+                                .text_size(ui_px(META_SIZE))
+                                .text_color(rgba(theme.accent))
+                                .child(match location.line {
+                                    Some(line) => format!("{}:{line}", location.path),
+                                    None => location.path.clone(),
+                                }),
+                        );
                     }
                     for (index, content) in tool.content.iter().enumerate() {
                         let scope = format!("tool:{id}:content:{index}");
-                        view = view.child(
+                        expanded = expanded.child(
                             div()
                                 .id(format!("acp-tool-content-{id}-{index}"))
                                 .py_1()
                                 .min_w_0()
-                                .max_h(ui_px(360.))
+                                .max_h(ui_px(BODY_MAX_HEIGHT))
                                 .overflow_y_scroll()
                                 .child(self.render_tool_content(content, theme, &scope, cx)),
                         );
                     }
                     if let Some(input) = &tool.raw_input {
-                        let scope = format!("tool:{id}:input");
-                        let text = format!("Input: {input}");
-                        self.register_text(&scope, text.clone());
-                        view = view.child(
-                            div()
-                                .py_1()
-                                .min_w_0()
-                                .font_family("monospace")
-                                .whitespace_normal()
-                                .child(self.render_selectable_text(
-                                    &scope,
-                                    &text,
-                                    0..text.len(),
-                                    theme,
-                                    cx,
-                                )),
-                        );
+                        expanded = expanded.child(self.render_raw("Raw input", input, theme, &format!("tool:{id}:input"), cx));
                     }
                     if let Some(output) = &tool.raw_output {
-                        let scope = format!("tool:{id}:output");
-                        let text = format!("Output: {output}");
-                        self.register_text(&scope, text.clone());
-                        view = view.child(
-                            div()
-                                .py_1()
-                                .min_w_0()
-                                .font_family("monospace")
-                                .whitespace_normal()
-                                .child(self.render_selectable_text(
-                                    &scope,
-                                    &text,
-                                    0..text.len(),
-                                    theme,
-                                    cx,
-                                )),
-                        );
+                        expanded = expanded.child(self.render_raw("Raw output", output, theme, &format!("tool:{id}:output"), cx));
                     }
+                    view = view.child(expanded);
                 }
                 view
             }
@@ -1423,11 +1617,53 @@ impl TimelineItemView {
     }
 }
 
+/// 用户消息 / 用户内容统一卡片：左 accent 色条 + bg1，文字落在 `CONTENT_INSET`。
+fn user_card(theme: Theme) -> gpui::Div {
+    div()
+        .mx(ui_px(CARD_MARGIN))
+        .my_2()
+        .pl(ui_px(BAR_PAD))
+        .pr(ui_px(CARD_PAD))
+        .py(ui_px(CARD_PAD))
+        .border_l_2()
+        .border_color(rgba(theme.accent))
+        .bg(rgba(theme.bg0))
+        .text_size(ui_px(BODY_SIZE))
+        .line_height(ui_px(BODY_LINE))
+        .text_color(rgba(theme.fg0))
+}
+
+/// 折叠行字形槽：▸ 收起 / ▾ 展开。
+fn disclosure_glyph(theme: Theme, expanded: bool) -> gpui::Div {
+    div()
+        .w(ui_px(GUTTER_WIDTH))
+        .flex_none()
+        .text_color(rgba(theme.fg2))
+        .child(if expanded { "▾" } else { "▸" })
+}
+
+/// 折叠体：嵌套竖线，文字回到 `CONTENT_INSET`。
+fn nested_body(theme: Theme) -> gpui::Div {
+    div()
+        .ml(ui_px(NEST_LINE_X))
+        .mr_3()
+        .pl(ui_px(NEST_PAD))
+        .pb_2()
+        .min_w_0()
+        .border_l_1()
+        .border_color(rgba(theme.line))
+        .text_size(ui_px(BODY_SIZE))
+        .line_height(ui_px(BODY_LINE))
+        .text_color(rgba(theme.fg1))
+}
+
 impl Render for TimelineItemView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.texts.borrow_mut().clear();
         self.layouts.borrow_mut().clear();
         self.render_thread_item(cx)
+            .min_w_0()
+            .flex_shrink(1.)
             .track_focus(&self.focus)
             .on_key_down(
                 cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
@@ -1692,6 +1928,248 @@ fn image_format(mime_type: &str) -> Option<ImageFormat> {
 mod tests {
     use super::*;
 
+    fn draw(cx: &mut gpui::TestAppContext, window: gpui::AnyWindowHandle) {
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+        cx.update_window(window, |_, window, cx| window.simulate_next_frame(cx)).unwrap();
+    }
+
+    #[test]
+    fn response_overlay_copy_is_mouse_and_keyboard_reachable_without_overlapping_text() {
+        use gpui::{px, size, TestAppContext, VisualTestContext};
+        use muxlane_acp::{Event, ThreadDelta};
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(super::super::tests::terminal_test_view);
+        let parent = window.root(&mut cx).unwrap();
+        parent.update(&mut cx, |view, cx| {
+            view.apply(Event::Delta(ThreadDelta::MessageChunk { id: None,
+                role: MessageRole::Assistant, text: "你好，世界。".into() }), cx);
+        });
+        let item = cx.update(|cx| parent.read(cx).timeline_items[0].clone());
+        let window: gpui::AnyWindowHandle = window.into();
+        let mut visual = VisualTestContext::from_window(window, &mut cx);
+        visual.simulate_resize(size(px(320.), px(640.)));
+        for _ in 0..3 { draw(&mut cx, window); }
+        let copy = visual.debug_bounds("acp-copy-response").unwrap();
+        cx.update(|cx| {
+            assert!(item.read(cx).layouts.borrow().iter().all(|text| text.bounds.right() <= copy.left()));
+        });
+        visual.simulate_mouse_move(copy.center(), None, Default::default());
+        draw(&mut cx, window);
+        visual.simulate_click(copy.center(), Default::default());
+        assert_eq!(cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()), "你好，世界。");
+        let mouse_copy_focus = cx.update_window(window, |_, window, cx| window.focused(cx)).unwrap();
+        assert!(mouse_copy_focus.is_some(), "mouse click must focus the Copy button");
+        visual.simulate_mouse_move(gpui::point(px(0.), px(600.)), None, Default::default());
+        cx.update_window(window, |_, window, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("cleared".into()));
+            item.read(cx).focus.clone().focus(window, cx);
+            window.focus_next(cx);
+            assert_eq!(window.focused(cx), mouse_copy_focus, "focus_next must reach the Copy button");
+        }).unwrap();
+        draw(&mut cx, window);
+        // GPUI synthesizes button clicks on release; simulate_keystrokes sends only KeyDown.
+        visual.simulate_event(gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        visual.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        assert_eq!(cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()), "你好，世界。");
+    }
+
+    #[test]
+    fn focused_multiclick_notifies_paints_highlight_and_copies_exact_unicode() {
+        use gpui::{point, px, TestAppContext, VisualTestContext};
+        use muxlane_acp::{Event, ThreadDelta};
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(super::super::tests::terminal_test_view);
+        let parent = window.root(&mut cx).unwrap();
+        parent.update(&mut cx, |view, cx| {
+            view.apply(Event::Delta(ThreadDelta::MessageChunk {
+                id: Some("click".into()), role: MessageRole::Assistant,
+                text: "prefix 中文 😀 suffix\n\nsecond paragraph".into(),
+            }), cx);
+        });
+        let item = cx.update(|cx| parent.read(cx).timeline_items[0].clone());
+        let window: gpui::AnyWindowHandle = window.into();
+        let mut visual = VisualTestContext::from_window(window, &mut cx);
+        for _ in 0..3 { draw(&mut cx, window); }
+        cx.update_window(window, |_, window, cx| item.read(cx).focus.clone().focus(window, cx)).unwrap();
+        draw(&mut cx, window);
+        let notifications = Rc::new(Cell::new(0));
+        let _subscription = cx.update(|cx| cx.observe(&item, {
+            let notifications = notifications.clone();
+            move |_, _| notifications.set(notifications.get() + 1)
+        }));
+        let scope = "message:click";
+        for (count, expected) in [
+            (2, "中文"),
+            (3, "prefix 中文 😀 suffix\n"),
+            (4, "prefix 中文 😀 suffix\nsecond paragraph"),
+            (1, ""),
+        ] {
+            let position = cx.update(|cx| {
+                let item = item.read(cx);
+                let layouts = item.layouts.borrow();
+                let record = &layouts[0];
+                let index = record.content.find('中').unwrap();
+                record.layout.position_for_index(index).unwrap() + point(px(1.), px(3.))
+            });
+            assert!(cx.update_window(window, |_, window, cx| item.read(cx).focus.is_focused(window)).unwrap());
+            let previous = notifications.get();
+            visual.simulate_event(MouseDownEvent {
+                button: MouseButton::Left, position, click_count: count, ..Default::default()
+            });
+            assert!(notifications.get() > previous, "click count {count} must notify even when already focused");
+            draw(&mut cx, window);
+            item.update(&mut cx, |item, cx| {
+                assert_eq!(item.selection.dragging, count == 1);
+                assert_eq!(item.selection.selected_text(&item.texts.borrow()[scope]).unwrap_or_default(), expected);
+                for record in item.layouts.borrow().iter() {
+                    let selected: Vec<_> = record.painted_highlights.iter()
+                        .filter(|(_, style)| style.background_color.is_some())
+                        .map(|(range, _)| range.clone()).collect();
+                    assert_eq!(selected, item.selection.highlight(scope, &record.range).into_iter().collect::<Vec<_>>());
+                }
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("unchanged".into()));
+            });
+            cx.simulate_keystrokes(window, "ctrl-c");
+            cx.update(|cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), if expected.is_empty() { "unchanged" } else { expected }));
+            visual.simulate_mouse_up(position, MouseButton::Left, Default::default());
+            draw(&mut cx, window);
+        }
+    }
+
+    #[test]
+    fn resized_and_horizontally_scrolled_unicode_uses_current_geometry_for_exact_copy() {
+        use gpui::{point, px, size, TestAppContext, VisualTestContext};
+        use muxlane_acp::{Event, ThreadDelta};
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(super::super::tests::terminal_test_view);
+        let parent = window.root(&mut cx).unwrap();
+        parent.update(&mut cx, |view, cx| {
+            view.apply(Event::Delta(ThreadDelta::MessageChunk {
+                id: Some("geometry".into()), role: MessageRole::Assistant,
+                text: format!("{}\n\n```rust\nlet value = \"{}末尾😀 done\";\n```\n\nfinal paragraph",
+                    "prefix 中文 😀 suffix ".repeat(4), "long code ".repeat(30)),
+            }), cx);
+        });
+        let item = cx.update(|cx| parent.read(cx).timeline_items[0].clone());
+        let window: gpui::AnyWindowHandle = window.into();
+        let mut visual = VisualTestContext::from_window(window, &mut cx);
+        let mut previous: Option<(f32, Bounds<Pixels>)> = None;
+        for width in [900., 320., 900.] {
+            visual.simulate_resize(size(px(width), px(1200.)));
+            for _ in 0..3 { draw(&mut cx, window); }
+            let paragraph = cx.update(|cx| item.read(cx).assert_current_text_geometry());
+            if let Some((old_width, old_bounds)) = previous {
+                assert_eq!(paragraph.size.width < old_bounds.size.width, width < old_width);
+                assert_eq!(paragraph.size.height > old_bounds.size.height, width < old_width);
+            }
+            previous = Some((width, paragraph));
+            let (start, end, range) = cx.update(|cx| {
+                let item = item.read(cx);
+                let records = item.layouts.borrow();
+                let paragraph = records.iter().find(|record| record.range.start == 0).unwrap();
+                let index = paragraph.content.rfind('中').unwrap();
+                let end_index = index + "中文 😀".len();
+                let start = paragraph.layout.position_for_index(index).unwrap() + point(px(0.1), px(3.));
+                let end = paragraph.layout.position_for_index(end_index).unwrap() + point(px(0.1), px(3.));
+                let range = index..end_index;
+                assert_eq!(timeline_point_to_offset(&records, &paragraph.scope, start), Some(range.start));
+                assert_eq!(timeline_point_to_offset(&records, &paragraph.scope, end), Some(range.end));
+                (start, end, range)
+            });
+            visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+            visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+            visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+            draw(&mut cx, window);
+            cx.simulate_keystrokes(window, "ctrl-c");
+            cx.update(|cx| {
+                assert_eq!(item.read(cx).selection.normalized(), range);
+                assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "中文 😀");
+            });
+
+            let scroll = cx.update(|cx| item.read(cx).code_scrolls.borrow().values().next().unwrap().clone());
+            scroll.set_offset(point(px(0.), px(0.)));
+            draw(&mut cx, window);
+            let unscrolled = cx.update(|cx| {
+                let item = item.read(cx);
+                let records = item.layouts.borrow();
+                let code = records.iter().find(|record| record.content.contains("末尾")).unwrap();
+                code.layout.position_for_index(code.content.find('末').unwrap()).unwrap()
+            });
+            scroll.set_offset(point(-scroll.max_offset().x, px(0.)));
+            draw(&mut cx, window);
+            let viewport = visual.debug_bounds("acp-code-scroll").unwrap();
+            let (start, end, range) = cx.update(|cx| {
+                let item = item.read(cx);
+                let records = item.layouts.borrow();
+                let code = records.iter().find(|record| record.content.contains("末尾")).unwrap();
+                let index = code.content.find('末').unwrap();
+                assert!(index > 0);
+                let end_index = index + "末尾😀".len();
+                assert!(code.content.is_char_boundary(index) && code.content.is_char_boundary(end_index));
+                let start = code.layout.position_for_index(index).unwrap();
+                let end = code.layout.position_for_index(end_index).unwrap();
+                assert!((start.x - unscrolled.x - scroll.offset().x).abs() < px(0.1), "painted geometry must move by the actual scroll offset");
+                let start = start + point(px(0.1), px(3.));
+                let end = end + point(px(0.1), px(3.));
+                assert!(viewport.contains(&start) && viewport.contains(&end), "Unicode drag endpoints must be visible after scrolling");
+                let range = code.range.start + index..code.range.start + end_index;
+                assert_eq!(timeline_point_to_offset(&records, &code.scope, start), Some(range.start));
+                assert_eq!(timeline_point_to_offset(&records, &code.scope, end), Some(range.end));
+                (start, end, range)
+            });
+            visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+            visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+            visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+            draw(&mut cx, window);
+            cx.simulate_keystrokes(window, "ctrl-c");
+            cx.update(|cx| {
+                let item = item.read(cx);
+                assert_eq!(item.selection.normalized(), range);
+                assert!(!item.selection.dragging);
+                assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "末尾😀");
+            });
+        }
+    }
+
+    #[test]
+    fn surrounding_word_ranges_handle_unicode_whitespace_and_boundaries() {
+        assert_eq!(surrounding_word_range("hello world", 1), 0..5);
+        assert_eq!(surrounding_word_range("foo  bar", 4), 3..5);
+        assert_eq!(surrounding_word_range("中文😀!", 0), 0..6);
+        assert_eq!(surrounding_word_range("中文😀!", 6), 6..10);
+        assert_eq!(surrounding_word_range("中文😀!", 10), 10..11);
+        assert_eq!(surrounding_word_range("", 0), 0..0);
+        assert_eq!(surrounding_word_range("abc", 99), 0..3);
+    }
+
+    #[test]
+    fn surrounding_line_ranges_include_newlines_and_stay_within_content() {
+        let text = "first\n中😀\nlast";
+        assert_eq!(surrounding_line_range(text, 1), 0..6);
+        assert_eq!(surrounding_line_range(text, 8), 6..14);
+        assert_eq!(surrounding_line_range(text, text.len()), 14..text.len());
+        assert_eq!(surrounding_line_range("", 4), 0..0);
+    }
+
+    #[test]
+    fn click_ranges_apply_to_the_whole_scope_and_keep_other_scopes_isolated() {
+        let text = "first\n中😀\nlast";
+        let mut selection = TimelineSelection::default();
+        selection.select_range("message", surrounding_word_range(text, 8));
+        assert_eq!(selection.selected_text(text).as_deref(), Some("中"));
+        assert!(selection.highlight("other", &(0..text.len())).is_none());
+        selection.select_range("message", surrounding_line_range(text, 8));
+        assert_eq!(selection.selected_text(text).as_deref(), Some("中😀\n"));
+        selection.select_range("message", 0..text.len());
+        assert_eq!(selection.selected_text(text).as_deref(), Some(text));
+    }
+
     #[test]
     fn timeline_selection_normalizes_forward_and_reverse_multibyte_ranges() {
         let text = "aé🙂b";
@@ -1721,10 +2199,12 @@ mod tests {
     #[test]
     fn transient_state_is_preserved_only_for_equal_items() {
         let item = ThreadItem::Thought(muxlane_acp::Thought {
+            protocol_id: None,
             id: "thought-1".into(),
             text: "same".into(),
         });
         let changed_item = ThreadItem::Thought(muxlane_acp::Thought {
+            protocol_id: None,
             id: "thought-1".into(),
             text: "changed".into(),
         });
@@ -1738,12 +2218,13 @@ mod tests {
         );
         state.terminal_outputs.insert(
             "terminal-1".into(),
-            muxlane_acp::TerminalSnapshot {
+            muxlane_acp::TerminalOutputState::Ready(muxlane_acp::TerminalSnapshot {
                 id: "terminal-1".into(),
                 output: "output".into(),
                 truncated: false,
                 exit_code: None,
-            },
+                command: None,
+            }),
         );
 
         assert_eq!(

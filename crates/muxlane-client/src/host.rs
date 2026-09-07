@@ -355,6 +355,11 @@ pub struct RemoteHost {
     latency_ms: AtomicU64,
     /// UI 操作共用的串行 RPC 长连接；事件订阅使用另一条专职读连接。
     rpc: Mutex<Option<crate::Connection>>,
+    /// 键盘输入专用连接（fire-and-forget，不等响应）：
+    /// 避免慢 RPC（网络抖动时一个 30s 超时的调用）队头阻塞所有按键。
+    /// 已知取舍：input 与 rpc（如 resize）走不同连接，极端时序下可能乱序
+    /// （按键先于 SIGWINCH 到达），表现为一帧错帧，可自恢复。
+    input: Mutex<Option<crate::RequestWriter>>,
     /// 完整进度快照；访问极短，不跨 await。
     progress: StdMutex<Option<BootstrapProgress>>,
     bootstrap_cancel: Arc<AtomicBool>,
@@ -375,6 +380,7 @@ impl RemoteHost {
             retry: Notify::new(),
             latency_ms: AtomicU64::new(0),
             rpc: Mutex::new(None),
+            input: Mutex::new(None),
             progress: StdMutex::new(None),
             bootstrap_cancel: Arc::new(AtomicBool::new(false)),
             machine_id: StdRwLock::new(None),
@@ -509,11 +515,32 @@ impl RemoteHost {
         agent: &muxlane_core::model::AgentId,
         data: &[u8],
     ) -> anyhow::Result<()> {
-        let mut rpc = self.rpc().await?;
-        let result =
-            crate::send_term_input(rpc.as_mut().expect("RPC initialized"), agent, data).await;
-        self.handle_rpc_result(&mut rpc, &result);
-        result
+        let mut input = self.input.lock().await;
+        if input.is_none() {
+            let socket = self.local_socket().await?;
+            let connection = crate::open(&socket).await?;
+            let (writer, mut reader) = connection.into_split();
+            // 后台排空响应/事件帧，防止对端 socket 缓冲堆积。
+            tokio::spawn(async move { while reader.next().await.is_ok() {} });
+            *input = Some(writer);
+        }
+        let writer = input.as_mut().expect("input connection");
+        let params = serde_json::to_value(muxlane_core::protocol::TermInputParams {
+            agent: agent.clone(),
+            data_b64: muxlane_core::protocol::b64_encode(data),
+        })?;
+        match writer
+            .call(muxlane_core::protocol::methods::TERM_INPUT, params)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // 连接作废：下次按键时懒重建。不触发 retry（rpc 连接可能完全健康，
+                // 避免单次按键失败引发全量重连/订阅重建）。
+                *input = None;
+                Err(error)
+            }
+        }
     }
 
     pub async fn resize_term(
