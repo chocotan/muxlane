@@ -4,22 +4,11 @@ use crate::i18n;
 use crate::icons::*;
 use crate::theme::Theme;
 use crate::ui_scale::px as ui_px;
-use crate::widgets::semantic_button;
 use crate::workspace::ProjectKey;
 use gpui::{
     div, prelude::*, relative, rgba, Context, Focusable, MouseButton, ParentElement, Styled, Window,
 };
 use muxlane_core::SplitAxis;
-
-fn availability_key(availability: &muxlane_acp::Availability) -> &'static str {
-    match availability {
-        muxlane_acp::Availability::Found(_) => "agents.found",
-        muxlane_acp::Availability::Missing => "agents.missing",
-        muxlane_acp::Availability::Unmapped => "agents.unmapped",
-        muxlane_acp::Availability::Unsupported => "agents.unsupported",
-        muxlane_acp::Availability::Invalid(_) => "agents.invalid",
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NewSessionTarget {
@@ -28,20 +17,6 @@ pub(crate) enum NewSessionTarget {
         host: String,
         project: muxlane_core::model::ProjectId,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SessionCreationMode {
-    Ui,
-    Terminal,
-}
-
-impl SessionCreationMode {
-    pub(crate) fn for_target(target: &NewSessionTarget) -> Self {
-        match target {
-            NewSessionTarget::Local(_) | NewSessionTarget::Remote { .. } => Self::Terminal,
-        }
-    }
 }
 
 /// 新建会话面板当前键盘焦点所在的栏。
@@ -153,66 +128,7 @@ impl MuxlaneApp {
             .collect()
     }
 
-    fn palette_acp_profiles(&self, cx: &Context<Self>) -> Vec<muxlane_acp::AgentEntry> {
-        let query = self.palette_input.read(cx).text().trim().to_lowercase();
-        self.acp_entries
-            .iter()
-            .filter(|entry| {
-                query.is_empty()
-                    || format!("{} {}", entry.id, entry.label)
-                        .to_lowercase()
-                        .contains(&query)
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// Both pointer and keyboard activation, and non-palette creation, use this gate.
-    pub(crate) fn prepare_acp_creation(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
-        if self.acp_detecting {
-            return false;
-        }
-        let result = self.acp_launch_profile(id);
-        if result.is_ok() {
-            return true;
-        }
-        if let Some(error) = &self.acp_registry_error {
-            self.notifications.update(cx, |center, cx| center.show_error(error.clone(), cx));
-            self.palette_open = true;
-            cx.notify();
-            return false;
-        }
-        if let Some(entry) = self.acp_entries.iter_mut().find(|entry| entry.id == id) {
-            if let Some(profile) = &entry.profile {
-                entry.availability = match muxlane_acp::effective_definition(profile) {
-                    Ok(definition) => muxlane_acp::LocalProbe::current().definition(&definition),
-                    Err(error) => muxlane_acp::Availability::Invalid(format!("{error:#}")),
-                };
-            }
-        }
-        self.acp_install_detail = Some(id.into());
-        self.palette_open = true;
-        cx.notify();
-        false
-    }
-
-    fn activate_acp_entry(
-        &mut self,
-        entry: muxlane_acp::AgentEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.prepare_acp_creation(&entry.id, cx) {
-            return;
-        }
-        if let Some(profile) = self.acp_registry.resolve(&entry.id) {
-            self.acp_install_detail = None;
-            self.spawn_acp_view(profile, window, cx);
-        }
-    }
-
     pub(crate) fn select_palette_project(&mut self, key: ProjectKey, cx: &mut Context<Self>) {
-        self.acp_install_detail = None;
         self.palette_project_index = self
             .available_project_keys()
             .iter()
@@ -229,9 +145,6 @@ impl MuxlaneApp {
                     project: key.project_id,
                 })
         };
-        if let Some(target) = self.new_session_target.as_ref() {
-            self.session_creation_mode = SessionCreationMode::for_target(target);
-        }
         self.palette_index = 0;
         self.palette_input.update(cx, |input, cx| input.reset(cx));
         cx.notify();
@@ -300,7 +213,8 @@ impl MuxlaneApp {
         }
 
         if self.new_session_target.is_none() {
-            // Global command palette: presets and actions.
+            // 全局命令面板 (Ctrl+K)：预设 + 操作，不含会话列表。
+            // （新建会话走两栏布局，见 render_new_session_palette。）
             let project_path = self.palette_project_path();
             for preset in self.presets.clone().into_iter().filter(|p| {
                 project_path
@@ -490,52 +404,9 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.session_creation_mode == SessionCreationMode::Ui {
-            if let Some(id) = self.acp_install_detail.clone() {
-                match ks.key.as_str() {
-                    "escape" | "up" | "down" => {
-                        self.acp_install_detail = None;
-                        cx.notify();
-                        return true;
-                    }
-                    "enter" => {
-                        if let Some(entry) = self
-                            .acp_entries
-                            .iter()
-                            .find(|entry| entry.id == id)
-                            .cloned()
-                        {
-                            self.activate_acp_entry(entry, window, cx);
-                        }
-                        return true;
-                    }
-                    _ => {}
-                }
-            }
-        }
         let projects = self.palette_projects(cx);
         let presets = self.palette_presets(cx);
-        let profiles = self.palette_acp_profiles(cx);
-        let session_count = match self.session_creation_mode {
-            SessionCreationMode::Ui => profiles.len(),
-            SessionCreationMode::Terminal => presets.len(),
-        };
         match ks.key.as_str() {
-            "tab" if ks.modifiers.shift => {
-                self.session_creation_mode = match self.session_creation_mode {
-                    SessionCreationMode::Ui => SessionCreationMode::Terminal,
-                    SessionCreationMode::Terminal
-                        if matches!(self.new_session_target, Some(NewSessionTarget::Local(_))) =>
-                    {
-                        SessionCreationMode::Ui
-                    }
-                    SessionCreationMode::Terminal => SessionCreationMode::Terminal,
-                };
-                self.palette_index = 0;
-                self.palette_scroll.scroll_to_item(0);
-                cx.notify();
-                true
-            }
             "tab" => {
                 self.palette_column = match self.palette_column {
                     PaletteColumn::Projects => PaletteColumn::Presets,
@@ -572,8 +443,8 @@ impl MuxlaneApp {
                         }
                     }
                     PaletteColumn::Presets => {
-                        if session_count > 0 {
-                            self.palette_index = (self.palette_index + 1).min(session_count - 1);
+                        if !presets.is_empty() {
+                            self.palette_index = (self.palette_index + 1).min(presets.len() - 1);
                             self.palette_scroll.scroll_to_item(self.palette_index);
                         }
                     }
@@ -589,26 +460,16 @@ impl MuxlaneApp {
                     }
                     false
                 }
-                PaletteColumn::Presets => match self.session_creation_mode {
-                    SessionCreationMode::Ui => {
-                        if let Some(profile) = profiles.get(self.palette_index).cloned() {
-                            self.activate_acp_entry(profile, window, cx);
-                            cx.notify();
-                            return true;
-                        }
-                        false
+                PaletteColumn::Presets => {
+                    if let Some(preset) = presets.get(self.palette_index).cloned() {
+                        self.palette_open = false;
+                        // 不能在此清 new_session_target：spawn_preset 要 take 它决定项目。
+                        self.spawn_preset(&preset, window, cx);
+                        cx.notify();
+                        return true;
                     }
-                    SessionCreationMode::Terminal => {
-                        if let Some(preset) = presets.get(self.palette_index).cloned() {
-                            self.palette_open = false;
-                            // spawn_preset takes the target to resolve the project.
-                            self.spawn_preset(&preset, window, cx);
-                            cx.notify();
-                            return true;
-                        }
-                        false
-                    }
-                },
+                    false
+                }
             },
             "escape" => {
                 self.palette_open = false;
@@ -643,9 +504,6 @@ impl MuxlaneApp {
                     project: key.project_id,
                 })
         };
-        if let Some(target) = self.new_session_target.as_ref() {
-            self.session_creation_mode = SessionCreationMode::for_target(target);
-        }
         self.palette_index = 0;
     }
 
@@ -837,162 +695,6 @@ impl MuxlaneApp {
             .into_any_element()
     }
 
-    fn render_agent_discovery_actions(
-        &self,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let refresh = i18n::text(
-            self.language,
-            if self.acp_catalog_loading {
-                "agents.refreshing"
-            } else {
-                "agents.refresh"
-            },
-        );
-        let detect = i18n::text(
-            self.language,
-            if self.acp_detecting {
-                "agents.detecting"
-            } else {
-                "agents.detect"
-            },
-        );
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_2()
-            .p_2()
-            .text_size(ui_px(11.))
-            .child(
-                semantic_button("acp-catalog-refresh", refresh, theme)
-                    .px_2()
-                    .py_1()
-                    .when(!self.acp_catalog_loading, |button| {
-                        button.on_click(cx.listener(|this, _, _, cx| this.refresh_acp_catalog(cx)))
-                    })
-                    .child(panel_icon(CONNECT_ICON, theme.fg2))
-                    .child(refresh),
-            )
-            .child(
-                semantic_button("acp-local-detect", detect, theme)
-                    .px_2()
-                    .py_1()
-                    .when(!self.acp_detecting, |button| {
-                        button.on_click(cx.listener(|this, _, _, cx| this.detect_acp_agents(cx)))
-                    })
-                    .child(panel_icon(FOLDER_ICON, theme.fg2))
-                    .child(detect),
-            )
-            .into_any_element()
-    }
-
-    fn render_agent_install_detail(
-        &self,
-        entry: muxlane_acp::AgentEntry,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let back = i18n::text(self.language, "agents.back");
-        let mut detail = div()
-            .flex()
-            .flex_col()
-            .min_w_0()
-            .gap_2()
-            .p_3()
-            .text_size(ui_px(11.))
-            .text_color(rgba(theme.fg0))
-            .child(
-                semantic_button("acp-install-back", back, theme)
-                    .px_2()
-                    .py_1()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.acp_install_detail = None;
-                        cx.notify();
-                    }))
-                    .child(panel_icon(CLOSE_ICON, theme.fg2))
-                    .child(back),
-            )
-            .child(entry.label.clone())
-            .child(i18n::text(
-                self.language,
-                availability_key(&entry.availability),
-            ));
-        if let muxlane_acp::Availability::Found(path) = &entry.availability {
-            detail = detail
-                .child(
-                    div()
-                        .id("acp-found-path")
-                        .overflow_x_scroll()
-                        .child(path.display().to_string()),
-                )
-                .child(i18n::text(self.language, "agents.found_note"));
-            let start = i18n::text(self.language, "agents.create");
-            let selected = entry.clone();
-            detail = detail.child(
-                semantic_button("acp-install-create", start, theme)
-                    .px_2()
-                    .py_1()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_acp_entry(selected.clone(), window, cx)
-                    }))
-                    .child(panel_icon(PLUS_ICON, theme.fg2))
-                    .child(start),
-            );
-        }
-        if let muxlane_acp::Availability::Invalid(error) = &entry.availability {
-            detail = detail.child(error.clone());
-        }
-        if let Some(command) = entry.install.filter(|_| !entry.can_start()) {
-            detail = detail
-                .child(i18n::text(self.language, "agents.manual_install"))
-                .child(
-                    div()
-                        .id("acp-install-command")
-                        .w_full()
-                        .overflow_x_scroll()
-                        .child(command),
-                )
-                .child(
-                    semantic_button(
-                        "acp-copy-install",
-                        i18n::text(self.language, "agents.copy"),
-                        theme,
-                    )
-                    .px_2()
-                    .py_1()
-                    .when(cfg!(test), |button| {
-                        button.debug_selector(|| "acp-copy-install".into())
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.into()))
-                    }))
-                    .child(panel_icon(COPY_ICON, theme.fg2))
-                    .child(i18n::text(self.language, "agents.copy")),
-                );
-        } else if !entry.can_start() {
-            detail = detail.child(i18n::text(self.language, "agents.configure"));
-        }
-        if entry.user_configured {
-            detail = detail.child(i18n::text(self.language, "agents.custom_warning"));
-        }
-        if let Some(url) = entry.docs {
-            detail = detail.child(
-                semantic_button(
-                    "acp-install-docs",
-                    i18n::text(self.language, "agents.docs"),
-                    theme,
-                )
-                .px_2()
-                .py_1()
-                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
-                .child(panel_icon(CONNECT_ICON, theme.fg2))
-                .child(i18n::text(self.language, "agents.docs")),
-            );
-        }
-        detail.into_any_element()
-    }
-
     /// 新建会话面板：左栏项目、右栏 Agent 类型，不再是混合列表。
     fn render_new_session_palette(
         &mut self,
@@ -1001,9 +703,6 @@ impl MuxlaneApp {
     ) -> gpui::AnyElement {
         let projects = self.palette_projects(cx);
         let presets = self.palette_presets(cx);
-        let profiles = self.palette_acp_profiles(cx);
-        let mode = self.session_creation_mode;
-        let local_target = matches!(self.new_session_target, Some(NewSessionTarget::Local(_)));
         let focused_column = self.palette_column;
         let project_index = self.palette_project_index;
         let preset_index = self.palette_index;
@@ -1081,11 +780,7 @@ impl MuxlaneApp {
             .max_h(ui_px(324.))
             .overflow_y_scroll()
             .track_scroll(&self.palette_scroll);
-        let session_count = match mode {
-            SessionCreationMode::Ui => profiles.len(),
-            SessionCreationMode::Terminal => presets.len(),
-        };
-        if session_count == 0 {
+        if presets.is_empty() {
             preset_list = preset_list.child(
                 div()
                     .px_3()
@@ -1095,202 +790,42 @@ impl MuxlaneApp {
                     .child(i18n::text(self.language, "palette.no_results")),
             );
         }
-        match mode {
-            SessionCreationMode::Ui => {
-                preset_list = preset_list.child(self.render_agent_discovery_actions(theme, cx));
-                if let Some(error) = &self.acp_catalog_error {
-                    preset_list = preset_list.child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .text_size(ui_px(11.))
-                            .text_color(rgba(theme.red))
-                            .child(format!(
-                                "{}: {error}",
-                                i18n::text(self.language, "agents.catalog_error")
-                            )),
-                    );
-                }
-                if let Some(error) = &self.acp_registry_error {
-                    preset_list = preset_list.child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .text_size(ui_px(11.))
-                            .text_color(rgba(theme.red))
-                            .child(error.clone()),
-                    );
-                }
-                let detail = self
-                    .acp_install_detail
-                    .as_ref()
-                    .and_then(|id| self.acp_entries.iter().find(|entry| &entry.id == id))
-                    .cloned();
-                if let Some(detail) = detail {
-                    preset_list =
-                        preset_list.child(self.render_agent_install_detail(detail, theme, cx));
-                }
-                for (index, profile) in profiles
-                    .into_iter()
-                    .enumerate()
-                    .filter(|_| self.acp_install_detail.is_none())
-                {
-                    let is_focused =
-                        focused_column == PaletteColumn::Presets && index == preset_index;
-                    let label = format!("{} UI", profile.label);
-                    let command = format!(
-                        "{}{}",
-                        i18n::text(
-                            self.language,
-                            if self.acp_detecting {
-                                "agents.detecting"
-                            } else {
-                                availability_key(&profile.availability)
-                            }
-                        ),
-                        if profile.user_configured {
-                            i18n::text(self.language, "agents.user_command")
-                        } else {
-                            ""
-                        }
-                    );
-                    preset_list = preset_list.child(
-                        div()
-                            .id(gpui::ElementId::Name(
-                                format!("pal-acp-{}", profile.id).into(),
-                            ))
-                            .when(cfg!(test), |row| {
-                                row.debug_selector(|| "acp-agent-row".into())
-                            })
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .text_size(ui_px(12.))
-                            .text_color(rgba(theme.fg0))
-                            .when(is_focused, |el| el.bg(rgba(theme.bg2)))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.activate_acp_entry(profile.clone(), window, cx);
-                                cx.notify();
-                            }))
-                            .child(panel_icon(CONNECT_ICON, theme.accent))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(label),
-                            )
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .max_w(ui_px(120.))
-                                    .text_size(ui_px(10.))
-                                    .text_color(rgba(theme.fg2))
-                                    .child(command),
-                            ),
-                    );
-                }
-            }
-            SessionCreationMode::Terminal => {
-                for (index, preset) in presets.into_iter().enumerate() {
-                    let is_focused =
-                        focused_column == PaletteColumn::Presets && index == preset_index;
-                    let label =
-                        i18n::text(self.language, "palette.new").replace("{name}", &preset.label);
-                    let program = preset.program.clone();
-                    preset_list = preset_list.child(
-                        div()
-                            .id(gpui::ElementId::Name(
-                                format!("pal-preset-{}", preset.id).into(),
-                            ))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .text_size(ui_px(12.))
-                            .text_color(rgba(theme.fg0))
-                            .when(is_focused, |el| el.bg(rgba(theme.bg2)))
-                            .hover(|style| style.bg(rgba(theme.bg2)))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.palette_open = false;
-                                this.spawn_preset(&preset, window, cx);
-                                cx.notify();
-                            }))
-                            .child(panel_icon(PLUS_ICON, theme.accent))
-                            .child(label)
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .text_size(ui_px(10.))
-                                    .text_color(rgba(theme.fg2))
-                                    .child(program),
-                            ),
-                    );
-                }
-            }
-        }
-
-        let ui_selected = mode == SessionCreationMode::Ui;
-        let terminal_selected = mode == SessionCreationMode::Terminal;
-        let mode_switch = div()
-            .flex()
-            .border_1()
-            .border_color(rgba(theme.line))
-            .child(
-                semantic_button(
-                    "session-mode-ui",
-                    i18n::text(self.language, "palette.ui_session"),
-                    theme,
-                )
-                .px_3()
-                .py_1()
-                .text_size(ui_px(11.))
-                .when(ui_selected, |button| {
-                    button
-                        .bg(rgba(theme.accent))
-                        .text_color(rgba(theme.on_accent))
-                })
-                .when(!local_target, |button| button.text_color(rgba(theme.fg2)))
-                .when(local_target, |button| {
-                    button.on_click(cx.listener(|this, _event, _window, cx| {
-                        this.session_creation_mode = SessionCreationMode::Ui;
-                        this.palette_index = 0;
+        for (index, preset) in presets.into_iter().enumerate() {
+            let is_focused = focused_column == PaletteColumn::Presets && index == preset_index;
+            let label = i18n::text(self.language, "palette.new").replace("{name}", &preset.label);
+            let program = preset.program.clone();
+            preset_list = preset_list.child(
+                div()
+                    .id(gpui::ElementId::Name(
+                        format!("pal-preset-{}", preset.id).into(),
+                    ))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .text_size(ui_px(12.))
+                    .text_color(rgba(theme.fg0))
+                    .when(is_focused, |el| el.bg(rgba(theme.bg2)))
+                    .hover(|s| s.bg(rgba(theme.bg2)))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.palette_open = false;
+                        // 不能在此清 new_session_target：spawn_preset 要 take 它决定项目。
+                        this.spawn_preset(&preset, window, cx);
                         cx.notify();
                     }))
-                })
-                .child(i18n::text(self.language, "palette.ui_session")),
-            )
-            .child(
-                semantic_button(
-                    "session-mode-terminal",
-                    i18n::text(self.language, "palette.terminal_session"),
-                    theme,
-                )
-                .px_3()
-                .py_1()
-                .border_0()
-                .border_l_1()
-                .border_color(rgba(theme.line))
-                .text_size(ui_px(11.))
-                .when(terminal_selected, |button| {
-                    button
-                        .bg(rgba(theme.accent))
-                        .text_color(rgba(theme.on_accent))
-                })
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.session_creation_mode = SessionCreationMode::Terminal;
-                    this.palette_index = 0;
-                    cx.notify();
-                }))
-                .child(i18n::text(self.language, "palette.terminal_session")),
+                    .child(panel_icon(PLUS_ICON, theme.accent))
+                    .child(label)
+                    .child(
+                        div()
+                            .ml_auto()
+                            .text_size(ui_px(10.))
+                            .text_color(rgba(theme.fg2))
+                            .child(program),
+                    ),
             );
+        }
 
         let hint = i18n::text(self.language, "palette.tab_switch_column");
         let panel = div()
@@ -1311,14 +846,10 @@ impl MuxlaneApp {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
                     .p_3()
                     .border_b_1()
                     .border_color(rgba(theme.line))
-                    .child(self.palette_input.clone())
-                    .child(mode_switch),
+                    .child(self.palette_input.clone()),
             )
             .child(
                 div()
@@ -1360,149 +891,5 @@ impl MuxlaneApp {
             )
             .child(panel)
             .into_any_element()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_agent_enter_click_and_copy_never_create_or_execute() {
-        use gpui::{AppContext, TestAppContext, VisualTestContext};
-        use std::sync::Arc;
-        let directory = tempfile::tempdir().unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let state = muxlane_server::ServerState::new(muxlane_core::model::MachineInfo {
-            machine_id: "catalog-test".into(),
-            name: "test".into(),
-            os: "test".into(),
-            version: "test".into(),
-        });
-        let mut snapshot = state.snapshot();
-        snapshot.projects.push(muxlane_core::model::Project {
-            id: "project".into(),
-            name: "Project".into(),
-            path: directory.path().into(),
-            branch: None,
-            agents: vec![],
-        });
-        let server = muxlane_server::MuxlaneServer::new_with_runtime(
-            directory.path().join("unused.sock"),
-            Arc::new(tokio::sync::RwLock::new(state)),
-            muxlane_server::DirtyFlag::new(),
-            runtime.handle().clone(),
-        );
-        let missing = muxlane_acp::AgentDefinition {
-            id: "missing".into(),
-            label: "Missing Agent".into(),
-            command: directory
-                .path()
-                .join("must-not-exist")
-                .to_str()
-                .unwrap()
-                .into(),
-            args: vec![],
-            env: Default::default(),
-        };
-        let store = directory.path().join("state.json");
-        let mut cx = TestAppContext::single();
-        let window = cx.add_window(move |window, cx| {
-            let mut app = MuxlaneApp::new(
-                window,
-                cx,
-                server,
-                snapshot,
-                vec![],
-                Default::default(),
-                store,
-            );
-            app.acp_registry = muxlane_acp::AgentRegistry::from_definitions(vec![missing]).unwrap();
-            app.acp_entries = app
-                .acp_registry
-                .entries(None, &muxlane_acp::LocalProbe::new(""))
-                .into_iter()
-                .filter(|entry| entry.id == "missing")
-                .collect();
-            // A fixed local recipe command, never a remote distribution value.
-            app.acp_entries[0].install = Some("npm install -g opencode-ai");
-            app.acp_entries[0].user_configured = false;
-            app.new_session_target = Some(NewSessionTarget::Local("project".into()));
-            app.session_creation_mode = SessionCreationMode::Ui;
-            app.palette_open = true;
-            app
-        });
-        let view = window.root(&mut cx).unwrap();
-        cx.update_window(window.into(), |_, window, cx| {
-            view.update(cx, |app, cx| {
-                assert!(app.handle_new_session_palette_key(
-                    &gpui::Keystroke::parse("enter").unwrap(),
-                    window,
-                    cx
-                ));
-                assert_eq!(app.acp_install_detail.as_deref(), Some("missing"));
-                assert!(app.acp_views.is_empty());
-                assert!(app.acp_records.is_empty());
-                assert!(app.new_session_target.is_some());
-                app.acp_install_detail = None;
-                cx.notify();
-            });
-        })
-        .unwrap();
-        let draw = |cx: &mut TestAppContext| {
-            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-            cx.update_window(window.into(), |_, window, cx| {
-                window.simulate_next_frame(cx)
-            })
-            .unwrap();
-            cx.run_until_parked();
-        };
-        draw(&mut cx);
-        {
-            let mut visual = VisualTestContext::from_window(window.into(), &mut cx);
-            let bounds = visual.debug_bounds("acp-agent-row").unwrap();
-            visual.simulate_click(bounds.center(), Default::default());
-        }
-        draw(&mut cx);
-        cx.update(|cx| {
-            let app = view.read(cx);
-            assert_eq!(app.acp_install_detail.as_deref(), Some("missing"));
-            assert!(app.acp_views.is_empty());
-            assert!(app.acp_records.is_empty());
-        });
-        {
-            let mut visual = VisualTestContext::from_window(window.into(), &mut cx);
-            let bounds = visual.debug_bounds("acp-copy-install").unwrap();
-            visual.simulate_click(bounds.center(), Default::default());
-        }
-        draw(&mut cx);
-        cx.update(|cx| {
-            assert_eq!(
-                cx.read_from_clipboard().unwrap().text().unwrap(),
-                "npm install -g opencode-ai"
-            );
-            assert!(view.read(cx).acp_views.is_empty());
-            assert!(view.read(cx).acp_records.is_empty());
-        });
-        assert!(!directory.path().join("must-not-exist").exists());
-    }
-
-    #[test]
-    fn all_targets_default_to_terminal_sessions() {
-        assert_eq!(
-            SessionCreationMode::for_target(&NewSessionTarget::Remote {
-                host: "host".into(),
-                project: "project".into(),
-            }),
-            SessionCreationMode::Terminal
-        );
-        assert_eq!(
-            SessionCreationMode::for_target(&NewSessionTarget::Local("project".into())),
-            SessionCreationMode::Terminal
-        );
     }
 }

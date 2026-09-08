@@ -1178,7 +1178,7 @@ impl Render for TermView {
                         let mut temp_cache = ShapeCache::default();
                         let mut cache_guard = shape_cache.lock().ok();
                         let cache: &mut ShapeCache = match cache_guard.as_mut() {
-                            Some(guard) => &mut **guard,
+                            Some(guard) => guard,
                             None => &mut temp_cache,
                         };
                         // 字体度量缓存：resolve_font/advance('m')/shape_line("m")

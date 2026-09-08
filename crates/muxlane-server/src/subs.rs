@@ -98,6 +98,7 @@ impl SubRegistry {
 }
 
 /// 单订阅转发循环：事件驱动，无数据时挂起在 rx.recv()/wake 上，零空转。
+#[allow(clippy::too_many_arguments)]
 async fn forward(
     sub_id: String,
     agent: AgentId,

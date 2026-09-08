@@ -44,35 +44,6 @@ export XDG_DATA_HOME="$TMP/data"
 mkdir -p "$XDG_DATA_HOME/muxlane"
 SMOKE_PROJECT="$TMP/workspace/muxlane"
 mkdir -p "$SMOKE_PROJECT"
-FAKE_ACP="$TMP/fake-acp.py"
-cat >"$FAKE_ACP" <<'PY'
-import json, sys
-for line in sys.stdin:
-    message=json.loads(line)
-    request_id=message.get('id')
-    method=message.get('method')
-    if request_id is None:
-        continue
-    if method == 'initialize':
-        result={'protocolVersion':1,'agentCapabilities':{'promptCapabilities':{'image':True,'audio':True,'embeddedContext':True}}}
-    elif method == 'session/new':
-        result={
-            'sessionId':'smoke-acp-session',
-            'modes': {'currentModeId':'high', 'availableModes':[{'id':'high','name':'Thinking: high'}]},
-            'configOptions':[
-                {'id':'model','name':'Model','type':'select','currentValue':'newapi/Kimi K3','options':[{'value':'newapi/Kimi K3','name':'newapi/Kimi K3'}]},
-                {'id':'thinking','name':'Thinking','type':'select','currentValue':'high','options':[{'value':'high','name':'high'}]},
-            ],
-        }
-    elif method == 'session/prompt':
-        update={'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'smoke-acp-session','update':{'sessionUpdate':'agent_message_chunk','messageId':'smoke-reply','content':{'type':'text','text':'Hello from fake ACP'}}}}
-        print(json.dumps(update), flush=True)
-        result={'stopReason':'end_turn'}
-    else:
-        result={}
-    print(json.dumps({'jsonrpc':'2.0','id':request_id,'result':result}), flush=True)
-PY
-export MUXLANE_ACP_CLAUDE_COMMAND="python3 $FAKE_ACP"
 SMOKE_AGENT="shell_smoke"
 SMOKE_TMUX="muxlane-smoke-shell"
 tmux -L muxlane new-session -d -s "$SMOKE_TMUX" -c "$SMOKE_PROJECT" "$SHELL"
@@ -502,36 +473,7 @@ print('✓ tab close terminated and removed its session')
 PY
 import -window "$WID" "$ARTIFACTS/05-tab-closed.png"
 
-# ACP UI session: global palette -> project -> UI -> Claude fake ACP.
-open_palette; sleep .3
-xdotool key Return; sleep .2
-xdotool key shift+Tab; sleep .2
-xdotool key Return; sleep .8
-wait_state "len(d.get('acp_threads', [])) == 1" "ACP UI thread created"
-xdotool type --delay 2 "hello from ui smoke"
-xdotool key Return
-for _ in {1..100}; do
-  if grep -R -Fq "Hello from fake ACP" "$XDG_DATA_HOME/muxlane/threads" 2>/dev/null; then break; fi
-  sleep .05
-done
-grep -R -Fq "Hello from fake ACP" "$XDG_DATA_HOME/muxlane/threads"
-import -window "$WID" "$ARTIFACTS/05-acp-thread.png"
-echo '✓ ACP UI thread created, sent a prompt, rendered a streamed reply, and persisted history'
-xdotool key ctrl+w
-wait_state "len(d.get('acp_threads', [])) == 0" "ACP UI thread deleted"
-for _ in {1..100}; do
-  thread_file=""
-  if [ -d "$XDG_DATA_HOME/muxlane/threads" ]; then
-    thread_file="$(find "$XDG_DATA_HOME/muxlane/threads" -maxdepth 1 -type f -name '*.json' -print -quit)"
-  fi
-  if [ -z "$thread_file" ]; then break; fi
-  sleep .05
-done
-if [ -n "$thread_file" ]; then
-  echo 'ACP UI thread file was not deleted' >&2
-  exit 1
-fi
-echo '✓ closing an ACP tab deleted its thread record and file'
+# Terminal ＋ / Ctrl+W coverage above leaves the app with one shell tab.
 
 # Terminal ＋ 与 Win+Alt+T 使用默认终端预设；本例默认 Shell，不 split。
 xdotool key super+alt+t; sleep .5

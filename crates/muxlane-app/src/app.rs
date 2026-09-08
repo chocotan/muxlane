@@ -7,13 +7,9 @@ mod panes;
 #[path = "sidebar.rs"]
 mod sidebar;
 #[cfg(test)]
-#[path = "acp_registry_tests.rs"]
-mod acp_registry_tests;
-#[cfg(test)]
 #[path = "ux_tests.rs"]
 mod ux_tests;
 use self::sidebar::SidebarDividerDrag;
-use crate::acp_view::{AcpView, AcpViewInit};
 use crate::actions::*;
 use crate::dialogs::ConnectAuthMode;
 use crate::i18n::{self, Language};
@@ -40,7 +36,7 @@ use gpui::{
 use muxlane_core::model::{AgentId, Snapshot};
 use muxlane_core::{PaneId, PaneNode, SplitAxis};
 use muxlane_server::MuxlaneServer;
-use palette::{NewSessionTarget, PaletteColumn, SessionCreationMode};
+use palette::{NewSessionTarget, PaletteColumn};
 use panes::{DividerDrag, SplitDrag};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -136,22 +132,6 @@ pub struct MuxlaneApp {
 
     // 终端缓存
     pub(crate) terms: HashMap<AgentId, Entity<TermView>>,
-    pub(crate) acp_views: HashMap<AgentId, Entity<AcpView>>,
-    pub(crate) acp_registry: muxlane_acp::AgentRegistry,
-    pub(crate) acp_registry_error: Option<String>,
-    pub(crate) acp_catalog: Option<muxlane_acp::catalog::Catalog>,
-    pub(crate) acp_catalog_error: Option<String>,
-    pub(crate) acp_catalog_loading: bool,
-    pub(crate) acp_catalog_generation: u64,
-    pub(crate) acp_catalog_revision: u64,
-    pub(crate) acp_detecting: bool,
-    pub(crate) acp_entries: Vec<muxlane_acp::AgentEntry>,
-    pub(crate) acp_install_detail: Option<String>,
-    pub(crate) acp_metadata: HashMap<AgentId, muxlane_store::PersistedAcpThread>,
-    pub(crate) acp_records: HashMap<AgentId, muxlane_store::PersistedAcpThreadData>,
-    pub(crate) acp_deleted: Arc<std::sync::Mutex<std::collections::HashSet<AgentId>>>,
-    pub(crate) acp_dirty: std::collections::HashSet<AgentId>,
-    pub(crate) acp_persist_pending: bool,
     pub(crate) mirror_cancel: HashMap<AgentId, Arc<std::sync::atomic::AtomicBool>>,
 
     // 快照/远程镜像
@@ -199,7 +179,6 @@ pub struct MuxlaneApp {
     palette_column: PaletteColumn,
     pub(crate) presets: Vec<muxlane_core::AgentPreset>,
     pub(crate) new_session_target: Option<NewSessionTarget>,
-    pub(crate) session_creation_mode: SessionCreationMode,
 
     // 退出确认
     pub(crate) quit_confirm_open: bool,
@@ -222,7 +201,6 @@ pub struct MuxlaneApp {
 
     // 菜单/确认框
     pub(crate) session_menu: Option<SessionMenu>,
-    pub(crate) acp_delete_confirm: Option<AgentId>,
     pub(crate) tree_menu: Option<TreeMenu>,
     pub(crate) delete_confirm: Option<DeleteConfirm>,
     pub(crate) delete_error: Option<String>,
@@ -257,42 +235,7 @@ impl MuxlaneApp {
         persisted: muxlane_store::PersistedApp,
         store_path: std::path::PathBuf,
     ) -> Self {
-        let agents_path = muxlane_core::paths::data_dir().join("agents.json");
-        Self::new_with_acp_registry(
-            window, cx, server, initial_snapshot, connect_to, persisted, store_path,
-            muxlane_acp::AgentRegistry::load(&agents_path),
-        )
-    }
-
-    fn new_with_acp_registry(
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        server: Arc<MuxlaneServer>,
-        initial_snapshot: Snapshot,
-        connect_to: Vec<String>,
-        persisted: muxlane_store::PersistedApp,
-        store_path: std::path::PathBuf,
-        registry: anyhow::Result<muxlane_acp::AgentRegistry>,
-    ) -> Self {
         crate::ui_scale::set_percent(persisted.ui_scale);
-        let loaded_acp_threads = muxlane_store::load_acp_threads(&store_path);
-        for error in &loaded_acp_threads.errors {
-            tracing::warn!(%error, "load ACP thread failed");
-        }
-        let stored_acp_records: HashMap<_, _> = loaded_acp_threads
-            .records
-            .into_iter()
-            .map(|record| (record.metadata.ui_id.clone(), record))
-            .collect();
-        let mut persisted_acp_threads = persisted.acp_threads.clone();
-        for record in stored_acp_records.values() {
-            if !persisted_acp_threads
-                .iter()
-                .any(|thread| thread.ui_id == record.metadata.ui_id)
-            {
-                persisted_acp_threads.push(record.metadata.clone());
-            }
-        }
         // 本地状态事件 → 通知列表
         let mut local_rx = server.subscribe_events();
         cx.spawn(async move |this, cx| loop {
@@ -332,13 +275,6 @@ impl MuxlaneApp {
                 if this
                     .update(cx, |this, cx| {
                         this.last_snapshot = snap;
-                        if let Some(active) = this
-                            .active
-                            .clone()
-                            .filter(|agent| this.is_acp_session(agent))
-                        {
-                            this.ensure_acp_started(&active, cx);
-                        }
                         this.persist();
                         cx.notify();
                     })
@@ -498,23 +434,11 @@ impl MuxlaneApp {
         let first_agent = initial_snapshot
             .agents
             .first()
-            .map(|agent| agent.id.clone())
-            .or_else(|| {
-                persisted_acp_threads
-                    .iter()
-                    .find(|thread| initial_snapshot.project(&thread.project_id).is_some())
-                    .map(|thread| thread.ui_id.clone())
-            });
+            .map(|agent| agent.id.clone());
         let valid: std::collections::HashSet<AgentId> = initial_snapshot
             .agents
             .iter()
             .map(|agent| agent.id.clone())
-            .chain(
-                persisted_acp_threads
-                    .iter()
-                    .filter(|thread| initial_snapshot.project(&thread.project_id).is_some())
-                    .map(|thread| thread.ui_id.clone()),
-            )
             .collect();
         let mut workspace = WorkspaceController::from_persisted(&persisted);
         let local_machine_id = initial_snapshot
@@ -549,15 +473,6 @@ impl MuxlaneApp {
                 initial_snapshot
                     .agent(agent)
                     .map(|instance| instance.project.clone())
-                    .or_else(|| {
-                        persisted_acp_threads
-                            .iter()
-                            .find(|thread| {
-                                &thread.ui_id == agent
-                                    && initial_snapshot.project(&thread.project_id).is_some()
-                            })
-                            .map(|thread| thread.project_id.clone())
-                    })
             });
         let selected_project = select_initial_project(
             workspace.current_project().cloned(),
@@ -650,28 +565,7 @@ impl MuxlaneApp {
             field
         });
 
-        let (acp_registry, acp_registry_error) =
-            match registry {
-                Ok(registry) => (registry, None),
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    tracing::warn!(%message, "load ACP agents failed");
-                    notifications.update(cx, |center, cx| center.show_error(message.clone(), cx));
-                    (muxlane_acp::AgentRegistry::default(), Some(message))
-                }
-            };
-        let acp_entries = acp_registry.entries(None, &muxlane_acp::LocalProbe::current());
         let mut app = MuxlaneApp {
-            acp_entries,
-            acp_catalog: None,
-            acp_catalog_error: None,
-            acp_catalog_loading: false,
-            acp_catalog_generation: 0,
-            acp_catalog_revision: 0,
-            acp_detecting: false,
-            acp_install_detail: None,
-            acp_registry,
-            acp_registry_error,
             focus: cx.focus_handle(),
             server,
             pane_tree: restored_tree,
@@ -679,12 +573,6 @@ impl MuxlaneApp {
             // 最大化是瞬时 UI 状态，不跨重启保留
             maximized_pane: None,
             terms: HashMap::new(),
-            acp_views: HashMap::new(),
-            acp_metadata: HashMap::new(),
-            acp_records: stored_acp_records.clone(),
-            acp_deleted: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            acp_dirty: std::collections::HashSet::new(),
-            acp_persist_pending: false,
             mirror_cancel: HashMap::new(),
             active: None,
             workspace,
@@ -739,9 +627,7 @@ impl MuxlaneApp {
             quit_exit_focus: cx.focus_handle(),
             remote_event_tx: tx.clone(),
             new_session_target: None,
-            session_creation_mode: SessionCreationMode::Terminal,
             session_menu: None,
-            acp_delete_confirm: None,
             tree_menu: None,
             delete_confirm: None,
             delete_error: None,
@@ -765,67 +651,6 @@ impl MuxlaneApp {
             .pane_tree
             .group(&app.active_pane)
             .and_then(|group| group.active.clone());
-        let restorable_acp_threads: Vec<_> = persisted_acp_threads
-            .iter()
-            .filter(|record| app.last_snapshot.project(&record.project_id).is_some())
-            .cloned()
-            .collect();
-        for record in &restorable_acp_threads {
-            let data = stored_acp_records
-                .get(&record.ui_id)
-                .cloned()
-                .unwrap_or_else(|| muxlane_store::PersistedAcpThreadData::new(record.clone()));
-            let Some(project_path) = app
-                .last_snapshot
-                .project(&record.project_id)
-                .map(|project| project.path.clone())
-            else {
-                continue;
-            };
-            let restored_profile = app.acp_registry.require(&record.profile_id);
-            let profile = restored_profile.as_ref().ok().cloned();
-            let view = cx.new(|cx| {
-                AcpView::new(
-                    AcpViewInit {
-                        ui_id: record.ui_id.clone(),
-                        project_id: record.project_id.clone(),
-                        project_path: project_path.clone(),
-                        profile,
-                        profile_id: record.profile_id.clone(),
-                        protocol_session_id: record.protocol_session_id.clone(),
-                        parent_ui_id: record.parent_ui_id.clone(),
-                        title: if record.title.is_empty() {
-                            "ACP".into()
-                        } else {
-                            record.title.clone()
-                        },
-                        draft: record.draft.clone(),
-                        snapshot: data.snapshot.clone(),
-                        queued_prompts: data.queued_prompts.clone(),
-                        queue_paused: data.queue_paused,
-                        theme_mode,
-                        language,
-                    },
-                    window,
-                    cx,
-                )
-            });
-            if let Err(error) = restored_profile {
-                view.update(cx, |view, cx| {
-                    view.apply(
-                        muxlane_acp::Event::Error(muxlane_acp::SessionError {
-                            kind: muxlane_acp::ErrorKind::Protocol,
-                            message: error.to_string(),
-                        }),
-                        cx,
-                    );
-                });
-            }
-            app.register_acp_view(record.ui_id.clone(), view, window, cx);
-        }
-        if let Some(active) = app.active.clone().filter(|agent| app.is_acp_session(agent)) {
-            app.ensure_acp_started(&active, cx);
-        }
         if let Some(agent) = app
             .active
             .clone()
@@ -873,144 +698,8 @@ impl MuxlaneApp {
                 app.open_agent(&id, window, cx);
             }
         }
-        app.refresh_acp_catalog(cx);
         app.persist();
         app
-    }
-
-    pub(crate) fn refresh_acp_catalog(&mut self, cx: &mut Context<Self>) {
-        if self.acp_catalog_loading {
-            return;
-        }
-        self.acp_catalog_loading = true;
-        self.acp_catalog_generation += 1;
-        let generation = self.acp_catalog_generation;
-        let load_cache = self.acp_catalog.is_none();
-        let path = muxlane_core::paths::data_dir().join("acp-registry-cache.json");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        self.server.runtime_handle().spawn(async move {
-            if load_cache {
-                let cached_path = path.clone();
-                let cached = tokio::task::spawn_blocking(move || {
-                    muxlane_acp::catalog::Catalog::load_cache(&cached_path)
-                })
-                .await;
-                match cached {
-                    Ok(Ok(Some(catalog))) => {
-                        let _ = tx.send((false, Some(catalog), None));
-                    }
-                    Ok(Ok(None)) => {}
-                    result => {
-                        let _ = tx.send((false, None, Some(format!("ACP cache: {result:?}"))));
-                    }
-                }
-            }
-            match muxlane_acp::catalog::Catalog::fetch().await {
-                Ok(catalog) => {
-                    let cache = catalog.clone();
-                    let saved = tokio::task::spawn_blocking(move || cache.save_cache(&path)).await;
-                    let error = match saved {
-                        Ok(Ok(())) => None,
-                        result => Some(format!("ACP cache: {result:?}")),
-                    };
-                    let _ = tx.send((true, Some(catalog), error));
-                }
-                Err(error) => {
-                    let _ = tx.send((true, None, Some(format!("{error:#}"))));
-                }
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            while let Some((finished, catalog, error)) = rx.recv().await {
-                if this
-                    .update(cx, |this, cx| {
-                        if generation != this.acp_catalog_generation {
-                            return;
-                        }
-                        this.acp_catalog_loading = !finished;
-                        this.acp_catalog_error = error;
-                        if let Some(catalog) = catalog {
-                            this.acp_catalog = Some(catalog);
-                            this.acp_catalog_revision += 1;
-                            this.detect_acp_agents(cx);
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    pub(crate) fn detect_acp_agents(&mut self, cx: &mut Context<Self>) {
-        if self.acp_detecting {
-            return;
-        }
-        self.acp_detecting = true;
-        let catalog = self.acp_catalog.clone();
-        let revision = self.acp_catalog_revision;
-        let path = muxlane_core::paths::data_dir().join("agents.json");
-        let job = self.server.runtime_handle().spawn_blocking(move || {
-            let registry = muxlane_acp::AgentRegistry::load(&path)?;
-            let entries = registry.entries(catalog.as_ref(), &muxlane_acp::LocalProbe::current());
-            anyhow::Ok((registry, entries))
-        });
-        cx.spawn(async move |this, cx| {
-            let result = job.await;
-            let _ = this.update(cx, |this, cx| {
-                this.acp_detecting = false;
-                if revision != this.acp_catalog_revision {
-                    this.detect_acp_agents(cx);
-                    return;
-                }
-                this.apply_acp_detection(
-                    result.map_err(anyhow::Error::from).and_then(|result| result),
-                    cx,
-                );
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn apply_acp_detection(
-        &mut self,
-        result: anyhow::Result<(muxlane_acp::AgentRegistry, Vec<muxlane_acp::AgentEntry>)>,
-        cx: &mut Context<Self>,
-    ) {
-        match result {
-            Ok((registry, entries)) => {
-                self.acp_registry = registry;
-                self.acp_entries = entries;
-                self.acp_registry_error = None;
-                for view in self.acp_views.values() {
-                    view.update(cx, |view, cx| {
-                        if view.handle.is_none() {
-                            view.profile = self.acp_registry.resolve(&view.profile_id);
-                            cx.notify();
-                        }
-                    });
-                }
-            }
-            Err(error) => {
-                let message = format!("{error:#}");
-                self.acp_registry_error = Some(message.clone());
-                self.notifications.update(cx, |center, cx| center.show_error(message, cx));
-            }
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn acp_launch_profile(&self, id: &str) -> anyhow::Result<muxlane_acp::Profile> {
-        if let Some(error) = &self.acp_registry_error {
-            anyhow::bail!("ACP agent configuration unavailable: {error}");
-        }
-        let profile = self.acp_registry.require(id)?;
-        muxlane_acp::local_profile(&profile, &muxlane_acp::LocalProbe::current())
     }
 
     pub(crate) fn persist(&self) {
@@ -1053,13 +742,6 @@ impl MuxlaneApp {
         app.osc52_clipboard_enabled = Some(self.osc52_clipboard_enabled);
         app.language = Some(self.language.id().into());
         app.default_terminal_preset = self.default_terminal_preset.clone();
-        app.acp_threads = self
-            .acp_records
-            .values()
-            .map(|record| record.metadata.clone())
-            .collect();
-        app.acp_threads
-            .sort_by(|left, right| left.ui_id.cmp(&right.ui_id));
         self.persistence.submit_app(app);
     }
 
@@ -1082,29 +764,6 @@ impl MuxlaneApp {
         to: muxlane_core::model::AgentStatus,
         message: Option<String>,
     ) -> NotificationDraft {
-        if let Some(thread) = self.acp_metadata.get(&agent) {
-            let profile = self.acp_registry.resolve(&thread.profile_id);
-            let label = profile
-                .as_ref()
-                .map(|profile| profile.label())
-                .unwrap_or(&thread.profile_id);
-            return NotificationDraft {
-                focused: self.active.as_ref() == Some(&agent),
-                agent,
-                machine_name: "local".into(),
-                project_name: self
-                    .last_snapshot
-                    .project(&thread.project_id)
-                    .map(|project| project.name.clone())
-                    .unwrap_or_else(|| thread.project_id.clone()),
-                agent_type: muxlane_core::model::AgentType::Unknown,
-                from,
-                to,
-                message: message.or_else(|| Some(format!("{} · {}", thread.title, label))),
-                sound_enabled: false,
-                desktop_enabled: false,
-            };
-        }
         let details = self
             .last_snapshot
             .agent(&agent)
@@ -1322,13 +981,6 @@ impl Render for MuxlaneApp {
                 } else if this.quit_confirm_open {
                     if this.handle_quit_confirmation_key(&ev.keystroke, window, cx) {
                         cx.stop_propagation();
-                    }
-                } else if this.acp_delete_confirm.is_some() {
-                    if ev.keystroke.key.as_str() == "escape" {
-                        this.acp_delete_confirm = None;
-                        this.focus.focus(window, cx);
-                        cx.stop_propagation();
-                        cx.notify();
                     }
                 } else if this.palette_open {
                     // Palette owns Tab and its navigation keys while open; ordinary text still
@@ -1556,9 +1208,6 @@ impl Render for MuxlaneApp {
         }
         if self.session_menu.is_some() {
             root = root.child(self.render_session_menu(cx));
-        }
-        if self.acp_delete_confirm.is_some() {
-            root = root.child(self.render_acp_delete_confirm(cx));
         }
         if self.tree_menu.is_some() {
             root = root.child(self.render_tree_menu(cx));

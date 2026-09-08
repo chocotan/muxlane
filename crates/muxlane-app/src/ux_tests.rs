@@ -37,16 +37,6 @@ mod sidebar_navigation {
             terminal("b-1", "b"),
             terminal("a-1", "a"),
         ];
-        for id in ["acp-z", "acp-a"] {
-            app.acp_metadata.insert(
-                id.into(),
-                muxlane_store::PersistedAcpThread {
-                    ui_id: id.into(),
-                    project_id: "a".into(),
-                    ..Default::default()
-                },
-            );
-        }
         // Config order deliberately differs from alphabetical host order.
         for host in ["z-host", "a-host"] {
             app.remotes.push(muxlane_client::RemoteHost::new(
@@ -72,7 +62,6 @@ mod sidebar_navigation {
                         terminal(&format!("{host}-1"), "r1"),
                         terminal(&format!("{host}-2"), "r2"),
                     ],
-                    ..Default::default()
                 },
             );
             app.remote_states.insert(
@@ -108,13 +97,13 @@ mod sidebar_navigation {
     }
 
     #[test]
-    fn sidebar_order_is_stable_across_projects_protocols_remotes_and_collapse() {
+    fn sidebar_order_is_stable_across_projects_remotes_and_collapse() {
         with_app(|cx, _window, view| {
             cx.update(|cx| {
                 view.update(cx, |app, _| {
                     populate(app);
                     // Neither pane tab order nor expansion state participates in traversal.
-                    for id in ["acp-z", "b-1", "a-1", "a-2", "acp-a"] {
+                    for id in ["b-1", "a-1", "a-2"] {
                         app.pane_tree.open_tab(&app.active_pane, id.into());
                     }
                     app.collapsed_machines
@@ -126,8 +115,7 @@ mod sidebar_navigation {
                     assert_order(
                         app,
                         &[
-                            "a-2", "a-1", "acp-a", "acp-z", "b-1", "z-host-1", "z-host-2",
-                            "a-host-1", "a-host-2",
+                            "a-2", "a-1", "b-1", "z-host-1", "z-host-2", "a-host-1", "a-host-2",
                         ],
                     );
                     assert!(app.move_project_order(&app.local_machine_id(), "b", "a"));
@@ -135,15 +123,11 @@ mod sidebar_navigation {
                     assert_order(
                         app,
                         &[
-                            "b-1", "a-2", "a-1", "acp-a", "acp-z", "z-host-2", "z-host-1",
-                            "a-host-1", "a-host-2",
+                            "b-1", "a-2", "a-1", "z-host-2", "z-host-1", "a-host-1", "a-host-2",
                         ],
                     );
-                    // Reinsertion changes HashMap storage but not the rendered/navigation order.
-                    let acp = app.acp_metadata.remove("acp-a").unwrap();
-                    app.acp_metadata.insert("acp-a".into(), acp);
                     app.remotes.clear();
-                    assert_order(app, &["b-1", "a-2", "a-1", "acp-a", "acp-z"]);
+                    assert_order(app, &["b-1", "a-2", "a-1"]);
                 })
             });
         });
@@ -195,36 +179,10 @@ mod sidebar_navigation {
                         );
                         app.terms.insert(id.into(), term);
                     }
-                    for id in ["acp-a", "acp-z"] {
-                        let view = cx.new(|cx| {
-                            AcpView::new(
-                                AcpViewInit {
-                                    ui_id: id.into(),
-                                    project_id: "a".into(),
-                                    project_path: "/unused".into(),
-                                    profile_id: "test".into(),
-                                    profile: None,
-                                    protocol_session_id: None,
-                                    parent_ui_id: None,
-                                    title: id.into(),
-                                    draft: String::new(),
-                                    snapshot: Default::default(),
-                                    queued_prompts: vec![],
-                                    queue_paused: false,
-                                    theme_mode: app.theme_mode,
-                                    language: app.language,
-                                },
-                                window,
-                                cx,
-                            )
-                        });
-                        app.acp_views.insert(id.into(), view);
-                    }
                     app.select_project_workspace_inner(
                         ProjectKey::new(app.local_machine_id(), "a"),
                         cx,
                     );
-                    app.pane_tree.open_tab(&app.active_pane, "acp-z".into());
                     app.pane_tree.open_tab(&app.active_pane, "a-2".into());
                     let split = app
                         .pane_tree
@@ -253,8 +211,6 @@ mod sidebar_navigation {
 
                     for (next, id, machine, project, collapse_machine, collapse_project) in [
                         (true, "a-1", "ux-test", "a", "local", "local:a"),
-                        (true, "acp-a", "ux-test", "a", "local", "local:a"),
-                        (true, "acp-z", "ux-test", "a", "local", "local:a"),
                         (true, "b-1", "ux-test", "b", "local", "local:b"),
                         (
                             true,
@@ -265,7 +221,6 @@ mod sidebar_navigation {
                             "remote:z-host:r1",
                         ),
                         (false, "b-1", "ux-test", "b", "local", "local:b"),
-                        (false, "acp-z", "ux-test", "a", "local", "local:a"),
                     ] {
                         app.collapsed_machines.insert(collapse_machine.into());
                         app.collapsed_projects.insert(collapse_project.into());
@@ -295,11 +250,7 @@ mod sidebar_navigation {
                         if id == "a-1" {
                             assert_eq!(app.active_pane, split);
                         }
-                        let focus = app
-                            .acp_views
-                            .get(id)
-                            .map(|view| view.focus_handle(cx))
-                            .unwrap_or_else(|| app.terms[id].focus_handle(cx));
+                        let focus = app.terms[id].focus_handle(cx);
                         assert!(focus.is_focused(window), "{id} must receive focus");
                     }
                     // Missing active chooses the edges, then wraps across all machines.
@@ -591,103 +542,10 @@ fn settings_capture_rebinds_and_disables_all_default_terminal_actions() {
     });
 }
 
-#[test]
-fn full_acp_view_draws_idle_send_and_generating_cancel_branches() {
-    let project = tempfile::tempdir().unwrap();
-    let mut cx = TestAppContext::single();
-    let window = cx.add_window(|window, cx| {
-        let mut view = AcpView::new(
-            AcpViewInit {
-                profile_id: "ux-unresolved-profile".into(),
-                ui_id: "ux-composer".into(),
-                project_id: "ux-project".into(),
-                project_path: project.path().to_path_buf(),
-                profile: None,
-                protocol_session_id: None,
-                parent_ui_id: None,
-                title: "Composer render regression".into(),
-                draft: "Test draft".into(),
-                snapshot: Default::default(),
-                queued_prompts: vec![],
-                queue_paused: false,
-                theme_mode: ThemeMode::Light,
-                language: Language::from_id("en").unwrap(),
-            },
-            window,
-            cx,
-        );
-        view.start_allowed = false;
-        view
-    });
-    let view = window.root(&mut cx).unwrap();
-    let modes = muxlane_acp::Modes {
-        current: "chat".into(),
-        available: vec![muxlane_acp::SessionMode {
-            id: "chat".into(),
-            name: "Chat".into(),
-            description: None,
-        }],
-    };
-    let mut configs: Vec<_> = ["model", "reasoning", "other"]
-        .into_iter()
-        .map(|id| muxlane_acp::ConfigOption {
-            id: id.into(),
-            name: id.into(),
-            description: None,
-            category: None,
-            kind: muxlane_acp::ConfigKind::Select {
-                current: "default".into(),
-                choices: vec![muxlane_acp::ConfigChoice {
-                    id: "default".into(),
-                    name: "Default".into(),
-                }],
-            },
-        })
-        .collect();
-    configs.push(muxlane_acp::ConfigOption {
-        id: "confirm".into(),
-        name: "Confirm".into(),
-        description: None,
-        category: None,
-        kind: muxlane_acp::ConfigKind::Boolean { current: true },
-    });
-    // Modes render only without config options. Exercise both server-provided footer shapes.
-    for snapshot in [
-        muxlane_acp::ThreadSnapshot::default(),
-        muxlane_acp::ThreadSnapshot {
-            modes: Some(modes),
-            ..Default::default()
-        },
-        muxlane_acp::ThreadSnapshot {
-            config_options: configs,
-            ..Default::default()
-        },
-    ] {
-        for status in [muxlane_acp::Status::Idle, muxlane_acp::Status::Generating] {
-            cx.update(|cx| {
-                view.update(cx, |view, cx| {
-                    view.thread = muxlane_acp::ThreadReducer::from_snapshot(snapshot.clone());
-                    view.status = status;
-                    cx.notify();
-                });
-            });
-            // Draw the complete production view, including the selected composer button branch.
-            // GPUI rejects duplicate hover styles here even before a pointer enters the button.
-            draw(&mut cx, window.into());
-            cx.update(|cx| {
-                let view = view.read(cx);
-                assert_eq!(view.status, status);
-                assert!(!view.start_allowed);
-                assert!(view.handle.is_none());
-            });
-        }
-    }
-}
-
-// Render the production sidebar and settings around a real editor without a PTY/ACP process.
+// Render the production sidebar and settings around a real editor without a PTY process.
 struct SidebarEditorFixture {
     app: Entity<MuxlaneApp>,
-    editor: Entity<crate::prompt_editor::PromptEditor>,
+    editor: Entity<TextField>,
     _subscription: Subscription,
 }
 
@@ -717,8 +575,7 @@ fn mouse_opened_settings_restores_the_original_draft_editor() {
     with_app(|cx, window, view| {
         let editor = cx
             .update_window(window, |_, window, cx| {
-                let editor =
-                    cx.new(|cx| crate::prompt_editor::PromptEditor::new("Draft", window, cx));
+                let editor = cx.new(|cx| TextField::new("Draft", window, cx));
                 window.replace_root(cx, |_, cx| SidebarEditorFixture {
                     app: view.clone(),
                     editor: editor.clone(),
@@ -760,11 +617,14 @@ fn new_tab_button_follows_last_tab_when_tabs_fit() {
         let mut visual = gpui::VisualTestContext::from_window(window, cx);
         visual.simulate_resize(size(px(1200.), px(640.)));
         for count in 1..=3 {
-            let pane = cx.update(|cx| view.update(cx, |app, cx| {
-                app.pane_tree.open_tab(&app.active_pane, format!("adjacent-tab-{count}"));
-                cx.notify();
-                app.active_pane.clone()
-            }));
+            let pane = cx.update(|cx| {
+                view.update(cx, |app, cx| {
+                    app.pane_tree
+                        .open_tab(&app.active_pane, format!("adjacent-tab-{count}"));
+                    cx.notify();
+                    app.active_pane.clone()
+                })
+            });
             draw(cx, window);
             let scroll = cx.update(|cx| view.read(cx).pane_tab_scrolls[&pane].scroll.clone());
             let last = scroll.bounds_for_item(count - 1).unwrap();

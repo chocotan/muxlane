@@ -7,27 +7,13 @@
 ```text
 cargo fmt --all -- --check                            PASS
 cargo clippy --workspace --all-targets -- -D warnings PASS
-cargo test --workspace                                274 passed, 0 failed
-scripts/ui-smoke.sh                                    PASS（像素+状态断言；含 ACP 创建、流式回复、持久化与归档）
+cargo test --workspace                                256 passed, 0 failed
+scripts/ui-smoke.sh                                    PASS
 scripts/release-smoke.sh                               PASS
 ```
 
 ## UI 自动化覆盖
 
-- Agent Thread 页面按目标截图收敛为 timeline + 无边框 composer；底栏仅保留附件、`@`、模型/thinking 与发送
-- PromptEditor 使用 GPUI `TextLayout` 实际塑形结果处理光标、点击、拖选与 IME 坐标，不再使用硬编码字符网格
-- History 可从 tab `…` 菜单打开，重复选择、Escape 或点击外部均可关闭；响应不会重新打开已关闭弹层
-- checkpoint Restore/Undo 不再常驻底栏，仅在 `⋯` 更多菜单中按需出现
-- 新建会话显式支持 `UI / Terminal`，本地与远程默认均为 Terminal，远程保持 Terminal-only
-- Agent Thread 使用原生 GPUI timeline/composer；支持 Markdown、thinking、plan、tool、diff、terminal content 和 follow-tail
-- Composer 支持多行编辑、IME、`/` ACP command 与本地 skill、`@` 文件/目录/符号/thread/terminal/URL/diagnostic context
-- 支持图片/音频附件 capability gating，以及 mode/model/thinking/config selector
-- permission FIFO、form/URL elicitation、生成中 prompt queue/pause/Send Now
-- ACP host 文件访问限制在项目根目录；terminal 自动回收并在 wait 后保证 stdout/stderr 已 drain
-- typed thread snapshot、draft、queue、usage/plan 持久化；History、恢复与 replay 去重
-- 关闭 Agent Thread tab 永久删除对应线程记录与线程文件
-- checkpoint 恢复前二次确认并保存 Undo；未捕获的大型 untracked 文件保持不动
-- subagent session 关联打开；ACP `session/list` 分页带重复 cursor 与页数保护
 - zsh 会话正确启动（sidebar/tab 显示 `zsh`）
 - xterm-256color + truecolor，cell foreground/background/bold/italic/underline
 - 可见 block cursor
@@ -62,9 +48,6 @@ scripts/release-smoke.sh                               PASS
 
 ## 协议与安全
 
-- ACP `session/list` 分页、replay 分歧、permission FIFO、elicitation value、terminal drain/reap 均有定向测试
-- 线程文件名与 JSON `ui_id` 必须一致；损坏/错名文件隔离报告，不复活已删除 thread
-- checkpoint 覆盖 tracked/index/untracked/Undo 与超限大文件保留
 - `state.list`：通过
 - `term.subscribe` replay + 增量：通过
 - 多订阅者同流：通过

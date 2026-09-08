@@ -6,7 +6,6 @@ members = [
     "crates/muxlane-server",
     "crates/muxlane-client",
     "crates/muxlane-store",
-    "crates/muxlane-acp",
     "crates/muxlane-app",
 ]
 

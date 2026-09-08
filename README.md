@@ -38,7 +38,7 @@
 ---
 
 ### 3. 灵活递归窗格布局（Recursive PaneTree）
-- **显式控制，告别意外分屏**：终端标签栏右侧 `＋` 或快捷键 `Platform+Alt+T` 在同 Pane 创建默认终端预设的标签页；`Platform+Alt+R` / `Platform+Alt+D` 在右侧 / 下方新建默认终端。ACP 标签栏 `＋` 仍继承当前 UI profile。
+- **显式控制，告别意外分屏**：终端标签栏右侧 `＋` 或快捷键 `Platform+Alt+T` 在同 Pane 创建默认终端预设的标签页；`Platform+Alt+R` / `Platform+Alt+D` 在右侧 / 下方新建默认终端。
 - **递归分屏与自适应比例**：
   - 支持水平（Horizontal）与垂直（Vertical）任意层级嵌套分屏；
   - 2px 精密分割线拖拽实时调整比例，自适应视口尺寸，窗格关闭后自动向内折叠父级，布局比例重启持久化保留；
@@ -83,50 +83,6 @@ MUXLANE_SHELL=/usr/bin/zsh cargo run -p muxlane-app
 cargo build --release -p muxlane-app
 ./target/release/muxlane
 ```
-
-### ACP 工具调用
-
-工具行显示协议状态和工具类型；标题保留协议原文，折叠时只显示首行。Raw input/output 独立折叠，不根据工具名称或原始 JSON 推断执行命令。终端只在本机 HostServices 提供元数据时显示真实 command、argv 和 cwd；输出保留空白并横向滚动，退出码与截断提示可同时显示，不显示推测耗时。输出预览上限为 64 KiB，可复制完整的已保留输出（不包含上游已截去的字节）。
-
-文件修改使用逐行 diff、三行上下文、旧新行号与增删统计。超过合计 64 KiB / 2000 行时不计算 diff；单个预览最多展示 600 行，并明确标记限制。可复制完整原文和新内容，路径仅展示，不自动打开远端路径。回滚仍受项目根目录与当前文件内容一致性检查约束。授权卡关联工具 ID 和已有 typed 内容，一次/始终/拒绝选项保持协议含义，重复提交不会再次发送。
-
-### ACP Agent 发现与安装
-
-原生 UI 会话支持用户自行安装的 **ACP stdio CLI 或 adapter**，普通交互式终端 CLI 不一定支持 ACP。新建会话的 UI 模式会在后台刷新 [ACP 官方目录](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json)，仅获取元数据，不下载图标、归档或运行目录中的命令。目录响应限制为 2 MiB / 10 秒，仅接受 1.x schema；离线或刷新失败时保留已有目录与原子写入的 `acp-registry-cache.json` 缓存。
-
-离线也提供 Claude、Codex、Pi、OpenCode 四项本地 recipe。OpenCode 无需手填配置，检测到 `opencode` 后用 `opencode acp` 启动。前三项分别检测 `claude-agent-acp`、`codex-acp`、`pi-acp`，不再默认使用可能下载软件的 `npx`。未找到命令时点击或按 Enter 只显示安装详情，不创建会话；安装命令只能复制，用户自行执行后点击“重新检测”。“刷新官方目录”和“重新检测”独立工作，没有自动安装或 shell 安装入口。
-
-检测只查看当前 GUI 进程 PATH 中绝对目录下的文件（或显式绝对命令路径），检查文件及可执行位，不执行 `--help`、`--version`、`npx`、`uvx`，不搜索项目的 `node_modules`，忽略空和相对 PATH 项。“已找到”不代表已认证、已验证 ACP 能力或所有依赖可用。当前文件检测支持 Unix 平台。GUI 继承的 PATH 若在外部改变，需重启应用；同一 PATH 目录内新安装的命令可直接重新检测。
-
-### 自定义 ACP CLI
-
-未知官方目录条目显示“需手工配置”，Muxlane 不会猜测 npm bin、归档 basename 或启动参数。
-
-配置文件为用户级 `$XDG_DATA_HOME/muxlane/agents.json`；未设置 `XDG_DATA_HOME` 时使用 `~/.local/share/muxlane/agents.json`。文件不存在时仍提供四项本地 recipe，不会读取或执行项目目录中的 `agents.json`。配置在启动和“重新检测”时读取；运行中的进程不变，后续启动/重连按当前配置解析。
-
-```json
-{
-  "agents": [
-    {
-      "id": "my-acp-agent",
-      "label": "My ACP Agent",
-      "command": "/absolute/path/to/acp-stdio-adapter",
-      "args": ["--config", "/absolute/path with spaces/adapter.json"],
-      "env": {
-        "MY_ADAPTER_MODE": "development"
-      }
-    }
-  ]
-}
-```
-
-此例仅展示配置结构，请按实际 adapter 文档填写程序、参数与环境变量。`args`、`env` 可省略。`command` 是单个可执行文件路径或 PATH 中的程序名；`args` 每项是一个原样传递的参数，`env` 覆盖子进程继承的环境变量。不经 shell 拼接，不展开 `$HOME`、`~`、管道或命令替换。只添加自己信任的 CLI，避免将密钥放入可公开分享的配置文件。
-
-命令面板 UI 模式按 Claude、Codex、Pi、OpenCode、额外用户定义、其他官方目录条目排列。旧 id `claude`、`codex`、`pi` 保持兼容；官方 `claude-acp`、`codex-acp`、`pi-acp` 映射到旧 id。同名用户定义优先于本地 recipe 和目录，合并后不重复；自定义 id（含别名归一后）必须唯一且非空。配置有误时显示文件路径及错误，整份自定义列表不加载，本地 recipe 与目录发现仍可用。
-
-会话持久化仍保存稳定的 `profile_id`。恢复、重连和子会话使用原 agent；删除或改名后的未知 id 保留历史、草稿与原 id，并显示不可用，不会回退启动其他 agent。重新添加同一 id 并“重新检测”后可重新解析，再重连会话。启动前重新检查本机命令并固定绝对路径。
-
-已有 `MUXLANE_ACP_CLAUDE_COMMAND`、`MUXLANE_ACP_CODEX_COMMAND`、`MUXLANE_ACP_PI_COMMAND` 环境覆盖继续支持原命令字符串及 SDK 的结构化 JSON 格式；无效覆盖显示配置错误，不再静默改用默认程序。它们与用户 `agents.json` 都是显式可信启动配置，不受官方目录控制：用户自行配置 `npx`、shell 或其他 launcher 时仍可能下载或执行程序，“不自动安装”仅保证 Muxlane 的默认 recipe、发现/检测和安装详情不会自动安装。
 
 ### 运行 Headless 服务端
 
@@ -201,7 +157,7 @@ scripts/ui-smoke.sh
 
 `Platform` 在 Linux / Windows 上为 Win（Super），macOS 上为 Command。设置页的“快捷键”区域可录入单个组合键、清空以禁用单项，或整组恢复默认；修改会立即生效并在重启后保留。应用级快捷键优先于终端输入，清空或改绑后，对应按键会恢复为终端输入。没有全局 F6 / Shift+F6 工作区域切换键，设置页内原有 Tab / F6 焦点循环保留。
 
-设置页“通用”的“默认终端预设”可选择 Shell、Claude Code、Codex、Pi、OpenCode 等内置终端预设，缺省为 Shell；这不是 bash / zsh 可执行文件设置，也不改变 ACP UI profiles。选择适用于新建终端标签页、终端 `＋` 和显式分屏；远端使用同一预设在远端解析程序。列表不按本地安装状态过滤，未安装的有效预设启动失败时会显示错误，不会静默换成 Shell。
+设置页“通用”的“默认终端预设”可选择 Shell、Claude Code、Codex、Pi、OpenCode 等内置终端预设，缺省为 Shell。选择适用于新建终端标签页、终端 `＋` 和显式分屏；远端使用同一预设在远端解析程序。列表不按本地安装状态过滤，未安装的有效预设启动失败时会显示错误，不会静默换成 Shell。
 
 ---
 

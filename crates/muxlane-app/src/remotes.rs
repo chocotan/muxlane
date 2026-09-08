@@ -171,18 +171,12 @@ impl MuxlaneApp {
             return;
         }
         let affected_sessions = match &target {
-            DeleteTarget::LocalProject { project, .. } => {
-                self.last_snapshot
-                    .agents
-                    .iter()
-                    .filter(|agent| &agent.project == project)
-                    .count()
-                    + self
-                        .acp_metadata
-                        .values()
-                        .filter(|thread| &thread.project_id == project)
-                        .count()
-            }
+            DeleteTarget::LocalProject { project, .. } => self
+                .last_snapshot
+                .agents
+                .iter()
+                .filter(|agent| &agent.project == project)
+                .count(),
             DeleteTarget::RemoteProject { host, project, .. } => self
                 .remote_snaps
                 .get(host)
@@ -248,7 +242,6 @@ impl MuxlaneApp {
                             Ok(result) => {
                                 this.cleanup_removed_agents(&result.destroyed_agents, cx);
                                 if result.failed_agents.is_empty() {
-                                    this.remove_acp_project_sessions(&project_key.project_id, cx);
                                     this.remove_project_workspace(&project_key);
                                     this.ensure_active_terminal(cx);
                                     this.delete_confirm = None;

@@ -216,11 +216,6 @@ impl NotificationCenter {
         cx.notify();
     }
 
-    #[cfg(test)]
-    pub(crate) fn entries(&self) -> &[Notification] {
-        &self.notifications
-    }
-
     pub(crate) fn summary(&self) -> (usize, bool, bool) {
         let unread = self.notifications.iter().filter(|item| item.unread).count();
         let blocked = self
@@ -455,7 +450,9 @@ impl NotificationCenter {
                                         format!("notif-popover-item-{idx}").into(),
                                     ))
                                     .when(cfg!(test), |el| {
-                                        el.debug_selector(move || format!("notif-popover-item-{idx}"))
+                                        el.debug_selector(move || {
+                                            format!("notif-popover-item-{idx}")
+                                        })
                                     })
                                     .relative()
                                     .flex()

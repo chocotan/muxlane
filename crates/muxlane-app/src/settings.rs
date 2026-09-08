@@ -201,9 +201,6 @@ impl MuxlaneApp {
         for term in self.terms.values() {
             term.update(cx, |term, cx| term.set_theme(theme, cx));
         }
-        for view in self.acp_views.values() {
-            view.update(cx, |view, cx| view.set_theme_mode(mode, cx));
-        }
     }
 
     fn dismiss_settings_menus(&mut self) {
@@ -274,9 +271,6 @@ impl MuxlaneApp {
                 input.set_placeholder(i18n::text(language, key), cx)
             });
         }
-        for view in self.acp_views.values() {
-            view.update(cx, |view, cx| view.set_language(language, cx));
-        }
         self.dismiss_settings_menus();
         self.persist();
         cx.notify();
@@ -297,7 +291,7 @@ impl MuxlaneApp {
         } else if let Some(active) = self
             .active
             .clone()
-            .filter(|agent| self.terms.contains_key(agent) || self.acp_views.contains_key(agent))
+            .filter(|agent| self.terms.contains_key(agent))
         {
             self.focus_agent(&active, window, cx);
         } else {

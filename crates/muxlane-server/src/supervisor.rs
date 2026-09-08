@@ -46,10 +46,12 @@ impl MuxlaneServer {
                 .map(|(instance, session)| (project, instance, session))
             });
         }
-        for restored in futures::future::join_all(pending).await {
-            if let Some((project, instance, session)) = restored {
-                self.restore_agent(project, instance, session).await;
-            }
+        for (project, instance, session) in futures::future::join_all(pending)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            self.restore_agent(project, instance, session).await;
         }
     }
 

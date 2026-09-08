@@ -103,22 +103,6 @@ impl MuxlaneApp {
         let Some(menu) = self.session_menu.clone() else {
             return div().into_any_element();
         };
-        let is_acp = self.is_acp_session(&menu.agent);
-        let (acp_view, can_logout) = self
-            .acp_views
-            .get(&menu.agent)
-            .map(|view| {
-                let state = view.read(cx);
-                (
-                    Some(view.clone()),
-                    state.handle.is_some()
-                        && state
-                            .capabilities
-                            .as_ref()
-                            .is_some_and(|capabilities| capabilities.logout),
-                )
-            })
-            .unwrap_or((None, false));
         div()
             .absolute()
             .occlude()
@@ -139,29 +123,6 @@ impl MuxlaneApp {
             .border_1()
             .border_color(rgba(theme.line))
             .shadow_lg()
-            .when(is_acp && can_logout, |menu_element| {
-                let view = acp_view.clone();
-                menu_element.child(
-                    semantic_button(
-                        "session-logout",
-                        i18n::text(self.language, "acp.logout"),
-                        theme,
-                    )
-                    .px_3()
-                    .py_2()
-                    .text_size(ui_px(12.))
-                    .text_color(rgba(theme.fg0))
-                    .hover(|style| style.bg(rgba(theme.bg2)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.session_menu = None;
-                        if let Some(view) = &view {
-                            view.update(cx, |view, cx| view.logout(cx));
-                        }
-                        cx.notify();
-                    }))
-                    .child(i18n::text(self.language, "acp.logout")),
-                )
-            })
             .child(
                 semantic_button(
                     "session-delete",
@@ -189,88 +150,6 @@ impl MuxlaneApp {
                 } else {
                     i18n::text(self.language, "menu.delete_session")
                 }),
-            )
-            .into_any_element()
-    }
-
-    pub(crate) fn render_acp_delete_confirm(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = Theme::for_mode(self.theme_mode);
-        let Some(agent) = self.acp_delete_confirm.clone() else {
-            return div().into_any_element();
-        };
-        let title = self
-            .acp_records
-            .get(&agent)
-            .map(|record| record.metadata.title.clone())
-            .unwrap_or_else(|| "Agent Thread".into());
-        div()
-            .absolute()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(theme.overlay()))
-            .child(
-                div()
-                    .w(ui_px(420.))
-                    .max_w(relative(0.9))
-                    .p_4()
-                    .bg(rgba(theme.bg1))
-                    .border_1()
-                    .border_color(rgba(theme.line))
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(i18n::text(self.language, "acp.delete_title")),
-                    )
-                    .child(
-                        div()
-                            .py_3()
-                            .text_size(ui_px(11.))
-                            .text_color(rgba(theme.fg1))
-                            .child(
-                                i18n::text(self.language, "acp.delete_copy")
-                                    .replace("{title}", &title),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                semantic_button(
-                                    "acp-delete-cancel",
-                                    i18n::text(self.language, "common.cancel"),
-                                    theme,
-                                )
-                                .px_3()
-                                .py_2()
-                                .border_1()
-                                .border_color(rgba(theme.line))
-                                .on_click(cx.listener(|this, _event, window, cx| {
-                                    this.acp_delete_confirm = None;
-                                    this.focus.focus(window, cx);
-                                    cx.notify();
-                                }))
-                                .child(i18n::text(self.language, "common.cancel")),
-                            )
-                            .child(
-                                semantic_button(
-                                    "acp-delete-confirm",
-                                    i18n::text(self.language, "menu.delete_session"),
-                                    theme,
-                                )
-                                .px_3()
-                                .py_2()
-                                .bg(rgba(theme.red))
-                                .text_color(rgba(theme.on_accent))
-                                .on_click(cx.listener(|this, _event, window, cx| {
-                                    this.confirm_acp_session_delete(window, cx)
-                                }))
-                                .child(i18n::text(self.language, "menu.delete_session")),
-                            ),
-                    ),
             )
             .into_any_element()
     }

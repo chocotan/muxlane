@@ -26,24 +26,10 @@ struct SessionRowData {
     remote: bool,
 }
 
-enum SidebarSession<'a> {
-    Terminal(&'a muxlane_core::model::AgentInstance),
-    Acp(&'a AgentId),
-}
-
-impl SidebarSession<'_> {
-    fn id(&self) -> &AgentId {
-        match self {
-            Self::Terminal(agent) => &agent.id,
-            Self::Acp(id) => id,
-        }
-    }
-}
-
 struct SidebarProject<'a> {
     project: &'a muxlane_core::model::Project,
     collapse_key: String,
-    sessions: Vec<SidebarSession<'a>>,
+    sessions: Vec<&'a muxlane_core::model::AgentInstance>,
 }
 
 struct SidebarMachine<'a> {
@@ -164,21 +150,7 @@ impl MuxlaneApp {
         self.ordered_projects(machine_id, &snapshot.projects)
             .into_iter()
             .map(|project| {
-                let mut sessions: Vec<_> = snapshot
-                    .agents_of(&project.id)
-                    .into_iter()
-                    .map(SidebarSession::Terminal)
-                    .collect();
-                if remote_host.is_none() {
-                    let mut acp: Vec<_> = self
-                        .acp_metadata
-                        .iter()
-                        .filter(|(_, thread)| thread.project_id == project.id)
-                        .map(|(id, _)| id)
-                        .collect();
-                    acp.sort();
-                    sessions.extend(acp.into_iter().map(SidebarSession::Acp));
-                }
+                let sessions = snapshot.agents_of(&project.id);
                 SidebarProject {
                     project,
                     collapse_key: match remote_host {
@@ -197,7 +169,10 @@ impl MuxlaneApp {
             .iter()
             .flat_map(|machine| {
                 machine.projects.iter().flat_map(move |project| {
-                    project.sessions.iter().map(move |session| (machine, project, session))
+                    project
+                        .sessions
+                        .iter()
+                        .map(move |session| (machine, project, session))
                 })
             })
             .collect();
@@ -205,7 +180,9 @@ impl MuxlaneApp {
             return None;
         }
         let current = self.active.as_ref().and_then(|active| {
-            sessions.iter().position(|(_, _, session)| session.id() == active)
+            sessions
+                .iter()
+                .position(|(_, _, session)| &session.id == active)
         });
         let index = match (current, next) {
             (Some(index), true) => (index + 1) % sessions.len(),
@@ -215,7 +192,7 @@ impl MuxlaneApp {
         };
         let (machine, project, session) = sessions[index];
         Some(SidebarSessionTarget {
-            agent: session.id().clone(),
+            agent: session.id.clone(),
             machine_collapse_key: machine.collapse_key.clone(),
             project_collapse_key: project.collapse_key.clone(),
         })
@@ -471,10 +448,6 @@ impl MuxlaneApp {
                             .hover(|style| style.bg(rgba(theme.bg2)).text_color(rgba(theme.accent)))
                             .on_click(cx.listener(move |this, _event, window, cx| {
                                 cx.stop_propagation();
-                                this.session_creation_mode =
-                                    super::palette::SessionCreationMode::for_target(
-                                        &new_session_target,
-                                    );
                                 this.new_session_target = Some(new_session_target.clone());
                                 this.palette_project = palette_key.clone();
                                 this.palette_open = true;
@@ -501,17 +474,13 @@ impl MuxlaneApp {
 
     fn render_sidebar_session(
         &self,
-        session: &SidebarSession<'_>,
+        agent: &muxlane_core::model::AgentInstance,
         remote: bool,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        match session {
-            SidebarSession::Terminal(agent) => {
-                self.render_agent_row(agent, remote, theme, cx).into_any_element()
-            }
-            SidebarSession::Acp(id) => self.render_acp_row(id, theme, cx).into_any_element(),
-        }
+        self.render_agent_row(agent, remote, theme, cx)
+            .into_any_element()
     }
 
     fn render_agent_row(
@@ -528,32 +497,6 @@ impl MuxlaneApp {
                 status: agent.status,
                 seen: agent.seen,
                 remote,
-            },
-            theme,
-            cx,
-        )
-    }
-
-    fn render_acp_row(
-        &self,
-        id: &AgentId,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let (title, status, seen) = self.session_summary(id, cx).unwrap_or_else(|| {
-            (
-                "ACP UI".into(),
-                muxlane_core::model::AgentStatus::Idle,
-                true,
-            )
-        });
-        self.render_session_row(
-            SessionRowData {
-                id: id.clone(),
-                title,
-                status,
-                seen,
-                remote: false,
             },
             theme,
             cx,
@@ -1175,10 +1118,12 @@ impl MuxlaneApp {
                 for node in &machine.projects {
                     let project_collapsed = self.collapsed_projects.contains(&node.collapse_key);
                     let mut pnode = div().flex().flex_col();
-                    pnode = pnode.child(self.render_project_row(node.project, Some(&name), theme, cx));
+                    pnode =
+                        pnode.child(self.render_project_row(node.project, Some(&name), theme, cx));
                     if !project_collapsed {
                         for session in &node.sessions {
-                            pnode = pnode.child(self.render_sidebar_session(session, true, theme, cx));
+                            pnode =
+                                pnode.child(self.render_sidebar_session(session, true, theme, cx));
                         }
                     }
                     rnode = rnode.child(pnode);
