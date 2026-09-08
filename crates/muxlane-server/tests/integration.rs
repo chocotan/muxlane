@@ -992,3 +992,85 @@ fn spawn_and_delete_agent_from_non_tokio_thread() {
     });
     assert!(!tmux_session_exists(&tmux_name));
 }
+
+/// Startup restore must publish exactly one state change for the whole batch, and the
+/// resulting snapshot must already contain every restored session. The GUI relies on this
+/// to reconcile its provisional layout against a complete set (not a half-restored one).
+#[tokio::test]
+async fn restore_sessions_publishes_one_batched_notification_with_all_sessions() {
+    let (server, _sock, _state, _dirty, dir) = spawn_server().await;
+    let project_dir = dir.path().join("restore-project");
+    std::fs::create_dir(&project_dir).unwrap();
+    let project = server
+        .add_project(project_params(project_dir.display().to_string(), false))
+        .await
+        .unwrap();
+
+    // Two live tmux sessions to restore from.
+    let mut cleanups = Vec::new();
+    let mut saved = Vec::new();
+    for i in 0..2 {
+        let spawned = server
+            .spawn_agent(muxlane_core::protocol::AgentSpawnParams {
+                project: project.id.clone(),
+                agent_type: Some(AgentType::Shell),
+                program: Some("bash".into()),
+                args: Some(vec!["-c".into(), "sleep 30".into()]),
+                env: None,
+                preset_name: None,
+            })
+            .await
+            .unwrap();
+        let tmux = spawned.tmux_session.clone().unwrap();
+        for _ in 0..100 {
+            if tmux_session_exists(&tmux) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        cleanups.push(KillTmuxSessionOnDrop(tmux.clone()));
+        saved.push(muxlane_store::PersistedAgent {
+            agent_id: format!("restored_{i}"),
+            project_id: project.id.clone(),
+            agent_type: AgentType::Shell,
+            title: format!("restored {i}"),
+            tmux_session: tmux,
+        });
+    }
+    // Forget them from this server so restore has to re-attach.
+    for spawned in server.snapshot().await.agents {
+        server.sessions_forget_for_test(&spawned.id).await;
+    }
+    assert!(server.snapshot().await.agents.is_empty());
+
+    let persisted = muxlane_store::PersistedApp {
+        projects: vec![project.clone()],
+        sessions: saved,
+        ..Default::default()
+    };
+    let mut changes = server.subscribe_dirty();
+    changes.borrow_and_update();
+    server.restore_sessions(&persisted).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), changes.changed())
+        .await
+        .expect("restore did not notify")
+        .unwrap();
+    // The very first notification already carries every restored session.
+    let snapshot = server.snapshot().await;
+    let ids: std::collections::BTreeSet<_> = snapshot.agents.iter().map(|a| a.id.clone()).collect();
+    assert_eq!(
+        ids,
+        ["restored_0".to_string(), "restored_1".to_string()]
+            .into_iter()
+            .collect()
+    );
+    // …and there is no second notification queued behind it.
+    changes.borrow_and_update();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), changes.changed())
+            .await
+            .is_err(),
+        "restore must not notify once per session"
+    );
+}

@@ -502,14 +502,32 @@ impl MuxlaneApp {
         {
             self.floating.focused = None;
         }
-        if self.pane_tree.pane_for_agent(agent).is_none() {
-            let pane = self.active_pane.clone();
-            self.pane_tree.open_tab(&pane, agent.clone());
+        if self.dock_into_owning_project(agent) {
+            self.active = Some(agent.clone());
         }
-        self.active = Some(agent.clone());
         self.schedule_session_windows(cx);
         self.persist();
         cx.notify();
+    }
+
+    /// Put a session back as a tab in the layout that owns it. With per-project workspaces
+    /// the session goes into *its* project's saved layout, not whatever is on screen.
+    /// Returns true when it landed in the visible pane tree.
+    fn dock_into_owning_project(&mut self, agent: &AgentId) -> bool {
+        let Some(key) = self.project_key_for_agent(agent) else {
+            return false;
+        };
+        let visible = !self.workspace.enabled() || self.workspace.current_project() == Some(&key);
+        if visible {
+            if self.pane_tree.pane_for_agent(agent).is_none() {
+                let pane = self.active_pane.clone();
+                self.pane_tree.open_tab(&pane, agent.clone());
+            }
+        } else {
+            self.workspace
+                .place_agent_in_project(&key, agent.clone(), None, None);
+        }
+        visible
     }
 
     /// Called when a native window closes (close button, Ctrl+W inside it, or OS-side close).
@@ -570,21 +588,21 @@ impl MuxlaneApp {
         if agents.is_empty() {
             return;
         }
+        let mut last_visible = None;
         for agent in &agents {
             if let Some(w) = self.floating.window_mut(agent) {
                 w.hidden = true;
             }
-            if self.pane_tree.pane_for_agent(agent).is_none() {
-                let pane = self.active_pane.clone();
-                self.pane_tree.open_tab(&pane, agent.clone());
+            if self.dock_into_owning_project(agent) {
+                last_visible = Some(agent.clone());
             }
         }
         for layout in self.floating.layouts.values_mut() {
             layout.normalize();
         }
         self.floating.focused = None;
-        if let Some(last) = agents.last() {
-            self.active = Some(last.clone());
+        if let Some(agent) = last_visible {
+            self.active = Some(agent);
         }
         self.schedule_session_windows(cx);
         self.persist();
@@ -597,7 +615,7 @@ impl MuxlaneApp {
             .any(|(_, agent)| !self.is_detached(agent))
     }
 
-    fn all_known_agents(&self) -> Vec<(ProjectKey, AgentId)> {
+    pub(crate) fn all_known_agents(&self) -> Vec<(ProjectKey, AgentId)> {
         let local = self.local_machine_id();
         let mut out: Vec<(ProjectKey, AgentId)> = self
             .last_snapshot
@@ -686,7 +704,17 @@ impl MuxlaneApp {
     /// Placeholder for the content area when every session of the project is detached.
     pub(crate) fn render_detached_placeholder(&self) -> gpui::AnyElement {
         let theme = crate::theme::Theme::for_mode(self.theme_mode);
-        let detached = self.floating.detached_agents().len();
+        // With per-project workspaces only count this project's sessions; the shared
+        // layout counts everything.
+        let detached = match self.workspace.current_project() {
+            Some(key) if self.workspace.enabled() => self
+                .floating
+                .layouts
+                .get(key)
+                .map(|layout| layout.windows.iter().filter(|w| !w.hidden).count())
+                .unwrap_or(0),
+            _ => self.floating.detached_agents().len(),
+        };
         div()
             .id("detached-placeholder")
             .debug_selector(|| "detached-placeholder".into())

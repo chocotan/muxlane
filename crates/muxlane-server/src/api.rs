@@ -192,6 +192,15 @@ impl MuxlaneServer {
         self.sessions.lock().await.len()
     }
 
+    /// Drop the in-process handle for a session and forget the agent, leaving the tmux
+    /// session running. Lets tests exercise `restore_sessions` re-attach against a live
+    /// tmux server without a real process restart.
+    #[doc(hidden)]
+    pub async fn sessions_forget_for_test(&self, agent: &AgentId) {
+        self.sessions.lock().await.remove(agent);
+        self.state.write().await.remove_agent(agent);
+    }
+
     pub async fn subscription_count(&self) -> usize {
         self.subs.lock().await.len()
     }
@@ -413,11 +422,25 @@ impl MuxlaneServer {
         instance: AgentInstance,
         session: Arc<muxlane_term::PtySession>,
     ) {
+        self.restore_agent_quiet(project, instance, session).await;
+        self.dirty.bump();
+    }
+
+    /// Register a restored session without notifying subscribers; the caller batches.
+    pub(crate) async fn restore_agent_quiet(
+        &self,
+        project: Project,
+        instance: AgentInstance,
+        session: Arc<muxlane_term::PtySession>,
+    ) {
         self.sessions
             .lock()
             .await
             .insert(instance.id.clone(), session);
         self.state.write().await.add_agent(project, instance);
+    }
+
+    pub(crate) fn bump_dirty(&self) {
         self.dirty.bump();
     }
 

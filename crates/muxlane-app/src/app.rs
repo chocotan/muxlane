@@ -44,6 +44,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Delay after the first painted frame before saved tmux sessions are attached; keeps the
+/// per-session `tmux` forks clear of the X11 input-method handshake.
+const SESSION_RESTORE_DELAY_MS: u64 = 300;
+
 struct Assets;
 
 fn select_initial_project(
@@ -401,8 +405,10 @@ impl MuxlaneApp {
                                         this.cleanup_removed_agents(&stale_agents, cx);
                                     }
                                     this.ensure_active_terminal(cx);
+                                    let ownership_repaired = this.repair_workspace_ownership();
                                     if machine_id_changed
                                         || workspaces_changed
+                                        || ownership_repaired
                                         || !stale_agents.is_empty()
                                     {
                                         this.persist();
@@ -676,10 +682,27 @@ impl MuxlaneApp {
             .cloned()
             .collect();
         app.floating.remove_agents(&stale_floating);
+        app.repair_workspace_ownership();
         app.active = app
             .pane_tree
             .group(&app.active_pane)
             .and_then(|group| group.active.clone());
+        // Saved tmux sessions are attached only after the first frame has been painted and
+        // the platform has had a moment to finish its input-method handshake. Attaching
+        // forks one `tmux` per session; doing that concurrently with the XIM handshake on
+        // X11 sporadically corrupts it and disables the IME for the process lifetime.
+        {
+            let server = Arc::clone(&app.server);
+            let saved = persisted.clone();
+            window.on_next_frame(move |_window, _cx| {
+                let restore_server = Arc::clone(&server);
+                server.rt_spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(SESSION_RESTORE_DELAY_MS))
+                        .await;
+                    restore_server.restore_sessions(&saved).await;
+                });
+            });
+        }
         if let Some(agent) = app
             .active
             .clone()
@@ -765,6 +788,11 @@ impl MuxlaneApp {
         // Remove the owner first: cleanup synchronizes the selected floating project.
         self.reconcile_machine_workspaces(&machine_id, &valid_projects);
         self.cleanup_removed_agents(&removed.into_iter().collect::<Vec<_>>(), cx);
+        // Provisional (not yet attached) sessions become real here; attach the visible one.
+        self.ensure_active_terminal(cx);
+        if self.repair_workspace_ownership() {
+            self.persist();
+        }
     }
 
     pub(crate) fn persist(&self) {

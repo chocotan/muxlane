@@ -178,6 +178,11 @@ impl WorkspaceController {
         })
     }
 
+    /// The stored layout for `key` (creating an empty one), without switching projects.
+    pub(crate) fn reload_current(&mut self, key: &ProjectKey) -> Option<WorkspaceLayout> {
+        self.layout_for_project(key.clone())
+    }
+
     pub(crate) fn set_enabled(
         &mut self,
         enabled: bool,
@@ -344,6 +349,54 @@ impl WorkspaceController {
             .flat_map(|(_, layout)| layout.pane_tree.all_groups())
             .flat_map(|group| group.tabs.iter().cloned())
             .collect()
+    }
+
+    /// Move every session that sits in a project layout it does not belong to back into
+    /// its owner's layout. Only meaningful with per-project workspaces; the shared layout
+    /// legitimately mixes projects. Returns true when anything moved.
+    pub(crate) fn repair_ownership(
+        &mut self,
+        owner_of: &std::collections::HashMap<AgentId, ProjectKey>,
+    ) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let mut misplaced: Vec<(ProjectKey, AgentId)> = Vec::new();
+        for (key, layout) in &self.projects {
+            for group in layout.pane_tree.all_groups() {
+                for agent in &group.tabs {
+                    if let Some(owner) = owner_of.get(agent) {
+                        if owner != key {
+                            misplaced.push((owner.clone(), agent.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        if misplaced.is_empty() {
+            return false;
+        }
+        let moved: HashSet<AgentId> = misplaced.iter().map(|(_, agent)| agent.clone()).collect();
+        for (key, layout) in self.projects.iter_mut() {
+            let foreign: HashSet<AgentId> = moved
+                .iter()
+                .filter(|agent| owner_of.get(*agent) != Some(key))
+                .cloned()
+                .collect();
+            if !foreign.is_empty() {
+                layout.remove_agents(&foreign);
+            }
+        }
+        for (owner, agent) in misplaced {
+            let already_home = self
+                .projects
+                .get(&owner)
+                .is_some_and(|layout| layout.pane_tree.pane_for_agent(&agent).is_some());
+            if !already_home {
+                self.place_agent_in_project(&owner, agent, None, None);
+            }
+        }
+        true
     }
 
     pub(crate) fn stale_agents_for_machine(
@@ -687,6 +740,31 @@ impl MuxlaneApp {
         self.activate_agent(&activation_pane, &agent, window, cx);
         self.persist();
         cx.notify();
+    }
+
+    /// Repair per-project layouts so every session lives only in its owning project.
+    /// Earlier builds could dock a reattached session into whatever project was on
+    /// screen; this heals persisted state and any future leak the same way.
+    pub(crate) fn repair_workspace_ownership(&mut self) -> bool {
+        if !self.workspace.enabled() {
+            return false;
+        }
+        let owner_of: std::collections::HashMap<AgentId, ProjectKey> = self
+            .all_known_agents()
+            .into_iter()
+            .map(|(key, agent)| (agent, key))
+            .collect();
+        let current = self.current_workspace_layout();
+        self.workspace.save_current(current);
+        if !self.workspace.repair_ownership(&owner_of) {
+            return false;
+        }
+        if let Some(key) = self.workspace.current_project().cloned() {
+            if let Some(layout) = self.workspace.reload_current(&key) {
+                self.apply_workspace_layout(layout);
+            }
+        }
+        true
     }
 
     pub(crate) fn set_project_workspaces_enabled(

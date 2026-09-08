@@ -131,18 +131,25 @@ fn main() {
     server.start_supervisor();
 
     bootstrap::install(&dir);
-    rt.block_on(server.restore_sessions(&persisted));
-    let initial_snapshot = rt.block_on(server.snapshot());
-    persisted = muxlane_store::PersistedApp::from_snapshot(&initial_snapshot)
-        .with_ui_prefs_from(&persisted);
 
     if headless {
+        rt.block_on(server.restore_sessions(&persisted));
         // Headless state changes persist synchronously through MuxlaneServer.
         server.set_persistence_path(store_path);
         tracing::info!("muxlane headless server running");
         rt.block_on(std::future::pending::<()>());
         return;
     }
+
+    // GUI: do not attach tmux sessions before the window is up. Restoring forks one
+    // `tmux` per saved session and races the X11 input-method handshake that happens
+    // right after the window opens; losing that race disables the IME for the whole
+    // process. The app lays out the saved sessions provisionally and triggers the real
+    // restore itself after its first frame.
+    let base_snapshot = rt.block_on(server.snapshot());
+    let initial_snapshot = persisted.provisional_snapshot(base_snapshot);
+    persisted = muxlane_store::PersistedApp::from_snapshot(&initial_snapshot)
+        .with_ui_prefs_from(&persisted);
 
     app::launch(server, initial_snapshot, connect_to, persisted, store_path);
 }

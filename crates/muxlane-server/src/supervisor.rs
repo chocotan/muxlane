@@ -51,8 +51,11 @@ impl MuxlaneServer {
             .into_iter()
             .flatten()
         {
-            self.restore_agent(project, instance, session).await;
+            self.restore_agent_quiet(project, instance, session).await;
         }
+        // One notification for the whole batch: the UI reconciles against a complete
+        // snapshot instead of a half-restored one.
+        self.bump_dirty();
     }
 
     pub async fn maintain_sessions(&self) {

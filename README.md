@@ -148,7 +148,7 @@ muxlane --connect my-dev-server,other-server
 ```bash
 # 在仓库根目录制作 Linux 分发归档（脚本会构建 release）
 scripts/package-linux.sh
-# 当前 x86_64 主机产物：dist/muxlane-0.0.4-linux-x86_64.tar.gz
+# 当前 x86_64 主机产物：dist/muxlane-0.0.5-linux-x86_64.tar.gz
 # 版本读取 Cargo.toml，架构读取 uname -m；同时生成 .sha256
 
 # 安装到本地用户环境 (~/.local/bin)

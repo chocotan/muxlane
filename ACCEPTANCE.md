@@ -2,6 +2,19 @@
 
 日期：2026-09-03
 
+## Task39 输入法失效根因与工作区/收回修复（v0.0.5）
+
+日期：2026-09-08。本节为本次实际执行结果。
+
+- **IME 概率性失效（XIMClientError 后进程内永久丢失输入法）**：用隔离数据目录、真实开窗口的冷启动基准（每轮 32~48 次）定位。结论：不是某个提交引入的逻辑错误，而是启动时序竞争——恢复每个 tmux 会话要 fork 一次 `tmux`，与开窗口后 GPUI/X11 的 XIM 握手并发；握手包交错后 fcitx 回包解析失败，GPUI X11 后端直接丢弃 XIM 连接且不重连。触发条件是"启动时有会话要恢复"：空配置 0/32；5 个会话时 v0.0.3 也会中（1~7/32），当前版本 5/32。此前误判为"既有问题/与本次无关"及"删 preedit 清理即修复"均不成立，已在此更正。
+- **绕开修复（不触碰任何 IME 逻辑）**：GUI 启动不再在开窗口前阻塞 `restore_sessions`；先用 `PersistedApp::provisional_snapshot` 把保存的会话作为占位 agent 摆出布局，首帧绘制后延迟 300ms 再在 Tokio runtime 上真正 attach。`restore_sessions` 改为整批只 bump 一次 dirty（`restore_agent_quiet` + `bump_dirty`），UI 用完整快照做 reconcile；`apply_local_snapshot` 快照到达后主动挂上活动终端。Headless 无窗口，保持同步恢复。同条件复测：修改前 5/32，修改后 0/32、0/48；会话在启动后 1.0s 内全部挂上。代价：启动后终端内容晚 0.3~1s 出现。
+- **TermView 窗口重绑不再清 preedit / 推光标坐标**：按"IME 交给系统"原则移除；经基准验证它与本次 XIM 失效无关，但保留删除。对应单测改为断言 preedit 原样保留。
+- **"一项目一工作区"下收回会话进错项目**：`reattach_session` / `reattach_all_sessions` 原先无条件放进当前屏幕 pane 树。改为按会话归属：当前项目（或未开工作区）放屏幕 pane，否则写入所属项目保存的布局（`dock_into_owning_project`）。内容区空白占位在工作区模式下只统计当前项目。
+- **已损坏的持久化布局自愈**：新增 `WorkspaceController::repair_ownership` + `MuxlaneApp::repair_workspace_ownership`，启动及每次本地/远程快照后把每个项目布局里不属于它的会话送回所属项目；幂等。用真实 `state.json` 验证：当前项目原 4 tab（3 个外来）→ 1 tab，外来会话各归其位。
+- **全部弹出/收回改为全机器全项目**；侧栏页脚按钮的"是否还有会话在主窗口"判断同步改为全局。
+- 测试：新增 `restore_sessions` 单次批量通知（真 tmux 再 attach）、`provisional_snapshot` 去重/孤儿/往返、工作区收回归属、损坏布局自愈、切换项目不复活已弹出会话（bound_window 稳定、渲染 ≤2 次）等回归；全仓 287 项通过，fmt/clippy 干净。
+- 启动脚本 `scripts/demo-instance.sh`（隔离数据目录的演示实例）本次不纳入提交。
+
 ## Task38 会话弹出重构与远程已读/崩溃修复（v0.0.4）
 
 日期：2026-09-08。本节为本次实际执行结果；下方 Task37/Task36 描述的 Dock 与全局 Floating 模式已被本次移除，仅作历史记录。

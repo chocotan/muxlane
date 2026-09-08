@@ -1105,13 +1105,12 @@ impl Render for TermView {
             self.forwarding_mouse = false;
             self.scrollbar_drag = None;
             self.pending_selection = None;
-            if let Ok(mut marked) = self.marked_text.lock() {
-                *marked = None;
-            }
             if let Ok(mut bounds) = self.last_bounds.lock() {
                 *bounds = None;
             }
-            window.invalidate_character_coordinates();
+            // IME state (preedit, caret position) belongs to the platform. On a window change
+            // the OS re-delivers focus and re-queries the caret itself; touching it here made
+            // the first XIM handshake race on X11/fcitx.
             let focus = self.focus.clone();
             let focus_in = cx.on_focus_in(&focus, window, |this, window, cx| {
                 cx.emit(TermFocusEvent {
@@ -1689,7 +1688,7 @@ mod tests {
     }
 
     #[test]
-    fn window_migration_clears_preedit_and_refreshes_rendered_bounds() {
+    fn window_migration_refreshes_rendered_bounds_and_leaves_ime_state_alone() {
         use gpui::{AnyWindowHandle, TestAppContext, VisualTestContext};
 
         fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
@@ -1729,6 +1728,7 @@ mod tests {
         let old_bounds = cx.update(|cx| {
             let view = term.read(cx);
             assert_eq!(view.bound_window, Some(a.window_id()));
+            // A live preedit is platform-owned and must survive a window change untouched.
             *view.marked_text.lock().unwrap() = Some("preedit".into());
             view.last_bounds.lock().unwrap().unwrap()
         });
@@ -1754,7 +1754,11 @@ mod tests {
         draw(&mut cx, b.into());
         cx.update(|cx| {
             let view = term.read(cx);
-            assert!(view.marked_text.lock().unwrap().is_none());
+            assert_eq!(
+                view.marked_text.lock().unwrap().as_deref(),
+                Some("preedit"),
+                "IME preedit must not be cleared by the app"
+            );
             assert_eq!(view.bound_window, Some(b.window_id()));
             let bounds = view.last_bounds.lock().unwrap().unwrap();
             assert_eq!(

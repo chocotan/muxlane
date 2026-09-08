@@ -243,6 +243,42 @@ pub struct PersistedApp {
 }
 
 impl PersistedApp {
+    /// A snapshot that lists every saved session as an idle agent under its project, so the
+    /// UI can restore its layout immediately. Sessions that turn out to be dead are removed
+    /// when the real snapshot arrives after `restore_sessions`.
+    pub fn provisional_snapshot(&self, mut snapshot: Snapshot) -> Snapshot {
+        for saved in &self.sessions {
+            let Some(project) = snapshot
+                .projects
+                .iter_mut()
+                .find(|project| project.id == saved.project_id)
+            else {
+                continue;
+            };
+            if snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.id == saved.agent_id)
+            {
+                continue;
+            }
+            if !project.agents.contains(&saved.agent_id) {
+                project.agents.push(saved.agent_id.clone());
+            }
+            snapshot.agents.push(muxlane_core::model::AgentInstance {
+                id: saved.agent_id.clone(),
+                project: saved.project_id.clone(),
+                agent_type: saved.agent_type,
+                title: saved.title.clone(),
+                status: muxlane_core::model::AgentStatus::Idle,
+                status_since: muxlane_core::model::now_secs(),
+                seen: true,
+                tmux_session: Some(saved.tmux_session.clone()),
+            });
+        }
+        snapshot
+    }
+
     pub fn from_snapshot(snapshot: &Snapshot) -> Self {
         let mut projects = snapshot.projects.clone();
         for project in &mut projects {
@@ -584,6 +620,75 @@ mod tests {
             serde_json::from_slice::<PersistedApp>(&encoded).unwrap(),
             merged
         );
+    }
+
+    #[test]
+    fn provisional_snapshot_lists_saved_sessions_under_their_projects_without_duplicates() {
+        use muxlane_core::model::{AgentInstance, AgentStatus, AgentType, Project};
+        let persisted = PersistedApp {
+            projects: vec![Project {
+                id: "p1".into(),
+                name: "p1".into(),
+                path: "/p1".into(),
+                branch: None,
+                agents: vec![],
+            }],
+            sessions: vec![
+                PersistedAgent {
+                    agent_id: "a".into(),
+                    project_id: "p1".into(),
+                    agent_type: AgentType::Shell,
+                    title: "a".into(),
+                    tmux_session: "muxlane-a".into(),
+                },
+                PersistedAgent {
+                    agent_id: "orphan".into(),
+                    project_id: "gone".into(),
+                    agent_type: AgentType::Shell,
+                    title: "orphan".into(),
+                    tmux_session: "muxlane-orphan".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        // The server already knows p1 and (say) one live agent `a` from an earlier restore.
+        let base = Snapshot {
+            projects: persisted.projects.clone(),
+            agents: vec![AgentInstance {
+                id: "a".into(),
+                project: "p1".into(),
+                agent_type: AgentType::Shell,
+                title: "live".into(),
+                status: AgentStatus::Working,
+                status_since: 5,
+                seen: false,
+                tmux_session: Some("muxlane-a".into()),
+            }],
+            ..Default::default()
+        };
+        let snapshot = persisted.provisional_snapshot(base);
+        // Existing live agent is kept as-is (not overwritten by the idle placeholder).
+        assert_eq!(snapshot.agents.len(), 1);
+        assert_eq!(snapshot.agents[0].status, AgentStatus::Working);
+        assert_eq!(snapshot.agents[0].title, "live");
+        // Orphaned session (project no longer exists) is not invented.
+        assert!(snapshot.agent(&"orphan".into()).is_none());
+
+        // Cold start: server has projects but no agents yet.
+        let cold = Snapshot {
+            projects: persisted.projects.clone(),
+            ..Default::default()
+        };
+        let snapshot = persisted.provisional_snapshot(cold);
+        let a = snapshot.agent(&"a".into()).expect("placeholder for a");
+        assert_eq!(a.status, AgentStatus::Idle);
+        assert!(a.seen, "placeholders must not alert");
+        assert_eq!(a.tmux_session.as_deref(), Some("muxlane-a"));
+        assert_eq!(snapshot.projects[0].agents, vec!["a".to_string()]);
+        // Round-trips through from_snapshot so the persisted session list is unchanged.
+        let again = PersistedApp::from_snapshot(&snapshot);
+        assert_eq!(again.sessions.len(), 1);
+        assert_eq!(again.sessions[0].agent_id, "a");
     }
 
     #[test]

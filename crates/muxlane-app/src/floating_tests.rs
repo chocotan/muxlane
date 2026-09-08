@@ -428,3 +428,169 @@ fn detached_windows_settle_and_do_not_redraw_every_frame() {
         );
     });
 }
+
+#[test]
+fn reattach_with_project_workspaces_returns_session_to_its_own_project() {
+    with_app(|cx, window, view| {
+        setup(cx, window, &view);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.set_project_workspaces_enabled(true, window, cx)
+            })
+        })
+        .unwrap();
+        draw(cx, window);
+        let local = cx.update(|cx| view.read(cx).local_machine_id());
+        let key_a = ProjectKey::new(local.clone(), "a");
+        let key_b = ProjectKey::new(local.clone(), "b");
+
+        // Detach a1 while viewing project a, then move to project b.
+        cx.update(|cx| view.update(cx, |app, cx| app.detach_session(&"a1".into(), cx)));
+        draw(cx, window);
+        cx.update(|cx| {
+            view.update(cx, |app, cx| {
+                app.select_project_workspace_inner(key_b.clone(), cx)
+            })
+        });
+        draw(cx, window);
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert_eq!(app.workspace.current_project(), Some(&key_b));
+            assert!(app.pane_tree.pane_for_agent(&"a1".into()).is_none());
+        });
+
+        // Single reattach (native close / context menu) while b is on screen.
+        cx.update(|cx| view.update(cx, |app, cx| app.reattach_session(&"a1".into(), cx)));
+        draw(cx, window);
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert!(!app.is_detached(&"a1".into()));
+            assert!(
+                app.pane_tree.pane_for_agent(&"a1".into()).is_none(),
+                "a1 must not be dropped into project b's visible layout"
+            );
+            assert_ne!(app.active.as_deref(), Some("a1"));
+            assert!(app
+                .workspace
+                .known_agents_for_machine(&local)
+                .contains("a1"));
+        });
+        // Going back to a shows it as a tab again.
+        cx.update(|cx| {
+            view.update(cx, |app, cx| {
+                app.select_project_workspace_inner(key_a.clone(), cx)
+            })
+        });
+        draw(cx, window);
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert!(app.pane_tree.pane_for_agent(&"a1".into()).is_some());
+            assert!(
+                app.pane_tree.pane_for_agent(&"b1".into()).is_none(),
+                "b1 stays in b"
+            );
+        });
+
+        // Detach-all then reattach-all from project a: every session lands in its owner.
+        cx.update(|cx| view.update(cx, |app, cx| app.detach_all_sessions(cx)));
+        draw(cx, window);
+        cx.update(|cx| view.update(cx, |app, cx| app.reattach_all_sessions(cx)));
+        draw(cx, window);
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert_eq!(app.workspace.current_project(), Some(&key_a));
+            assert!(app.pane_tree.pane_for_agent(&"a1".into()).is_some());
+            assert!(app.pane_tree.pane_for_agent(&"a2".into()).is_some());
+            assert!(
+                app.pane_tree.pane_for_agent(&"b1".into()).is_none(),
+                "reattach-all must not pull b1 into project a"
+            );
+            assert!(app.floating.windows.is_empty());
+        });
+        cx.update(|cx| {
+            view.update(cx, |app, cx| {
+                app.select_project_workspace_inner(key_b.clone(), cx)
+            })
+        });
+        draw(cx, window);
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert!(app.pane_tree.pane_for_agent(&"b1".into()).is_some());
+            assert!(app.pane_tree.pane_for_agent(&"a1".into()).is_none());
+        });
+    });
+}
+
+#[test]
+fn corrupted_project_layouts_are_healed_on_snapshot() {
+    // Reproduce the on-disk state left by the old reattach bug: project "a" holds b1,
+    // project "b" holds a2. Healing must run without user action.
+    with_app(|cx, window, view| {
+        setup(cx, window, &view);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.set_project_workspaces_enabled(true, window, cx)
+            })
+        })
+        .unwrap();
+        draw(cx, window);
+        let local = cx.update(|cx| view.read(cx).local_machine_id());
+        let key_a = ProjectKey::new(local.clone(), "a");
+        let key_b = ProjectKey::new(local.clone(), "b");
+        // Corrupt: while viewing a, shove b1 into a's visible tree; and a2 into b's stash.
+        cx.update(|cx| {
+            view.update(cx, |app, _| {
+                let pane = app.active_pane.clone();
+                app.pane_tree.open_tab(&pane, "b1".into());
+                app.workspace
+                    .place_agent_in_project(&key_b, "a2".into(), None, None);
+            })
+        });
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert!(
+                app.pane_tree.pane_for_agent(&"b1".into()).is_some(),
+                "corruption seeded"
+            );
+        });
+        // A local snapshot arrives (what happens at startup and on every state change).
+        cx.update(|cx| {
+            view.update(cx, |app, cx| {
+                let snapshot = app.last_snapshot.clone();
+                app.apply_local_snapshot(snapshot, cx);
+            })
+        });
+        draw(cx, window);
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert_eq!(app.workspace.current_project(), Some(&key_a));
+            assert!(
+                app.pane_tree.pane_for_agent(&"b1".into()).is_none(),
+                "b1 evicted from a"
+            );
+            assert!(app.pane_tree.pane_for_agent(&"a1".into()).is_some());
+            assert!(
+                app.pane_tree.pane_for_agent(&"a2".into()).is_some(),
+                "a2 came home"
+            );
+        });
+        cx.update(|cx| {
+            view.update(cx, |app, cx| {
+                app.select_project_workspace_inner(key_b.clone(), cx)
+            })
+        });
+        draw(cx, window);
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert!(
+                app.pane_tree.pane_for_agent(&"b1".into()).is_some(),
+                "b1 back in b"
+            );
+            assert!(
+                app.pane_tree.pane_for_agent(&"a2".into()).is_none(),
+                "a2 no longer in b"
+            );
+            assert!(app.pane_tree.pane_for_agent(&"a1".into()).is_none());
+        });
+    });
+}
