@@ -23,7 +23,45 @@ pub(crate) fn replaced_machine_id(
     previous.filter(|previous| current.is_some_and(|current| current != previous))
 }
 
+pub(crate) fn merge_remote_seen(
+    snapshot: &mut muxlane_core::model::Snapshot,
+    previous: Option<&muxlane_core::model::Snapshot>,
+    previous_state: Option<&muxlane_client::RemoteState>,
+    active: Option<&muxlane_core::model::AgentId>,
+) {
+    let previous = previous.filter(|previous| {
+        previous.machine.as_ref().map(|machine| &machine.machine_id)
+            == snapshot.machine.as_ref().map(|machine| &machine.machine_id)
+    });
+    for agent in &mut snapshot.agents {
+        let already_seen = previous
+            .and_then(|previous| previous.agent(&agent.id))
+            .is_some_and(|cached| {
+                // Status events arrive before their snapshot and carry no timestamp.
+                let pending_transition = match previous_state {
+                    Some(muxlane_client::RemoteState::Online(raw)) => raw
+                        .agent(&agent.id)
+                        .is_some_and(|raw| raw.status != cached.status),
+                    _ => false,
+                };
+                cached.seen
+                    && cached.status == agent.status
+                    && (cached.status_since == agent.status_since || pending_transition)
+            });
+        agent.seen |= active == Some(&agent.id) || already_seen;
+    }
+}
+
 impl MuxlaneApp {
+    pub(crate) fn spawn_remote_operation<T: Send + 'static>(
+        &self,
+        operation: impl std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+    ) -> impl std::future::Future<Output = anyhow::Result<T>> + 'static {
+        // GPUI workers have no Tokio reactor. Submitted mutations finish even if the UI closes.
+        let task = self.server.runtime_handle().spawn(operation);
+        async move { task.await? }
+    }
+
     pub(crate) fn restore_remotes(
         server: &Arc<muxlane_server::MuxlaneServer>,
         persisted: &muxlane_store::PersistedApp,
@@ -293,12 +331,11 @@ impl MuxlaneApp {
                         .as_ref()
                         .map(|machine| ProjectKey::new(machine.machine_id.clone(), project.clone()))
                 });
+                let task = self.spawn_remote_operation(async move {
+                    remote.delete_project(&project_for_rpc).await
+                });
                 cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_spawn(
-                            async move { remote.delete_project(&project_for_rpc).await },
-                        )
-                        .await;
+                    let result = task.await;
                     let _ = this.update(cx, |this, cx| match result {
                         Ok(result) => {
                             if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
@@ -350,7 +387,7 @@ impl MuxlaneApp {
                             .and_then(|snapshot| snapshot.machine.as_ref())
                             .map(|machine| machine.machine_id.clone())
                     });
-                let removed_agents: Vec<_> = self
+                let mut removed_agents: Vec<_> = self
                     .remote_snaps
                     .get(&host)
                     .map(|snapshot| {
@@ -361,6 +398,11 @@ impl MuxlaneApp {
                             .collect()
                     })
                     .unwrap_or_default();
+                if let Some(id) = machine_id.as_deref() {
+                    removed_agents.extend(self.floating.known_agents(id));
+                    removed_agents.sort();
+                    removed_agents.dedup();
+                }
                 if let Some(remote) = self
                     .remotes
                     .iter()
@@ -417,20 +459,20 @@ impl MuxlaneApp {
             return;
         };
         let host_name = confirm.host.clone();
+        let task = self.spawn_remote_operation(async move {
+            let result = if confirm.upgrade {
+                remote.upgrade_and_retry().await
+            } else if confirm.install {
+                remote.install_and_start().await
+            } else {
+                remote
+                    .start_and_retry(confirm.binary.as_deref().unwrap_or("muxlane"))
+                    .await
+            };
+            result.map_err(Into::into)
+        });
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    if confirm.upgrade {
-                        remote.upgrade_and_retry().await
-                    } else if confirm.install {
-                        remote.install_and_start().await
-                    } else {
-                        remote
-                            .start_and_retry(confirm.binary.as_deref().unwrap_or("muxlane"))
-                            .await
-                    }
-                })
-                .await;
+            let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.bootstrap_progress.remove(&host_name);
                 match result {
@@ -487,14 +529,25 @@ impl MuxlaneApp {
         let target_key = ProjectKey::new(machine_id, project.clone());
         let pane = self.capture_spawn_target(&target_key, preferred_pane.as_ref());
         let target_project = project.clone();
+        let operation_remote = Arc::clone(&remote);
+        let task = self.spawn_remote_operation(async move {
+            operation_remote
+                .spawn_agent(&project, preset.as_ref())
+                .await
+        });
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_spawn(
-                    async move { remote.spawn_agent(&project, preset.as_ref()).await },
-                )
-                .await;
+            let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(agent) => {
+                    if !this
+                        .remotes
+                        .iter()
+                        .any(|configured| Arc::ptr_eq(configured, &remote))
+                        || !this.project_owner_exists(&target_key)
+                        || agent.project != target_key.project_id
+                    {
+                        return;
+                    }
                     let agent_id = agent.id.clone();
                     if let Some(snapshot) = this.remote_snaps.get_mut(&host) {
                         if let Some(project) = snapshot
@@ -617,12 +670,11 @@ impl MuxlaneApp {
         }
         self.project_add_busy = true;
         let supports_create = remote.supports(muxlane_core::protocol::features::PROJECT_CREATE);
+        let task = self.spawn_remote_operation(async move {
+            remote.add_project(&requested_path, create_if_missing).await
+        });
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    remote.add_project(&requested_path, create_if_missing).await
-                })
-                .await;
+            let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.project_add_busy = false;
                 match result {

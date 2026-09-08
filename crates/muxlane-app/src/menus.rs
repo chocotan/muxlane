@@ -123,6 +123,33 @@ impl MuxlaneApp {
             .border_1()
             .border_color(rgba(theme.line))
             .shadow_lg()
+            .child({
+                let detached = self.is_detached(&menu.agent);
+                let key = if detached {
+                    "menu.reattach_session"
+                } else {
+                    "menu.detach_session"
+                };
+                let label = i18n::text(self.language, key);
+                semantic_button("session-detach-toggle", label, theme)
+                    .px_3()
+                    .py_2()
+                    .text_size(ui_px(12.))
+                    .text_color(rgba(theme.fg1))
+                    .hover(|s| s.bg(rgba(theme.bg2)))
+                    .on_click(cx.listener({
+                        let id = menu.agent.clone();
+                        move |this, _ev, _window, cx| {
+                            this.session_menu = None;
+                            if detached {
+                                this.reattach_session(&id, cx);
+                            } else {
+                                this.detach_session(&id, cx);
+                            }
+                        }
+                    }))
+                    .child(label)
+            })
             .child(
                 semantic_button(
                     "session-delete",

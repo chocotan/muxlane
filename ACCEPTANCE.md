@@ -2,6 +2,61 @@
 
 日期：2026-09-03
 
+## Task38 会话弹出重构与远程已读/崩溃修复（v0.0.4）
+
+日期：2026-09-08。本节为本次实际执行结果；下方 Task37/Task36 描述的 Dock 与全局 Floating 模式已被本次移除，仅作历史记录。
+
+- **远程通知误闪烁**：`focus_agent` 对远程终端本地把 Done/Failed 改写为 Idle 与服务端不一致，下一次快照合并误判为新结果重新提醒；改为远程只标记 seen、不改 status，指示灯灰色由渲染层 `display_status(status, seen)` 决定。新增 `agent.mark_seen` RPC 与 `AGENT_MARK_SEEN` 能力，远端支持时真正写回服务端并随远端持久化，旧远端自动降级为会话内已读。端到端测试起真实远程 server，走真实聚焦路径，再用零共享内存的新客户端重连验证已读不复活。
+- **远程新增/删除终端闪退**：远程 RPC 在 GPUI 后台线程执行，无 Tokio reactor 导致 `there is no reactor running` abort。统一经 `spawn_remote_operation` 投递到应用 Tokio runtime；覆盖新增/删除会话、新增/删除项目、安装/启动/升级远端 5 处。测试从无 Tokio 上下文的 GPUI 入口发起真实 Unix socket 请求验证冷/热连接。
+- **Dock 重构为逐会话弹出**：删除自绘 Dock/dashboard/布局弹层、主窗口自动 `resize`、全局 Tiled/Floating 开关、store 内无调用的 `Presentation/.projected()/arrange` 模型及 `dock_navigation_tests`/`native_window_tests`。主窗口固定为侧栏+内容区。新增逐会话弹出/收回、全部弹出/全部收回（全机器全项目）、侧栏弹出标记与置顶、tab 右键菜单、内容区全空占位、直角图标与中英文案；`FloatWindow.hidden` 语义重解释为是否收回，旧配置 `presentation` 字段忽略。
+- **弹出后闪烁/双份终端**：弹出只从当前 pane 树摘 tab，未从 workspace 各项目保存布局中删除，切换项目恢复布局把它重新变成 tab，主窗口与原生窗口同时渲染同一 `TermView` 并争抢 `bound_window`。修复为弹出时从所有布局移除，`apply_workspace_layout` 恢复时过滤已弹出会话。回归测试在按项目工作区下来回切换 4 次，断言不回到 tab、`bound_window` 稳定、渲染次数 ≤2。
+- **快捷键默认值**：上一/下一标签 `Platform+Alt+K/J`，新建标签 `Platform+Alt+↑`，右侧/下方分屏 `Platform+Alt+→/↓`。旧默认值自动迁移，自定义值保留。
+- 测试：app 116、store 30、其他 crate 全部通过（app 需单线程运行，并行存在既有窗口尺寸类 flaky 与本次无关）。改动 UI 面无 `rounded`/`rx`/`ry`。启动日志中的 `XIMClientError` 在打开任何弹出窗口前即出现，为 GPUI/fcitx5 XIM 握手既有问题，与本次无关。
+
+## Task37 Dock 两级导航补充验收
+
+本节记录此次两级 Dock 导航收尾，下面 Task36 和其他章节保留为历史记录，不代表此次执行了真实桌面或 release 验证。
+
+```text
+MUXLANE_DISABLE_NOTIFY=1 MUXLANE_DISABLE_SOUND=1 cargo test --workspace --offline
+                                      PASS: 292 passed, 0 failed, 0 ignored
+cargo check --workspace --offline      PASS
+git diff --check                       PASS
+方角及旧 projects_open 扫描            PASS（仅 rx 接收器变量匹配，无圆角容器）
+```
+
+- Dock 进入 Floating 默认展示可横向滚动的项目列表，点击项目进入其 tab 列表；返回图标回到项目列表，不再提供项目 popover。项目名带机器上下文、会话数和未读提示；布局、通知和设置工具保留。
+- 项目浏览和返回不打开、激活或关闭任何会话 OS 窗口，不终止后台会话。显式 tab 点击复用已有窗口和 TermView Entity，或恢复隐藏窗口。真实 GPUI TestPlatform 测试验证窗口 registry 不变、列表隔离及返回。
+- 根层新建打开现有本地添加项目对话框，空项目列表保留明确 Add project 入口。tab 层新建会话使用浏览项目的完整机器/项目键，不使用通知或其他窗口改变后的当前工作区。
+- 通知继续恢复并聚焦目标 OS 窗口，但保持 Dock 浏览项目；原会话键盘导航未绑定到 Dock 浏览状态。跨机器相同 project ID 保持隔离；权威删除浏览项目或忘记机器回到根层，单纯离线保留浏览状态。
+- 浏览只为未登记 tab 初始化隐藏记录，已有可见/隐藏记录保持原样。新增序列化往返回归验证模式仍为 Floating、已有窗口状态不变、dock_project 不持久化，恢复后默认项目列表；隐藏 tab 仍可显式恢复。
+- 新增 root 层 320/480 像素、200% 缩放多项目滚动测试，并保留 tab 层 200% 工具可达、滚动和点击测试。会话右键菜单保留原终止路径，新增回归验证菜单目标及 Escape 关闭；未把菜单目标测试声称为真实后台终止验证。
+- 本次仅使用进程内 GPUI TestPlatform 和工作区测试，没有操作用户 GUI、Fcitx 或既有进程，没有应用重启、提交或发布。仅定向格式化相关文件；真实 X11/Wayland、跨屏与 IME 视觉验收仍未执行。
+
+## Task36 独立 OS 窗口补充验收
+
+本节替代早先应用内浮动桌面的错误范围及验收结论。以下为此次实际执行，后续章节是历史记录，并非本次重跑的 UI/release 证明。
+
+```text
+MUXLANE_DISABLE_NOTIFY=1 MUXLANE_DISABLE_SOUND=1 cargo test --workspace --offline
+                                      PASS: 286 passed, 0 failed
+cargo check --workspace --offline      PASS
+git diff --check                       PASS
+cfg(any()) / cx.test_window 扫描        PASS（无匹配）
+方角样式扫描（本次修改测试表面）        PASS（rx 接收器变量非 SVG 属性）
+```
+
+- 新增 OS 焦点回归：TermFocusEvent 携带 agent、WindowId 和 focus/blur，窗口激活/失活同样更新；旧窗口失焦不清新焦点。重开时强制 TermView 重绘以重绑订阅。Floating 的远端 seen 合并、状态事件、通知 focused 和 Dock 状态均使用实际窗口焦点，Tiled 保留原语义。
+- 验证两个 OS 窗口与主 Dock 之间的激活、窗口内 blur、未聚焦新通知不被抑制、聚焦清未读、后台创建不标记已读、输入不丢失、旧 WindowId 事件隔离、关闭/删除/切回 Tiled 清焦点。最新测试命令设置 `MUXLANE_DISABLE_NOTIFY=1 MUXLANE_DISABLE_SOUND=1`，禁用测试的系统通知和声音副作用。
+- 每个会话是独立 GPUI Normal Window / SessionWindow root，共享唯一 MuxlaneApp 控制器和原 TermView Entity。主窗口只提供 Dock 和管理面板；无内部拖缩、吸附或伪最大化。
+- 真实 GPUI TestPlatform 多窗口测试覆盖不同 WindowId/root、OS close 后 Dock 重开保留 Entity、后台会话不被删除、Dock 项目筛选不关闭其他 OS 窗口、通知恢复及目标窗口焦点和输入、主 Dock 不接收终端输入。
+- Tiled/Floating 往返测试验证旧 OS 句柄关闭、Entity 不重建、TermView 绑定 WindowId 迁移；实现先卸载旧承载再挂载新承载。测试终端为惰性输入通道，未以真实 PTY 跨窗口运行作为本次验收依据。
+- 覆盖打开失败注入后隐藏保留、Dock 重试恢复、无效句柄与 agent 删除清理；保留原后台 placement、项目删除、远端离线/online 清理及通知回归测试。
+- OS 会话关闭或在会话窗口按 `Ctrl+W` 仅隐藏；会话菜单可终止，Tiled 的关闭标签页快捷键保留原有终止语义。Floating 分屏仅提示只支持 Tiled，不自动切换布局或修改 pane tree。主窗口确认退出时清理注册的会话窗口。原生创建不激活后台窗口，显式 Dock/通知打开才激活目标；系统焦点事件不切换 Dock 的项目筛选。
+- TermView 模块内使用薄 root 的 GPUI TestPlatform 测试，先从 A 卸载再在 B 渲染同一 Entity，验证 preedit 清除、bound_window 更新及 B 的实际布局写回 last_bounds。未验证真实平台 IME handler、候选窗或 Fcitx 跨窗口行为；无生产 capture hook 或禁用的占位测试。
+- 模式/项目/隐藏状态保持兼容，旧 FloatRect 画布坐标不映射为 OS 坐标。本版本不持久化原生位置/大小。Wayland 坐标、系统装饰和移动能力取决于 compositor；尚未做真实 X11/Wayland 多屏视觉验收。
+- Dock 是普通、不透明、非置顶的主窗口，无系统面板/置顶/透明平台 hack；控件保留方角。未操作用户 GUI、Fcitx 或既有进程，未重启、提交或发布；release 由父协调者执行。
+
 ## 自动化门槛
 
 ```text

@@ -198,6 +198,10 @@ pub mod features {
     pub const AGENT_SPAWN: &str = "agent.spawn";
     pub const TERM_INPUT: &str = "term.input";
     pub const TERM_RESIZE: &str = "term.resize";
+    /// 远端支持 agent.mark_seen：已读状态真正写回服务端（Done/Failed→Idle），
+    /// 与本地终端同一语义，不依赖客户端会话内存。旧版本远端不会广播此特性，
+    /// 客户端应在调用前先检查 supports()。
+    pub const AGENT_MARK_SEEN: &str = "agent.mark_seen";
 }
 /// 方法名常量
 pub mod methods {
@@ -211,6 +215,7 @@ pub mod methods {
     pub const AGENT_REPORT: &str = "agent.report";
     pub const AGENT_SPAWN: &str = "agent.spawn";
     pub const AGENT_DELETE: &str = "agent.delete";
+    pub const AGENT_MARK_SEEN: &str = "agent.mark_seen";
     pub const PROJECT_ADD: &str = "project.add";
     pub const PROJECT_DELETE: &str = "project.delete";
     pub const PAIR_BEGIN: &str = "pair.begin";
@@ -274,6 +279,11 @@ pub struct AgentStatusEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDeleteParams {
+    pub agent: AgentId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMarkSeenParams {
     pub agent: AgentId,
 }
 

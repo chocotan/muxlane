@@ -4,6 +4,8 @@ use muxlane_core::{PaneId, PaneNode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+mod floating;
+pub use floating::*;
 
 fn temporary_path(path: &Path) -> PathBuf {
     let name = path
@@ -68,23 +70,23 @@ fn default_next_workspace_shortcut() -> Option<String> {
 }
 
 fn default_previous_tab_shortcut() -> Option<String> {
-    Some("platform-alt-up".into())
+    Some("platform-alt-k".into())
 }
 
 fn default_next_tab_shortcut() -> Option<String> {
-    Some("platform-alt-down".into())
+    Some("platform-alt-j".into())
 }
 
 fn default_new_tab_shortcut() -> Option<String> {
-    Some("platform-alt-t".into())
+    Some("platform-alt-up".into())
 }
 
 fn default_split_right_shortcut() -> Option<String> {
-    Some("platform-alt-r".into())
+    Some("platform-alt-right".into())
 }
 
 fn default_split_down_shortcut() -> Option<String> {
-    Some("platform-alt-d".into())
+    Some("platform-alt-down".into())
 }
 
 fn default_terminal_preset() -> String {
@@ -144,15 +146,33 @@ impl PersistedShortcutBindings {
         }
         if matches!(
             self.previous_tab.as_deref(),
-            Some("platform-up" | "platform-left")
+            Some("platform-up" | "platform-left" | "platform-alt-up" | "alt-platform-up")
         ) {
             self.previous_tab = default_previous_tab_shortcut();
         }
         if matches!(
             self.next_tab.as_deref(),
-            Some("platform-down" | "platform-right")
+            Some("platform-down" | "platform-right" | "platform-alt-down" | "alt-platform-down")
         ) {
             self.next_tab = default_next_tab_shortcut();
+        }
+        if matches!(
+            self.new_tab.as_deref(),
+            Some("platform-alt-t" | "alt-platform-t")
+        ) {
+            self.new_tab = default_new_tab_shortcut();
+        }
+        if matches!(
+            self.split_right.as_deref(),
+            Some("platform-alt-r" | "alt-platform-r")
+        ) {
+            self.split_right = default_split_right_shortcut();
+        }
+        if matches!(
+            self.split_down.as_deref(),
+            Some("platform-alt-d" | "alt-platform-d")
+        ) {
+            self.split_down = default_split_down_shortcut();
         }
     }
 }
@@ -205,6 +225,10 @@ pub struct PersistedApp {
     pub project_workspaces: Vec<PersistedWorkspace>,
     #[serde(default)]
     pub active_project_workspace: Option<PersistedProjectKey>,
+    #[serde(default)]
+    pub layout_mode: LayoutMode,
+    #[serde(default)]
+    pub floating_workspaces: Vec<PersistedFloatingWorkspace>,
     #[serde(default = "default_sidebar_visible")]
     pub sidebar_visible: bool,
     #[serde(default = "default_sidebar_width")]
@@ -260,6 +284,8 @@ impl PersistedApp {
         self.project_workspaces_enabled = previous.project_workspaces_enabled;
         self.project_workspaces = previous.project_workspaces.clone();
         self.active_project_workspace = previous.active_project_workspace.clone();
+        self.layout_mode = previous.layout_mode;
+        self.floating_workspaces = previous.floating_workspaces.clone();
         self.sidebar_visible = previous.sidebar_visible;
         self.sidebar_width = previous.sidebar_width;
         self.ui_scale = previous.ui_scale;
@@ -293,6 +319,8 @@ impl Default for PersistedApp {
             project_workspaces_enabled: false,
             project_workspaces: vec![],
             active_project_workspace: None,
+            layout_mode: LayoutMode::default(),
+            floating_workspaces: vec![],
             sidebar_visible: default_sidebar_visible(),
             sidebar_width: default_sidebar_width(),
             ui_scale: default_ui_scale(),
@@ -397,6 +425,9 @@ pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
 
 pub fn save(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
     let mut state = app.clone();
+    for workspace in &mut state.floating_workspaces {
+        workspace.layout.normalize();
+    }
     let mut secrets = PersistedSecrets {
         version: SECRETS_VERSION,
         ..Default::default()
@@ -511,6 +542,9 @@ fn migrate(app: &mut PersistedApp) -> anyhow::Result<()> {
             })
             .collect();
     }
+    for workspace in &mut app.floating_workspaces {
+        workspace.layout.normalize();
+    }
     app.version = STORE_VERSION;
     Ok(())
 }
@@ -522,6 +556,36 @@ pub fn default_path(data_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn floating_defaults_and_ui_prefs_roundtrip_without_tiled_changes() {
+        let legacy: PersistedApp = serde_json::from_str(r#"{"version":3}"#).unwrap();
+        assert_eq!(legacy.layout_mode, LayoutMode::Tiled);
+        assert!(legacy.floating_workspaces.is_empty());
+        let mut previous = legacy;
+        previous.layout_mode = LayoutMode::Floating;
+        let mut layout = FloatingLayout::default();
+        layout.activate("a".into());
+        previous
+            .floating_workspaces
+            .push(PersistedFloatingWorkspace {
+                key: PersistedProjectKey {
+                    machine_id: "remote".into(),
+                    project_id: "p".into(),
+                },
+                layout,
+            });
+        let merged =
+            PersistedApp::from_snapshot(&Snapshot::default()).with_ui_prefs_from(&previous);
+        assert_eq!(merged.floating_workspaces, previous.floating_workspaces);
+        assert_eq!(merged.pane_tree, previous.pane_tree);
+        assert_eq!(merged.layout_mode, LayoutMode::Floating);
+        let encoded = serde_json::to_vec(&merged).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<PersistedApp>(&encoded).unwrap(),
+            merged
+        );
+    }
+
     #[test]
     fn from_snapshot_keeps_only_persistable_runtime_state() {
         let snapshot = Snapshot {
@@ -878,11 +942,11 @@ mod tests {
         assert_eq!(bindings.close_tab.as_deref(), Some("ctrl-q"));
         assert_eq!(bindings.previous_workspace, None);
         assert_eq!(bindings.next_workspace, None);
-        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-up"));
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-k"));
         assert_eq!(bindings.next_tab, None);
-        assert_eq!(bindings.new_tab.as_deref(), Some("platform-alt-t"));
-        assert_eq!(bindings.split_right.as_deref(), Some("platform-alt-r"));
-        assert_eq!(bindings.split_down.as_deref(), Some("platform-alt-d"));
+        assert_eq!(bindings.new_tab.as_deref(), Some("platform-alt-up"));
+        assert_eq!(bindings.split_right.as_deref(), Some("platform-alt-right"));
+        assert_eq!(bindings.split_down.as_deref(), Some("platform-alt-down"));
     }
 
     #[test]
@@ -917,8 +981,8 @@ mod tests {
         bindings.migrate_legacy_defaults();
         assert_eq!(bindings.previous_workspace, None);
         assert_eq!(bindings.next_workspace, None);
-        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-up"));
-        assert_eq!(bindings.next_tab.as_deref(), Some("platform-alt-down"));
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-k"));
+        assert_eq!(bindings.next_tab.as_deref(), Some("platform-alt-j"));
 
         let mut partial = PersistedShortcutBindings {
             previous_workspace: Some("platform-left".into()),
@@ -931,7 +995,38 @@ mod tests {
         assert_eq!(partial.previous_workspace, None);
         assert_eq!(partial.next_workspace, None);
         assert_eq!(partial.previous_tab.as_deref(), Some("ctrl-alt-p"));
-        assert_eq!(partial.next_tab.as_deref(), Some("platform-alt-down"));
+        assert_eq!(partial.next_tab.as_deref(), Some("platform-alt-j"));
+    }
+
+    #[test]
+    fn previous_arrow_and_letter_defaults_migrate_to_vim_style_and_arrow_layout() {
+        // Files written by 0.0.3 carried these exact defaults; users who never
+        // customised must pick up the new scheme, custom values must survive.
+        let mut bindings = PersistedShortcutBindings {
+            previous_tab: Some("platform-alt-up".into()),
+            next_tab: Some("platform-alt-down".into()),
+            new_tab: Some("platform-alt-t".into()),
+            split_right: Some("platform-alt-r".into()),
+            split_down: Some("platform-alt-d".into()),
+            ..Default::default()
+        };
+        bindings.migrate_legacy_defaults();
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-k"));
+        assert_eq!(bindings.next_tab.as_deref(), Some("platform-alt-j"));
+        assert_eq!(bindings.new_tab.as_deref(), Some("platform-alt-up"));
+        assert_eq!(bindings.split_right.as_deref(), Some("platform-alt-right"));
+        assert_eq!(bindings.split_down.as_deref(), Some("platform-alt-down"));
+
+        let mut custom = PersistedShortcutBindings {
+            previous_tab: Some("ctrl-alt-p".into()),
+            new_tab: Some("ctrl-shift-t".into()),
+            split_right: None,
+            ..Default::default()
+        };
+        custom.migrate_legacy_defaults();
+        assert_eq!(custom.previous_tab.as_deref(), Some("ctrl-alt-p"));
+        assert_eq!(custom.new_tab.as_deref(), Some("ctrl-shift-t"));
+        assert_eq!(custom.split_right, None);
     }
 
     #[test]
@@ -986,8 +1081,8 @@ mod tests {
         let path = directory.path().join("state.json");
         std::fs::write(&path, r#"{"version":3,"shortcut_bindings":{"previous_tab":"platform-left","next_tab":"platform-right","new_tab":null,"split_right":"ctrl-alt-r","split_down":null}}"#).unwrap();
         let bindings = load(&path).unwrap().shortcut_bindings;
-        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-up"));
-        assert_eq!(bindings.next_tab.as_deref(), Some("platform-alt-down"));
+        assert_eq!(bindings.previous_tab.as_deref(), Some("platform-alt-k"));
+        assert_eq!(bindings.next_tab.as_deref(), Some("platform-alt-j"));
         assert_eq!(bindings.new_tab, None);
         assert_eq!(bindings.split_right.as_deref(), Some("ctrl-alt-r"));
         assert_eq!(bindings.split_down, None);

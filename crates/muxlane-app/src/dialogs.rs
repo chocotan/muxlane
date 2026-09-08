@@ -698,7 +698,7 @@ impl MuxlaneApp {
                 true
             }
             "enter" if self.quit_exit_focus.is_focused(window) => {
-                self.confirm_quit(window);
+                self.confirm_quit(window, cx);
                 true
             }
             "enter" => {
@@ -726,10 +726,11 @@ impl MuxlaneApp {
         }
     }
 
-    fn confirm_quit(&mut self, window: &mut Window) {
+    fn confirm_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.quit_confirmed || !self.quit_confirm_open {
             return;
         }
+        self.close_all_session_windows(cx);
         self.quit_confirmed = true;
         self.quit_confirm_open = false;
         self.persist();
@@ -834,8 +835,8 @@ impl MuxlaneApp {
                                 .bg(rgba(theme.red))
                                 .text_color(rgba(theme.bg0))
                                 .hover(|style| style.bg(rgba(Theme::with_alpha(theme.red, 0xcc))))
-                                .on_click(cx.listener(|this, _event, window, _cx| {
-                                    this.confirm_quit(window);
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.confirm_quit(window, cx);
                                 }))
                                 .child(i18n::text(self.language, "confirm.quit")),
                             ),

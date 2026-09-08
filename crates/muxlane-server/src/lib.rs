@@ -199,6 +199,7 @@ impl MuxlaneServer {
                     muxlane_core::protocol::features::AGENT_SPAWN.into(),
                     muxlane_core::protocol::features::TERM_INPUT.into(),
                     muxlane_core::protocol::features::TERM_RESIZE.into(),
+                    muxlane_core::protocol::features::AGENT_MARK_SEEN.into(),
                 ],
             })?,
         ))
@@ -412,6 +413,17 @@ impl MuxlaneServer {
         Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
     }
 
+    async fn handle_agent_mark_seen(&self, req: Request) -> anyhow::Result<Response> {
+        let params =
+            match serde_json::from_value::<muxlane_core::protocol::AgentMarkSeenParams>(req.params)
+            {
+                Ok(params) => params,
+                Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+            };
+        self.mark_seen(&params.agent).await;
+        Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
+    }
+
     async fn handle_unknown_method(
         &self,
         request_id: u64,
@@ -461,6 +473,7 @@ impl MuxlaneServer {
                             methods::TERM_RESIZE => self.handle_term_resize(req).await?,
                             methods::AGENT_SPAWN => self.handle_agent_spawn(req).await?,
                             methods::AGENT_DELETE => self.handle_agent_delete(req).await?,
+                            methods::AGENT_MARK_SEEN => self.handle_agent_mark_seen(req).await?,
                             methods::PROJECT_ADD => self.handle_project_add(req).await?,
                             methods::PROJECT_DELETE => self.handle_project_delete(req).await?,
                             methods::AGENT_REPORT => self.handle_agent_report(req).await?,

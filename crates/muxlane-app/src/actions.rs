@@ -20,5 +20,7 @@ gpui::actions!(
         ToggleTheme,
         FocusNextPart,
         FocusPreviousPart,
+        DetachAllSessions,
+        ReattachAllSessions,
     ]
 );

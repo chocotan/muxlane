@@ -153,6 +153,19 @@ pub(crate) struct AttentionStyle {
     pub(crate) is_alerting: bool,
 }
 
+/// 已读的 Done/Failed 在视觉上等同于 Idle（灰色）；不修改真实 status 字段，
+/// 远端快照对比仍用真实 status，避免本地视觉降级误导已读合并。
+pub(crate) fn display_status(
+    status: muxlane_core::model::AgentStatus,
+    seen: bool,
+) -> muxlane_core::model::AgentStatus {
+    if seen && status.is_finished() {
+        muxlane_core::model::AgentStatus::Idle
+    } else {
+        status
+    }
+}
+
 pub(crate) fn compute_attention_style(
     status: muxlane_core::model::AgentStatus,
     seen: bool,
@@ -276,6 +289,29 @@ pub(crate) fn format_upload_phase(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_status_shows_idle_for_seen_finished_agents_only() {
+        use muxlane_core::model::AgentStatus;
+        // 已读的 Done/Failed 视觉上降级为 Idle（灰色点）。
+        assert_eq!(display_status(AgentStatus::Done, true), AgentStatus::Idle);
+        assert_eq!(display_status(AgentStatus::Failed, true), AgentStatus::Idle);
+        // 未读仍保持真实状态（继续高亮/闪烁）。
+        assert_eq!(display_status(AgentStatus::Done, false), AgentStatus::Done);
+        assert_eq!(
+            display_status(AgentStatus::Failed, false),
+            AgentStatus::Failed
+        );
+        // 未完成状态不受 seen 影响。
+        assert_eq!(
+            display_status(AgentStatus::Working, true),
+            AgentStatus::Working
+        );
+        assert_eq!(
+            display_status(AgentStatus::Blocked, true),
+            AgentStatus::Blocked
+        );
+    }
 
     #[test]
     fn upload_progress_text_shows_bytes_and_percent() {

@@ -575,6 +575,19 @@ impl RemoteHost {
         result
     }
 
+    /// 将远端 agent 标记为已读（Done/Failed→Idle），真实写回服务端，并随远端
+    /// 自身的状态广播与持久化。调用前请先确认 supports(AGENT_MARK_SEEN)，
+    /// 旧版本远端会返回 method_not_found。
+    pub async fn mark_agent_seen(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+    ) -> anyhow::Result<()> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::mark_agent_seen(rpc.as_mut().expect("RPC initialized"), agent).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
     pub fn machine_id(&self) -> Option<String> {
         self.machine_id.read().ok().and_then(|value| value.clone())
     }

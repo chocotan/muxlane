@@ -192,6 +192,20 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "Delete Remote Session",
     ),
     ("menu.delete_session", "删除会话", "Delete Session"),
+    ("menu.detach_session", "弹出到独立窗口", "Detach to Window"),
+    ("menu.reattach_session", "收回主窗口", "Reattach to Main Window"),
+    ("sidebar.detach_all", "全部弹出", "Detach All"),
+    ("sidebar.reattach_all", "全部收回", "Reattach All"),
+    (
+        "detached.placeholder",
+        "{count} 个会话已弹出到独立窗口，从左侧选择或右键收回",
+        "{count} session(s) detached to their own windows. Pick one on the left or right-click to reattach.",
+    ),
+    (
+        "detached.empty",
+        "没有打开的会话",
+        "No open sessions",
+    ),
     ("menu.deleting", "删除中…", "Deleting…"),
     ("menu.reconnect", "重新连接", "Reconnect"),
     (

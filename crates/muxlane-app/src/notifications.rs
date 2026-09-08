@@ -57,7 +57,7 @@ pub(crate) struct NotificationCenter {
     notifications: Vec<Notification>,
     toasts: Vec<ToastNotification>,
     toast_seq: u64,
-    error_toast: Option<(String, Instant)>,
+    error_toast: Option<(String, Instant, bool)>,
     open: bool,
     theme_mode: ThemeMode,
     language: Language,
@@ -90,7 +90,7 @@ impl NotificationCenter {
                     if this
                         .error_toast
                         .as_ref()
-                        .is_some_and(|(_, created)| created.elapsed().as_secs() >= 8)
+                        .is_some_and(|(_, created, _)| created.elapsed().as_secs() >= 8)
                     {
                         this.error_toast = None;
                     }
@@ -273,7 +273,7 @@ impl NotificationCenter {
     }
 
     pub(crate) fn show_error(&mut self, message: String, cx: &mut Context<Self>) {
-        self.error_toast = Some((message, Instant::now()));
+        self.error_toast = Some((message, Instant::now(), true));
         cx.notify();
     }
 
@@ -650,7 +650,8 @@ impl Render for NotificationCenter {
             );
         }
 
-        if let Some((message, _)) = self.error_toast.clone() {
+        if let Some((message, _, is_error)) = self.error_toast.clone() {
+            let color = if is_error { theme.red } else { theme.fg1 };
             root = root.child(
                 div()
                     .id("error-toast")
@@ -661,9 +662,9 @@ impl Render for NotificationCenter {
                     .p_3()
                     .bg(rgba(theme.bg1))
                     .border_1()
-                    .border_color(rgba(theme.red))
+                    .border_color(rgba(color))
                     .text_size(ui_px(11.5))
-                    .text_color(rgba(theme.red))
+                    .text_color(rgba(color))
                     .child(message),
             );
         }

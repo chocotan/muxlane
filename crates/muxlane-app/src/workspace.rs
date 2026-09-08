@@ -449,6 +449,22 @@ impl MuxlaneApp {
     fn apply_workspace_layout(&mut self, layout: WorkspaceLayout) {
         self.pane_tree = layout.pane_tree;
         self.active_pane = layout.active_pane;
+        // A saved layout may predate a detach; a detached session lives in its own native
+        // window and must never come back as a tab here.
+        let detached: HashSet<AgentId> = self.floating.detached_agents().into_iter().collect();
+        if !detached.is_empty() {
+            let keep: HashSet<_> = self
+                .pane_tree
+                .all_groups()
+                .into_iter()
+                .flat_map(|group| group.tabs.iter().cloned())
+                .filter(|agent| !detached.contains(agent))
+                .collect();
+            self.pane_tree.retain_agents(&keep);
+            if self.pane_tree.group(&self.active_pane).is_none() {
+                self.active_pane = self.pane_tree.first_pane_id();
+            }
+        }
         self.active = active_tab_in_layout(&self.pane_tree, &self.active_pane);
         self.maximized_pane = None;
         self.split_drag = None;
@@ -544,14 +560,16 @@ impl MuxlaneApp {
     }
 
     pub(crate) fn remove_project_workspace(&mut self, key: &ProjectKey) {
+        self.floating.layouts.remove(key);
         let next = self
             .available_project_keys()
             .into_iter()
             .find(|candidate| candidate != key);
         let current = self.current_workspace_layout();
-        if let Some(layout) = self.workspace.remove_project(key, current, next) {
+        if let Some(layout) = self.workspace.remove_project(key, current, next.clone()) {
             self.apply_workspace_layout(layout);
         }
+        self.restore_floating_after_removal(next);
     }
 
     pub(crate) fn reconcile_machine_workspaces(
@@ -559,34 +577,72 @@ impl MuxlaneApp {
         machine_id: &str,
         valid_projects: &HashSet<String>,
     ) -> bool {
+        let float_len = self.floating.layouts.len();
+        self.floating.layouts.retain(|key, _| {
+            key.machine_id != machine_id || valid_projects.contains(&key.project_id)
+        });
+        let floating_changed = float_len != self.floating.layouts.len();
         let next = self.available_project_keys().into_iter().find(|candidate| {
             candidate.machine_id != machine_id || valid_projects.contains(&candidate.project_id)
         });
         let current = self.current_workspace_layout();
-        let (changed, layout) =
-            self.workspace
-                .reconcile_machine_projects(machine_id, valid_projects, current, next);
+        let (changed, layout) = self.workspace.reconcile_machine_projects(
+            machine_id,
+            valid_projects,
+            current,
+            next.clone(),
+        );
         if let Some(layout) = layout {
             self.apply_workspace_layout(layout);
         }
-        changed
+        self.restore_floating_after_removal(next);
+        changed || floating_changed
     }
 
     pub(crate) fn remove_machine_workspaces(&mut self, machine_id: &str) {
+        self.floating
+            .layouts
+            .retain(|key, _| key.machine_id != machine_id);
         let next = self
             .available_project_keys()
             .into_iter()
             .find(|candidate| candidate.machine_id != machine_id);
         let current = self.current_workspace_layout();
-        if let Some(layout) = self.workspace.remove_machine(machine_id, current, next) {
+        if let Some(layout) = self
+            .workspace
+            .remove_machine(machine_id, current, next.clone())
+        {
             self.apply_workspace_layout(layout);
+        }
+        self.restore_floating_after_removal(next);
+    }
+
+    fn restore_floating_after_removal(&mut self, next: Option<ProjectKey>) {
+        if self.workspace.current_project.is_none() {
+            self.workspace.current_project = next;
         }
     }
 
-    /// 用户主动 spawn 完成后的跳转：目标项目不是当前工作区时先切过去，
-    /// 否则 place_async_agent 会把新会话放到后台不激活。
+    pub(crate) fn project_owner_exists(&self, key: &ProjectKey) -> bool {
+        if key.machine_id == self.local_machine_id() {
+            return self.last_snapshot.project(&key.project_id).is_some();
+        }
+        self.remotes.iter().any(|remote| {
+            self.remote_snaps
+                .get(&remote.cfg.name)
+                .is_some_and(|snapshot| {
+                    snapshot
+                        .machine
+                        .as_ref()
+                        .is_some_and(|machine| machine.machine_id == key.machine_id)
+                        && snapshot.project(&key.project_id).is_some()
+                })
+        })
+    }
+
+    /// A completion may select an initial workspace, but must not undo navigation.
     pub(crate) fn jump_to_project_if_needed(&mut self, key: &ProjectKey, cx: &mut Context<Self>) {
-        if self.workspace.enabled() && self.workspace.current_project() != Some(key) {
+        if self.workspace.current_project().is_none() && self.project_owner_exists(key) {
             self.select_project_workspace_inner(key.clone(), cx);
         }
     }
@@ -600,7 +656,14 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace.should_activate_async_result(key) {
+        if !self.project_owner_exists(key) {
+            return;
+        }
+        let background = self
+            .workspace
+            .current_project()
+            .is_some_and(|current| current != key);
+        if background || !self.workspace.should_activate_async_result(key) {
             self.workspace
                 .place_agent_in_project(key, agent, preferred_pane.as_ref(), split_axis);
             self.persist();

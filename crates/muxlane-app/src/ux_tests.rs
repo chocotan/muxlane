@@ -1,7 +1,12 @@
 //! In-process GPUI tests. The server has no agents and is never served; no PTY or SSH is started.
 
+#[path = "floating_tests.rs"]
+mod floating_tests;
+
 #[path = "notification_tests.rs"]
 mod notification_tests;
+#[path = "remote_operation_tests.rs"]
+mod remote_operation_tests;
 
 mod sidebar_navigation {
     use super::*;
@@ -272,11 +277,18 @@ use super::*;
 use gpui::{AnyWindowHandle, TestAppContext};
 
 fn with_app(test: impl FnOnce(&mut TestAppContext, AnyWindowHandle, Entity<MuxlaneApp>)) {
-    let directory = tempfile::tempdir().unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
+    with_app_on_runtime(&runtime, test);
+}
+
+fn with_app_on_runtime(
+    runtime: &tokio::runtime::Runtime,
+    test: impl FnOnce(&mut TestAppContext, AnyWindowHandle, Entity<MuxlaneApp>),
+) {
+    let directory = tempfile::tempdir().unwrap();
     let state = muxlane_server::ServerState::new(muxlane_core::model::MachineInfo {
         machine_id: "ux-test".into(),
         name: "test".into(),
@@ -347,11 +359,11 @@ fn terminal_shortcuts_dispatch_to_app_actions_and_disable_without_fixed_aliases(
         #[cfg(not(target_os = "macos"))]
         let platform = "super";
         for (key, expected) in [
-            ("t", TypeId::of::<NewShellTab>()),
-            ("r", TypeId::of::<SplitRight>()),
-            ("d", TypeId::of::<SplitDown>()),
-            ("up", TypeId::of::<PreviousTab>()),
-            ("down", TypeId::of::<NextTab>()),
+            ("up", TypeId::of::<NewShellTab>()),
+            ("right", TypeId::of::<SplitRight>()),
+            ("down", TypeId::of::<SplitDown>()),
+            ("k", TypeId::of::<PreviousTab>()),
+            ("j", TypeId::of::<NextTab>()),
         ] {
             cx.simulate_keystrokes(window, &format!("{platform}-alt-{key}"));
             assert_eq!(actions.borrow().last(), Some(&Some(expected)));
@@ -364,7 +376,7 @@ fn terminal_shortcuts_dispatch_to_app_actions_and_disable_without_fixed_aliases(
                 crate::shortcuts::install_keymap(cx, &app.shortcut_bindings).unwrap();
             });
         });
-        for key in ["t", "r", "d", "up", "down"] {
+        for key in ["up", "right", "down", "k", "j"] {
             actions.borrow_mut().clear();
             cx.simulate_keystrokes(window, &format!("{platform}-alt-{key}"));
             assert!(actions.borrow().iter().all(Option::is_none));

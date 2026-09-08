@@ -109,6 +109,13 @@ impl MuxlaneApp {
             },
         )
         .detach();
+        cx.subscribe(
+            &term,
+            |this, _, event: &crate::term_view::TermFocusEvent, cx| {
+                this.handle_terminal_focus(event, cx);
+            },
+        )
+        .detach();
         term
     }
 
@@ -137,6 +144,13 @@ impl MuxlaneApp {
             &term,
             |this, _term, ev: &crate::term_view::TermEnterEvent, cx| {
                 this.mark_agent_working(&ev.0, cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &term,
+            |this, _, event: &crate::term_view::TermFocusEvent, cx| {
+                this.handle_terminal_focus(event, cx);
             },
         )
         .detach();
@@ -334,6 +348,7 @@ impl MuxlaneApp {
         let Some(focus) = self
             .active
             .as_ref()
+            .filter(|agent| !self.is_detached(agent))
             .and_then(|agent| self.terms.get(agent))
             .map(|term| term.focus_handle(cx))
         else {
@@ -346,8 +361,11 @@ impl MuxlaneApp {
             || self.focus.is_focused(window)
             || self
                 .terms
-                .values()
-                .any(|term| term.focus_handle(cx).is_focused(window))
+                .iter()
+                // A detached session's handle lives in its own native window; it must not
+                // count as "managed" here or the two windows fight over the shared handle.
+                .filter(|(agent, _)| !self.is_detached(agent))
+                .any(|(_, term)| term.focus_handle(cx).is_focused(window))
             || [
                 &self.palette_input,
                 &self.connect_input,
@@ -388,6 +406,10 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_detached(agent) {
+            self.focus_detached_window(agent, cx);
+            return;
+        }
         self.activate_tab(pane, agent, cx);
         if self.ensure_agent_terminal(agent, cx) {
             self.focus_agent(agent, window, cx);
@@ -401,6 +423,16 @@ impl MuxlaneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A detached session only takes focus from its own native window.
+        if self.is_detached(agent)
+            && !self
+                .floating
+                .windows
+                .get(agent)
+                .is_some_and(|handle| handle.window_id() == window.window_handle().window_id())
+        {
+            return;
+        }
         let focus = self.terms.get(agent).map(|term| term.focus_handle(cx));
         if let Some(focus) = &focus {
             focus.focus(window, cx);
@@ -412,6 +444,10 @@ impl MuxlaneApp {
                 "focus agent requested"
             );
         }
+        self.mark_agent_seen(agent, cx);
+    }
+
+    pub(crate) fn mark_agent_seen(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
         // 清理当前 agent 的 Toast 与标记通知已读
         self.notifications
             .update(cx, |center, cx| center.mark_agent_read(agent, cx));
@@ -421,13 +457,38 @@ impl MuxlaneApp {
                 a.status = muxlane_core::model::AgentStatus::Idle;
             }
         } else {
-            // 远端没有 mark_seen RPC，先同步本地镜像，避免点击后仍持续闪烁。
+            // 远端支持 agent.mark_seen 时真正写回服务端（Done/Failed→Idle），随远端
+            // 自身持久化，不怕本地客户端重启丢失；旧版本远端不支持时降级为仅本
+            // 地标记已读，且不能同步翻转 status：服务端仍保留 Done/Failed，
+            // 下一次全量快照刷新时若本地 status 与服务端不一致，合并会误
+            // 判为新结果而重新提醒。
+            let host_name = self
+                .remote_snaps
+                .iter()
+                .find(|(_, snap)| snap.agents.iter().any(|a| &a.id == agent))
+                .map(|(host, _)| host.clone());
+            let remote = host_name.as_ref().and_then(|host_name| {
+                self.remotes
+                    .iter()
+                    .find(|host| host.cfg.name == *host_name)
+                    .cloned()
+            });
+            if let Some(remote) = remote
+                .filter(|remote| remote.supports(muxlane_core::protocol::features::AGENT_MARK_SEEN))
+            {
+                let agent_for_rpc = agent.clone();
+                let task = self.spawn_remote_operation(async move {
+                    remote.mark_agent_seen(&agent_for_rpc).await
+                });
+                cx.spawn(async move |_, _| {
+                    // 最大努力：失败不阻塞 UI，下次查看会重试。
+                    let _ = task.await;
+                })
+                .detach();
+            }
             for snapshot in self.remote_snaps.values_mut() {
                 if let Some(a) = snapshot.agent_mut(agent) {
                     a.seen = true;
-                    if a.status.is_finished() {
-                        a.status = muxlane_core::model::AgentStatus::Idle;
-                    }
                     break;
                 }
             }
@@ -498,11 +559,13 @@ impl MuxlaneApp {
                 return;
             };
             let agent = agent.clone();
+            let agent_for_delete = agent.clone();
+            let task =
+                self.spawn_remote_operation(
+                    async move { remote.delete_agent(&agent_for_delete).await },
+                );
             cx.spawn_in(window, async move |this, cx| {
-                let agent_for_delete = agent.clone();
-                let result = cx
-                    .background_spawn(async move { remote.delete_agent(&agent_for_delete).await })
-                    .await;
+                let result = task.await;
                 let _ = this.update_in(cx, |this, window, cx| match result {
                     Ok(()) => {
                         if let Some(snapshot) = this.remote_snaps.get_mut(&host_name) {
@@ -582,6 +645,8 @@ impl MuxlaneApp {
         cx: &mut Context<Self>,
     ) {
         let removed = std::collections::HashSet::from([agent.clone()]);
+        self.floating.remove_agents(&removed);
+        self.schedule_session_windows(cx);
         self.workspace.remove_agents(&removed);
         if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
             self.pane_tree.close_tab(&pane, agent);
@@ -609,6 +674,8 @@ impl MuxlaneApp {
 
     pub(crate) fn cleanup_removed_agents(&mut self, removed: &[AgentId], cx: &mut Context<Self>) {
         let removed: std::collections::HashSet<_> = removed.iter().cloned().collect();
+        self.floating.remove_agents(&removed);
+        self.schedule_session_windows(cx);
         self.terms.retain(|agent, _| !removed.contains(agent));
         for agent in &removed {
             if let Some(cancelled) = self.mirror_cancel.remove(agent) {
@@ -741,22 +808,31 @@ impl MuxlaneApp {
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok((agent, session)) => {
+                    if !this.project_owner_exists(&target_key)
+                        || agent.project != target_key.project_id
+                    {
+                        return;
+                    }
                     let agent_id = agent.id.clone();
-                    let term = Self::create_local_term(
-                        agent_id.clone(),
-                        session,
-                        &this.font_family,
-                        Theme::for_mode(this.theme_mode),
-                        this.osc52_clipboard_enabled,
-                        cx,
-                    );
+                    let term = this.terms.get(&agent_id).cloned().unwrap_or_else(|| {
+                        Self::create_local_term(
+                            agent_id.clone(),
+                            session,
+                            &this.font_family,
+                            Theme::for_mode(this.theme_mode),
+                            this.osc52_clipboard_enabled,
+                            cx,
+                        )
+                    });
+                    if !this.last_snapshot.agents.iter().any(|a| a.id == agent_id) {
+                        this.last_snapshot.agents.push(agent);
+                    }
                     this.collapsed_projects.remove(&collapse_key);
                     this.terms.insert(agent_id.clone(), term);
                     this.palette_open = false;
                     this.new_session_target = None;
                     this.jump_to_project_if_needed(&target_key, cx);
                     this.place_async_agent(&target_key, agent_id, Some(pane), None, window, cx);
-                    this.select_project_workspace(target_key.clone(), window, cx);
                 }
                 Err(error) => {
                     this.notifications.update(cx, |center, cx| {

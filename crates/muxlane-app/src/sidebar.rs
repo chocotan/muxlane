@@ -517,6 +517,8 @@ impl MuxlaneApp {
             remote,
         } = session;
         let active = self.active.as_ref() == Some(&id);
+        let detached = self.is_detached(&id);
+        let detached_marker_id = format!("detached-{id}");
         let project_key = self.project_key_for_agent(&id);
         let attention = compute_attention_style(status, seen || active, theme);
         let animation_id = format!(
@@ -569,7 +571,7 @@ impl MuxlaneApp {
                         position: clamp_menu_position(
                             event.position,
                             window.viewport_size(),
-                            size(ui_px(180.), ui_px(44.)),
+                            size(ui_px(180.), ui_px(88.)),
                         ),
                         remote,
                     });
@@ -578,7 +580,11 @@ impl MuxlaneApp {
                     cx.notify();
                 }),
             )
-            .child(render_status_indicator(status, animation_id, theme))
+            .child(render_status_indicator(
+                crate::widgets::display_status(status, seen || active),
+                animation_id,
+                theme,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -587,6 +593,24 @@ impl MuxlaneApp {
                     .text_ellipsis()
                     .child(title),
             )
+            .when(detached, |el| {
+                el.child(
+                    div()
+                        .id(gpui::ElementId::Name(detached_marker_id.clone().into()))
+                        .debug_selector(move || detached_marker_id.clone())
+                        .flex_none()
+                        .w(ui_px(14.))
+                        .h(ui_px(14.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .tooltip(hover_tip(
+                            i18n::text(self.language, "menu.detach_session"),
+                            theme,
+                        ))
+                        .child(panel_icon(DETACH_ICON, theme.fg2)),
+                )
+            })
     }
 }
 
@@ -1148,6 +1172,36 @@ impl MuxlaneApp {
             .gap_1()
             .border_t_1()
             .border_color(rgba(theme.line))
+            .child({
+                // One toggle: "Detach All" while anything is docked, "Reattach All" once all are out.
+                let any_docked = self.has_any_docked_session();
+                let (id, key, icon) = if any_docked {
+                    ("sidebar-detach-all", "sidebar.detach_all", DETACH_ICON)
+                } else {
+                    (
+                        "sidebar-reattach-all",
+                        "sidebar.reattach_all",
+                        REATTACH_ICON,
+                    )
+                };
+                let label = i18n::text(self.language, key);
+                semantic_button(id, label, theme)
+                    .debug_selector(move || id.into())
+                    .w(ui_px(32.))
+                    .h(ui_px(32.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .tooltip(hover_tip(label, theme))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if any_docked {
+                            this.detach_all_sessions(cx);
+                        } else {
+                            this.reattach_all_sessions(cx);
+                        }
+                    }))
+                    .child(panel_icon(icon, theme.fg1))
+            })
             .child(
                 semantic_button(
                     "sidebar-hide-button",

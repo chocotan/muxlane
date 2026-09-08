@@ -353,6 +353,11 @@ impl PaneNode {
         self.collect_groups(&mut out);
         out
     }
+
+    /// True when no pane holds any tab (e.g. every session is detached).
+    pub fn has_no_tabs(&self) -> bool {
+        self.all_groups().iter().all(|group| group.tabs.is_empty())
+    }
     fn collect_groups<'a>(&'a self, out: &mut Vec<&'a TabGroup>) {
         match self {
             PaneNode::Leaf { group } => out.push(group),

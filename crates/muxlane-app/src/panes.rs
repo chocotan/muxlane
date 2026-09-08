@@ -60,6 +60,11 @@ impl MuxlaneApp {
                 a.status = muxlane_core::model::AgentStatus::Idle;
             }
         }
+        for snapshot in self.remote_snaps.values_mut() {
+            if let Some(instance) = snapshot.agent_mut(agent) {
+                instance.seen = true;
+            }
+        }
         // 查看本地 Done agent 后回到 Idle。
         if self.last_snapshot.agent(agent).is_some() {
             let server = Arc::clone(&self.server);
@@ -108,7 +113,7 @@ impl MuxlaneApp {
         self.jump_to_agent(&target.agent, window, cx);
     }
 
-    pub(super) fn close_tab(
+    pub(crate) fn close_tab(
         &mut self,
         pane: &PaneId,
         agent: &AgentId,
@@ -231,15 +236,25 @@ impl MuxlaneApp {
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok((agent, session)) => {
+                    if !this.project_owner_exists(&target_key)
+                        || agent.project != target_key.project_id
+                    {
+                        return;
+                    }
                     let agent_id = agent.id.clone();
-                    let term = Self::create_local_term(
-                        agent_id.clone(),
-                        session,
-                        &this.font_family,
-                        Theme::for_mode(this.theme_mode),
-                        this.osc52_clipboard_enabled,
-                        cx,
-                    );
+                    let term = this.terms.get(&agent_id).cloned().unwrap_or_else(|| {
+                        Self::create_local_term(
+                            agent_id.clone(),
+                            session,
+                            &this.font_family,
+                            Theme::for_mode(this.theme_mode),
+                            this.osc52_clipboard_enabled,
+                            cx,
+                        )
+                    });
+                    if !this.last_snapshot.agents.iter().any(|a| a.id == agent_id) {
+                        this.last_snapshot.agents.push(agent);
+                    }
                     this.collapsed_projects.remove(&collapse_key);
                     this.terms.insert(agent_id.clone(), term);
                     this.jump_to_project_if_needed(&target_key, cx);
@@ -613,6 +628,30 @@ impl MuxlaneApp {
                                 this.activate_agent(&pane, &id, window, cx);
                             }
                         }))
+                        // 右键：弹出/收回、删除
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener({
+                                let id = tab_id.clone();
+                                move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                    let remote = this.last_snapshot.agent(&id).is_none();
+                                    this.focus.focus(window, cx);
+                                    this.tree_menu = None;
+                                    this.session_menu = Some(crate::menus::SessionMenu {
+                                        agent: id.clone(),
+                                        position: crate::menus::clamp_menu_position(
+                                            event.position,
+                                            window.viewport_size(),
+                                            gpui::size(ui_px(180.), ui_px(88.)),
+                                        ),
+                                        remote,
+                                    });
+                                    this.palette_open = false;
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                            }),
+                        )
                         // 鼠标中键直接关闭 Tab
                         .on_mouse_down(
                             MouseButton::Middle,
@@ -651,7 +690,7 @@ impl MuxlaneApp {
                             }
                         }))
                         .child(div().flex_none().child(render_status_indicator(
-                            status,
+                            crate::widgets::display_status(status, seen),
                             format!("pane-{pane_id}-agent-{tab_id}"),
                             theme,
                         )))

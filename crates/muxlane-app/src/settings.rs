@@ -42,7 +42,7 @@ impl SettingsFocus {
             .clone()
     }
 
-    fn control(&mut self, id: impl Into<String>, cx: &gpui::App) -> gpui::FocusHandle {
+    pub(crate) fn control(&mut self, id: impl Into<String>, cx: &gpui::App) -> gpui::FocusHandle {
         let handle = self
             .handles
             .entry(id.into())

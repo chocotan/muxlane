@@ -370,6 +370,13 @@ impl InputHandler for TerminalInputHandler {
 #[derive(Debug, Clone)]
 pub struct TermEnterEvent(pub AgentId);
 
+#[derive(Debug, Clone)]
+pub struct TermFocusEvent {
+    pub agent: AgentId,
+    pub window: gpui::WindowId,
+    pub focused: bool,
+}
+
 pub struct TermView {
     pub agent: AgentId,
     font_family: String,
@@ -386,16 +393,27 @@ pub struct TermView {
     selecting: bool,
     forwarding_mouse: bool,
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
-    focus_subscriptions: Option<(Subscription, Subscription)>,
+    pub(crate) bound_window: Option<gpui::WindowId>,
+    focus_subscriptions: Option<(Subscription, Subscription, Subscription)>,
     osc52_clipboard_enabled: Arc<AtomicBool>,
     shape_cache: Arc<std::sync::Mutex<ShapeCache>>,
     pending_selection: Option<(i32, usize, bool)>,
+    #[cfg(test)]
+    renders: std::cell::Cell<usize>,
     selection_flush_scheduled: bool,
     _drain: Task<()>,
     _clipboard: Task<()>,
 }
 
+#[cfg(test)]
+impl TermView {
+    pub(crate) fn render_count(&self) -> usize {
+        self.renders.get()
+    }
+}
+
 impl EventEmitter<TermEnterEvent> for TermView {}
+impl EventEmitter<TermFocusEvent> for TermView {}
 
 impl Focusable for TermView {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
@@ -614,10 +632,13 @@ impl TermView {
             selecting: false,
             forwarding_mouse: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
+            bound_window: None,
             focus_subscriptions: None,
             osc52_clipboard_enabled,
             shape_cache: Arc::new(std::sync::Mutex::new(ShapeCache::default())),
             pending_selection: None,
+            #[cfg(test)]
+            renders: std::cell::Cell::new(0),
             selection_flush_scheduled: false,
             _drain: drain,
             _clipboard: clipboard,
@@ -657,10 +678,13 @@ impl TermView {
             selecting: false,
             forwarding_mouse: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
+            bound_window: None,
             focus_subscriptions: None,
             osc52_clipboard_enabled,
             shape_cache: Arc::new(std::sync::Mutex::new(ShapeCache::default())),
             pending_selection: None,
+            #[cfg(test)]
+            renders: std::cell::Cell::new(0),
             selection_flush_scheduled: false,
             _drain: idle,
             _clipboard: clipboard,
@@ -1071,18 +1095,51 @@ fn mouse_report(
 
 impl Render for TermView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        self.renders.set(self.renders.get() + 1);
         let mut snapshot = self.vterm.render_snapshot();
-        if self.focus_subscriptions.is_none() {
+        if self.bound_window != Some(window.window_handle().window_id()) {
+            self.bound_window = Some(window.window_handle().window_id());
+            self.focus_subscriptions = None;
+            self.selecting = false;
+            self.forwarding_mouse = false;
+            self.scrollbar_drag = None;
+            self.pending_selection = None;
+            if let Ok(mut marked) = self.marked_text.lock() {
+                *marked = None;
+            }
+            if let Ok(mut bounds) = self.last_bounds.lock() {
+                *bounds = None;
+            }
+            window.invalidate_character_coordinates();
             let focus = self.focus.clone();
-            let focus_in = cx.on_focus_in(&focus, window, |_this, window, cx| {
+            let focus_in = cx.on_focus_in(&focus, window, |this, window, cx| {
+                cx.emit(TermFocusEvent {
+                    agent: this.agent.clone(),
+                    window: window.window_handle().window_id(),
+                    focused: window.is_window_active() && this.focus.is_focused(window),
+                });
                 window.invalidate_character_coordinates();
                 cx.notify();
             });
-            let focus_out = cx.on_focus_out(&focus, window, |_this, _event, window, cx| {
+            let focus_out = cx.on_focus_out(&focus, window, |this, _event, window, cx| {
+                cx.emit(TermFocusEvent {
+                    agent: this.agent.clone(),
+                    window: window.window_handle().window_id(),
+                    focused: false,
+                });
                 window.invalidate_character_coordinates();
                 cx.notify();
             });
-            self.focus_subscriptions = Some((focus_in, focus_out));
+            let activation = cx.observe_window_activation(window, |this, window, cx| {
+                cx.emit(TermFocusEvent {
+                    agent: this.agent.clone(),
+                    window: window.window_handle().window_id(),
+                    focused: window.is_window_active() && this.focus.is_focused(window),
+                });
+                cx.notify();
+            });
+            self.focus_subscriptions = Some((focus_in, focus_out, activation));
         }
         let focused = self.focus.is_focused(window);
         let font_family = self.font_family.clone();
@@ -1619,6 +1676,99 @@ fn dim_u32(c: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestTermRoot {
+        term: Option<gpui::Entity<TermView>>,
+        inset: Pixels,
+    }
+
+    impl Render for TestTermRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().p(self.inset).children(self.term.clone())
+        }
+    }
+
+    #[test]
+    fn window_migration_clears_preedit_and_refreshes_rendered_bounds() {
+        use gpui::{AnyWindowHandle, TestAppContext, VisualTestContext};
+
+        fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
+            cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+            cx.update_window(handle, |_, window, cx| window.simulate_next_frame(cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+
+        let mut cx = TestAppContext::single();
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let term = cx.new(|cx| {
+            TermView::new_remote(
+                "migration-test".into(),
+                VTerm::new_with_clipboard(80, 24),
+                sender,
+                "monospace".into(),
+                Theme::for_mode(Default::default()),
+                false,
+                cx,
+            )
+        });
+        let a = cx.add_window(|_, _| TestTermRoot {
+            term: Some(term.clone()),
+            inset: gpui::px(0.),
+        });
+        let b = cx.add_window(|_, _| TestTermRoot {
+            term: None,
+            inset: gpui::px(40.),
+        });
+        for handle in [a.into(), b.into()] {
+            VisualTestContext::from_window(handle, &cx)
+                .simulate_resize(size(gpui::px(800.), gpui::px(600.)));
+        }
+        draw(&mut cx, a.into());
+        let old_bounds = cx.update(|cx| {
+            let view = term.read(cx);
+            assert_eq!(view.bound_window, Some(a.window_id()));
+            *view.marked_text.lock().unwrap() = Some("preedit".into());
+            view.last_bounds.lock().unwrap().unwrap()
+        });
+        draw(&mut cx, a.into());
+        cx.update(|cx| {
+            assert_eq!(
+                term.read(cx).marked_text.lock().unwrap().as_deref(),
+                Some("preedit")
+            );
+        });
+
+        a.update(&mut cx, |root, _, cx| {
+            root.term = None;
+            cx.notify();
+        })
+        .unwrap();
+        draw(&mut cx, a.into());
+        b.update(&mut cx, |root, _, cx| {
+            root.term = Some(term.clone());
+            cx.notify();
+        })
+        .unwrap();
+        draw(&mut cx, b.into());
+        cx.update(|cx| {
+            let view = term.read(cx);
+            assert!(view.marked_text.lock().unwrap().is_none());
+            assert_eq!(view.bound_window, Some(b.window_id()));
+            let bounds = view.last_bounds.lock().unwrap().unwrap();
+            assert_eq!(
+                bounds.origin,
+                old_bounds.origin + point(gpui::px(40.), gpui::px(40.))
+            );
+            assert_eq!(
+                bounds.size,
+                old_bounds.size - size(gpui::px(80.), gpui::px(80.))
+            );
+            assert!(bounds.size.width > gpui::px(0.));
+            assert!(bounds.size.height > gpui::px(0.));
+        });
+    }
 
     #[test]
     fn ui_scale_invalidates_cached_terminal_geometry() {

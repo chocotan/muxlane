@@ -3,6 +3,7 @@ mod actions;
 mod app;
 mod bootstrap;
 mod dialogs;
+mod floating;
 mod i18n;
 mod icons;
 mod menus;

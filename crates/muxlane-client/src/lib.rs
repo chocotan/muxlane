@@ -387,6 +387,20 @@ pub async fn delete_agent(
     Ok(())
 }
 
+pub async fn mark_agent_seen(
+    conn: &mut Connection,
+    agent: &muxlane_core::model::AgentId,
+) -> anyhow::Result<()> {
+    conn.call(
+        muxlane_core::protocol::methods::AGENT_MARK_SEEN,
+        serde_json::to_value(muxlane_core::protocol::AgentMarkSeenParams {
+            agent: agent.clone(),
+        })?,
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

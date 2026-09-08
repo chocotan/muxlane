@@ -126,6 +126,7 @@ pub struct MuxlaneApp {
     pub(crate) maximized_pane: Option<PaneId>,
     pub(crate) active: Option<AgentId>,
     pub(crate) workspace: WorkspaceController,
+    pub(crate) floating: crate::floating::FloatingState,
     pub(crate) split_drag: Option<SplitDrag>,
     pub(crate) split_metrics: Arc<std::sync::Mutex<HashMap<String, f32>>>,
     pub(crate) pane_tab_scrolls: HashMap<PaneId, panes::PaneTabScroll>,
@@ -274,7 +275,7 @@ impl MuxlaneApp {
                     .await;
                 if this
                     .update(cx, |this, cx| {
-                        this.last_snapshot = snap;
+                        this.apply_local_snapshot(snap, cx);
                         this.persist();
                         cx.notify();
                     })
@@ -300,14 +301,14 @@ impl MuxlaneApp {
                     this.update(cx, |this, cx| {
                         match ev {
                             muxlane_client::ClientEvent::StateChanged { host, state } => {
-                                this.remote_states.insert(host.clone(), state.clone());
                                 if let muxlane_client::RemoteState::Online(snap) = &state {
                                     let mut snap = snap.clone();
-                                    if let Some(active) = this.active.as_ref() {
-                                        if let Some(agent) = snap.agent_mut(active) {
-                                            agent.seen = true;
-                                        }
-                                    }
+                                    crate::remotes::merge_remote_seen(
+                                        &mut snap,
+                                        this.remote_snaps.get(&host),
+                                        this.remote_states.get(&host),
+                                        this.notification_focused_agent(),
+                                    );
                                     let machine_id = snap
                                         .machine
                                         .as_ref()
@@ -360,7 +361,21 @@ impl MuxlaneApp {
                                             )
                                         })
                                         .unwrap_or_default();
+                                    if let Some(id) = machine_id.as_deref() {
+                                        stale_agents.extend(
+                                            this.floating
+                                                .known_agents(id)
+                                                .difference(&valid_agents)
+                                                .cloned(),
+                                        );
+                                    }
                                     if let Some(previous) = replaced_machine_id.as_deref() {
+                                        stale_agents.extend(
+                                            this.floating
+                                                .known_agents(previous)
+                                                .difference(&valid_agents)
+                                                .cloned(),
+                                        );
                                         stale_agents.extend(
                                             this.workspace
                                                 .known_agents_for_machine(previous)
@@ -393,6 +408,7 @@ impl MuxlaneApp {
                                         this.persist();
                                     }
                                 }
+                                this.remote_states.insert(host.clone(), state.clone());
                                 // 到达稳态后清除进度显示
                                 if !matches!(state, muxlane_client::RemoteState::Connecting(_)) {
                                     this.bootstrap_progress.remove(&host);
@@ -408,12 +424,13 @@ impl MuxlaneApp {
                                 to,
                                 message,
                             } => {
+                                let focused = this.notification_focused_agent() == Some(&agent);
                                 if let Some(snap) = this.remote_snaps.get_mut(&host) {
                                     if let Some(a) = snap.agents.iter_mut().find(|a| a.id == agent)
                                     {
                                         a.status = to;
                                         if to.is_finished() {
-                                            a.seen = this.active.as_ref() != Some(&agent);
+                                            a.seen = focused;
                                         }
                                     }
                                 }
@@ -576,6 +593,7 @@ impl MuxlaneApp {
             mirror_cancel: HashMap::new(),
             active: None,
             workspace,
+            floating: crate::floating::FloatingState::from_persisted(&persisted),
             last_snapshot: initial_snapshot,
             remotes,
             remote_snaps: HashMap::new(),
@@ -647,6 +665,17 @@ impl MuxlaneApp {
             project_order: persisted.project_order.clone(),
             bootstrap_progress: HashMap::new(),
         };
+        app.floating.remove_agents(&missing_local);
+        app.floating.layouts.retain(|key, _| {
+            key.machine_id != local_machine_id || available_local_projects.contains(&key.project_id)
+        });
+        let stale_floating: std::collections::HashSet<_> = app
+            .floating
+            .known_agents(&local_machine_id)
+            .difference(&valid)
+            .cloned()
+            .collect();
+        app.floating.remove_agents(&stale_floating);
         app.active = app
             .pane_tree
             .group(&app.active_pane)
@@ -664,6 +693,9 @@ impl MuxlaneApp {
                     .await;
                 if let Some(session) = session {
                     let _ = this.update(cx, |this, cx| {
+                        if this.terms.contains_key(&agent) {
+                            return;
+                        }
                         let term = Self::create_local_term(
                             agent.clone(),
                             session,
@@ -702,6 +734,39 @@ impl MuxlaneApp {
         app
     }
 
+    pub(crate) fn apply_local_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        let machine_id = self.local_machine_id();
+        let valid_projects: std::collections::HashSet<_> = snapshot
+            .projects
+            .iter()
+            .map(|project| project.id.clone())
+            .collect();
+        let valid_agents: std::collections::HashSet<_> = snapshot
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect();
+        self.workspace.save_current(self.current_workspace_layout());
+        let mut removed = self.workspace.stale_agents_for_machine(
+            &machine_id,
+            &valid_agents,
+            self.last_snapshot
+                .agents
+                .iter()
+                .map(|agent| agent.id.clone()),
+        );
+        removed.extend(
+            self.floating
+                .known_agents(&machine_id)
+                .difference(&valid_agents)
+                .cloned(),
+        );
+        self.last_snapshot = snapshot;
+        // Remove the owner first: cleanup synchronizes the selected floating project.
+        self.reconcile_machine_workspaces(&machine_id, &valid_projects);
+        self.cleanup_removed_agents(&removed.into_iter().collect::<Vec<_>>(), cx);
+    }
+
     pub(crate) fn persist(&self) {
         let remote_configs: Vec<muxlane_store::PersistedRemote> = self
             .remotes
@@ -730,6 +795,7 @@ impl MuxlaneApp {
         app.remote_configs = remote_configs;
         self.workspace
             .write_persisted(&mut app, self.current_workspace_layout());
+        self.floating.write_persisted(&mut app);
         app.sidebar_visible = self.sidebar.visible;
         app.sidebar_width = self.sidebar.width;
         app.shortcut_bindings = self.shortcut_bindings.clone();
@@ -794,7 +860,7 @@ impl MuxlaneApp {
             });
 
         NotificationDraft {
-            focused: self.active.as_ref() == Some(&agent),
+            focused: self.notification_focused_agent() == Some(&agent),
             agent,
             machine_name: details.0,
             project_name: details.1,
@@ -847,6 +913,8 @@ impl MuxlaneApp {
 impl Render for MuxlaneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(ui_px(16.));
+        self.floating.main = Some(window.window_handle());
+        self.schedule_session_windows(cx);
         self.sync_active_terminal_focus(window, cx);
         self.pane_tab_scrolls
             .retain(|pane, _| self.pane_tree.group(pane).is_some());
@@ -862,14 +930,19 @@ impl Render for MuxlaneApp {
         } else {
             self.pane_tree.clone()
         };
-        let grid = div()
-            .relative()
-            .flex()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .bg(rgba(theme.bg0))
-            .child(self.render_pane_node(render_tree, cx));
+        let grid = if self.pane_tree.has_no_tabs() {
+            self.render_detached_placeholder()
+        } else {
+            div()
+                .relative()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .bg(rgba(theme.bg0))
+                .child(self.render_pane_node(render_tree, cx))
+                .into_any_element()
+        };
 
         // ── 根布局：侧栏 + 网格
         let mut root = div()
@@ -955,6 +1028,12 @@ impl Render for MuxlaneApp {
             }))
             .on_action(cx.listener(|this, _: &ToggleTheme, _window, cx| {
                 this.toggle_theme(cx);
+            }))
+            .on_action(cx.listener(|this, _: &DetachAllSessions, _window, cx| {
+                this.detach_all_sessions(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReattachAllSessions, _window, cx| {
+                this.reattach_all_sessions(cx);
             }))
             .on_action(cx.listener(|this, _: &FocusNextPart, window, cx| {
                 if this.settings_open {
@@ -1054,7 +1133,8 @@ impl Render for MuxlaneApp {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _ev, _window, _cx| {
+                cx.listener(|this, _ev, _window, cx| {
+                    cx.notify();
                     this.end_split_drag();
                     if this.sidebar.end_drag() {
                         this.persist();

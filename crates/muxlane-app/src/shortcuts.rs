@@ -309,11 +309,11 @@ mod tests {
             chords,
             [
                 Some("ctrl-w".into()),
+                Some("alt-platform-k".into()),
+                Some("alt-platform-j".into()),
                 Some("alt-platform-up".into()),
-                Some("alt-platform-down".into()),
-                Some("alt-platform-t".into()),
-                Some("alt-platform-r".into()),
-                Some("alt-platform-d".into())
+                Some("alt-platform-right".into()),
+                Some("alt-platform-down".into())
             ]
         );
     }
@@ -354,12 +354,12 @@ mod tests {
     #[test]
     fn configurable_duplicates_and_fixed_conflicts_are_rejected() {
         let bindings = PersistedShortcutBindings {
-            next_tab: Some("platform-alt-up".into()),
+            next_tab: Some("platform-alt-k".into()),
             ..Default::default()
         };
         assert_eq!(
             normalize(&bindings),
-            Err(ShortcutError::Conflict("alt-platform-up".into()))
+            Err(ShortcutError::Conflict("alt-platform-k".into()))
         );
         let bindings = PersistedShortcutBindings {
             next_tab: Some("platform-k".into()),
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn platform_alt_capture_roundtrips_in_any_modifier_order_and_preserves_minus() {
-        for key in ["up", "down", "t", "r", "d", "-"] {
+        for key in ["up", "down", "left", "right", "j", "k", "-"] {
             let source = format!("platform-alt-{key}");
             let expected = format!("alt-platform-{key}");
             let keystroke = Keystroke::parse(&expand_platform_chord(&source)).unwrap();
@@ -417,12 +417,12 @@ mod tests {
         }
         assert_eq!(canonical_chord("ctrl--").unwrap(), "ctrl--");
         let bindings = PersistedShortcutBindings {
-            close_tab: Some("alt-platform-t".into()),
+            close_tab: Some("alt-platform-up".into()),
             ..Default::default()
         };
         assert_eq!(
             normalize(&bindings),
-            Err(ShortcutError::Conflict("alt-platform-t".into()))
+            Err(ShortcutError::Conflict("alt-platform-up".into()))
         );
     }
 
