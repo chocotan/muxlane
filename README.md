@@ -35,8 +35,8 @@
 
 ---
 
-### 3. Tiled 递归窗格布局（Recursive PaneTree）
-- **显式控制，告别意外分屏**：终端标签栏右侧 `＋` 或快捷键 `Platform+Alt+T` 在同 Pane 创建默认终端预设的标签页；`Platform+Alt+R` / `Platform+Alt+D` 在右侧 / 下方新建默认终端。
+### 3. 递归窗格布局（Recursive PaneTree）
+- **显式控制，告别意外分屏**：终端标签栏右侧 `＋` 或快捷键 `Platform+Alt+↑` 在同 Pane 创建默认终端预设的标签页；`Platform+Alt+→` / `Platform+Alt+↓` 在右侧 / 下方新建默认终端。
 - **递归分屏与自适应比例**：
   - 支持水平（Horizontal）与垂直（Vertical）任意层级嵌套分屏；
   - 2px 精密分割线拖拽实时调整比例，自适应视口尺寸，窗格关闭后自动向内折叠父级，布局比例重启持久化保留；
@@ -67,6 +67,7 @@
   - 用户确认后可上传兼容的 Muxlane 二进制并以 `--headless` 启动，具体限制见下文；
   - 离线保留缓存快照和布局以便重连；移除远程机器连接清理本地记录，不发送会话终止请求。删除远程项目或会话则是终止操作。
 - **Agent Hook**：集成 Claude / Codex / OpenCode / Pi 等状态上报与结果通知。可在设置中控制桌面通知与声音，Hook 可用 `MUXLANE_HOOKS=off` 禁用；报告内容取决于各 Agent 的事件支持。
+- **远程已读写回**：查看远端会话的完成/失败结果后，通过 `agent.mark_seen` RPC 真正写回远端服务并随其持久化，本地客户端重启后不会重新提醒；这需要远端 Muxlane 也是支持该能力的版本（`system.hello` 协商），旧版远端会自动降级为仅本次会话内已读。
 
 ---
 
@@ -174,7 +175,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
 # 全工作区单元与集成测试（覆盖 core / term / client / server / store / app）
-cargo test --workspace
+cargo test --workspace -- --test-threads=1
 
 # Linux 打包、安装及 headless socket 冒烟检查
 scripts/release-smoke.sh
@@ -185,7 +186,7 @@ scripts/ui-smoke.sh
 
 UI smoke 面向可操作的 X11 桌面，需要 `wmctrl`、`xdotool`、ImageMagick 的 `import`、Python 3 + Pillow、tmux、Node.js、Fcitx5（含拼音）以及默认 `/usr/bin/zsh`（可用 `MUXLANE_TEST_SHELL` 覆盖）。脚本会切换工作区、注入键鼠和切换输入法，使用临时数据目录并将截图写入 `artifacts/ui-smoke`；请在专用桌面会话中运行，不视作“无损”或 Wayland/macOS 验证。
 
-Floating/Dock 的进程内 GPUI 测试见 [floating_tests.rs](crates/muxlane-app/src/floating_tests.rs)、[dock_navigation_tests.rs](crates/muxlane-app/src/dock_navigation_tests.rs) 与 [native_window_tests.rs](crates/muxlane-app/src/native_window_tests.rs)：使用模拟终端输入，不启动真实 PTY/SSH，不能替代窗口管理器、跨屏与 IME 的真实桌面检查。[ACCEPTANCE.md](ACCEPTANCE.md) 收录分阶段验收记录与待验事项，需按日期和范围阅读，不能视为当前工作区全部功能的验证结论。
+会话弹出/收回的进程内 GPUI 测试见 [floating_tests.rs](crates/muxlane-app/src/floating_tests.rs)，远程 RPC 与运行时的回归见 [remote_operation_tests.rs](crates/muxlane-app/src/remote_operation_tests.rs)，通知已读合并见 [notification_tests.rs](crates/muxlane-app/src/notification_tests.rs)：它们使用模拟终端输入与进程内 server，不启动真实 PTY/SSH，不能替代窗口管理器、跨屏与 IME 的真实桌面检查。`muxlane-app` 的 GPUI 测试建议以 `--test-threads=1` 运行，并行时存在与窗口尺寸相关的既有偶发失败。[ACCEPTANCE.md](ACCEPTANCE.md) 收录分阶段验收记录与待验事项，需按日期和范围阅读，不能视为当前工作区全部功能的验证结论。
 
 ---
 
