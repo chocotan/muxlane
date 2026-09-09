@@ -7,4 +7,4 @@ mod vterm;
 pub use kitty_graphics::{KittyGraphicsScanner, StoredImage};
 pub use replay::ReplayBuffer;
 pub use session::{default_shell_program, LaunchCfg, PtySession, SessionEvent};
-pub use vterm::{RenderCursor, RenderSnapshot, VTerm, VTermModes};
+pub use vterm::{ImageCellRef, RenderCursor, RenderSnapshot, TermSideEffect, VTerm, VTermModes};

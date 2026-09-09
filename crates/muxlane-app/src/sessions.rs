@@ -121,7 +121,10 @@ impl MuxlaneApp {
 
     pub(crate) fn create_remote_term(
         agent: AgentId,
-        terminal: (VTerm, tokio::sync::mpsc::UnboundedReceiver<String>),
+        terminal: (
+            VTerm,
+            tokio::sync::mpsc::UnboundedReceiver<muxlane_term::TermSideEffect>,
+        ),
         remote_input: tokio::sync::mpsc::UnboundedSender<crate::term_view::RemoteTermCommand>,
         font_family: &str,
         theme: Theme,

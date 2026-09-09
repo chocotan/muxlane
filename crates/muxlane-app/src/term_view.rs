@@ -4,12 +4,13 @@ use crate::ui_scale::px as ui_px;
 use gpui::{
     canvas, div, fill, point, prelude::*, rgba, size, App, Bounds, ClipboardEntry, ClipboardItem,
     Context, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle,
-    FontWeight, Hsla, ImageFormat, InputHandler, MouseButton, ParentElement, Pixels, Point, Render,
-    ScrollDelta, ScrollWheelEvent, ShapedLine, Styled, Subscription, Task, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window,
+    FontWeight, Hsla, Image, ImageFormat, InputHandler, MouseButton, ParentElement, Pixels, Point,
+    Render, RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine, Styled, Subscription, Task,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use muxlane_core::model::AgentId;
 use muxlane_term::{PtySession, RenderSnapshot, VTerm};
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,6 +41,43 @@ fn invalidate_cached_geometry(dims: &mut (u16, u16), bounds: &mut Option<Bounds<
 
 fn refresh_snapshot_after_resize(vterm: &VTerm, snapshot: &mut Arc<RenderSnapshot>) {
     *snapshot = vterm.render_snapshot();
+}
+
+/// 把 Kitty 传来的图片字节解成 GPUI 可直接 paint 的 RenderImage（BGRA）。
+/// f=100 走 PNG 解码；f=24/32 是原始 RGB/RGBA 像素，按 s=/v= 尺寸直接拼帧。
+fn decode_kitty_image(
+    stored: &muxlane_term::StoredImage,
+    cx: &App,
+) -> anyhow::Result<Arc<RenderImage>> {
+    match stored.format {
+        100 => Image::from_bytes(ImageFormat::Png, stored.bytes.clone())
+            .to_image_data(cx.svg_renderer()),
+        24 | 32 => {
+            let (Some(width), Some(height)) = (stored.width, stored.height) else {
+                anyhow::bail!("raw pixel image without s=/v= size");
+            };
+            let channels = if stored.format == 24 { 3 } else { 4 };
+            let expected = (width as usize) * (height as usize) * channels;
+            anyhow::ensure!(
+                stored.bytes.len() >= expected,
+                "raw pixel payload too short: {} < {expected}",
+                stored.bytes.len()
+            );
+            // RenderImage 要 BGRA；这里一次性转好，不走 image crate 的重采样。
+            let mut bgra = Vec::with_capacity((width as usize) * (height as usize) * 4);
+            for px in stored.bytes[..expected].chunks_exact(channels) {
+                let a = if channels == 4 { px[3] } else { 255 };
+                bgra.extend_from_slice(&[px[2], px[1], px[0], a]);
+            }
+            let buffer = image::RgbaImage::from_raw(width, height, bgra)
+                .ok_or_else(|| anyhow::anyhow!("RgbaImage::from_raw failed"))?;
+            Ok(Arc::new(RenderImage::new(smallvec::SmallVec::from_elem(
+                image::Frame::new(buffer),
+                1,
+            ))))
+        }
+        other => anyhow::bail!("unsupported kitty image format f={other}"),
+    }
 }
 
 fn osc52_clipboard_allowed(enabled: bool, text: &str) -> bool {
@@ -110,6 +148,10 @@ struct PaintRun {
     cells: usize,
     bg: Hsla,
     selected: bool,
+    /// 非空时这个 run 是一个图片占位符单元格：(已解码的整张图, 整张图摆放范围)。
+    /// image_bounds 比单元格大，用位置偏移标记这个单元格是整张图的哪一块；
+    /// paint_image 会自动根据 bounds∩image_bounds 裁出对应的 UV 子区域。
+    image: Option<(Arc<RenderImage>, Bounds<Pixels>)>,
 }
 
 struct TerminalPaintState {
@@ -134,6 +176,8 @@ struct CachedRunKey {
     italic: bool,
     underline: bool,
     dim: bool,
+    /// (image_id, row, col)；图片占位符 cell 的身份。变了就不能命中缓存（新图可能复用同一个 cell）。
+    image: Option<(u32, u32, u32)>,
 }
 
 struct CachedShapedRow {
@@ -397,6 +441,8 @@ pub struct TermView {
     focus_subscriptions: Option<(Subscription, Subscription, Subscription)>,
     osc52_clipboard_enabled: Arc<AtomicBool>,
     shape_cache: Arc<std::sync::Mutex<ShapeCache>>,
+    /// Kitty 图片解码缓存：image id -> 已解码的 RenderImage，避免每帧重新 decode PNG。
+    kitty_image_cache: Arc<std::sync::Mutex<HashMap<u32, Arc<RenderImage>>>>,
     pending_selection: Option<(i32, usize, bool)>,
     #[cfg(test)]
     renders: std::cell::Cell<usize>,
@@ -475,21 +521,32 @@ impl TermView {
     }
 
     fn clipboard_task(
-        mut clipboard_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+        mut effects_rx: tokio::sync::mpsc::UnboundedReceiver<muxlane_term::TermSideEffect>,
         enabled: Arc<AtomicBool>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |view, cx| {
-            while let Some(text) = clipboard_rx.recv().await {
-                if !osc52_clipboard_allowed(enabled.load(Ordering::Relaxed), &text) {
-                    continue;
-                }
-                let stop = view
-                    .update(cx, move |_view, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                        Self::write_primary(cx, text);
-                    })
-                    .is_err();
+            while let Some(effect) = effects_rx.recv().await {
+                let stop = match effect {
+                    muxlane_term::TermSideEffect::ClipboardStore(text) => {
+                        if !osc52_clipboard_allowed(enabled.load(Ordering::Relaxed), &text) {
+                            continue;
+                        }
+                        view.update(cx, move |_view, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            Self::write_primary(cx, text);
+                        })
+                        .is_err()
+                    }
+                    // 终端对标准查询（光标位置、窗口像素尺寸…）的应答，写回 PTY 给发起查询的程序。
+                    muxlane_term::TermSideEffect::PtyWrite(bytes) => view
+                        .update(cx, move |view, _cx| {
+                            if let Some(sink) = view.input_sink() {
+                                sink.write(&bytes);
+                            }
+                        })
+                        .is_err(),
+                };
                 if stop {
                     break;
                 }
@@ -636,6 +693,7 @@ impl TermView {
             focus_subscriptions: None,
             osc52_clipboard_enabled,
             shape_cache: Arc::new(std::sync::Mutex::new(ShapeCache::default())),
+            kitty_image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             pending_selection: None,
             #[cfg(test)]
             renders: std::cell::Cell::new(0),
@@ -648,7 +706,10 @@ impl TermView {
     /// 远程镜像：P2 客户端把 TermData 喂入同一个 VTerm；输入保持 None（v1 只读）。
     pub fn new_remote(
         agent: AgentId,
-        terminal: (VTerm, tokio::sync::mpsc::UnboundedReceiver<String>),
+        terminal: (
+            VTerm,
+            tokio::sync::mpsc::UnboundedReceiver<muxlane_term::TermSideEffect>,
+        ),
         remote_input: tokio::sync::mpsc::UnboundedSender<RemoteTermCommand>,
         font_family: String,
         theme: Theme,
@@ -682,6 +743,7 @@ impl TermView {
             focus_subscriptions: None,
             osc52_clipboard_enabled,
             shape_cache: Arc::new(std::sync::Mutex::new(ShapeCache::default())),
+            kitty_image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             pending_selection: None,
             #[cfg(test)]
             renders: std::cell::Cell::new(0),
@@ -1158,6 +1220,8 @@ impl Render for TermView {
         let pane_bounds = Arc::clone(&self.last_bounds);
         let cell_size = Arc::clone(&self.cell_size);
         let shape_cache = Arc::clone(&self.shape_cache);
+        let kitty_image_cache = Arc::clone(&self.kitty_image_cache);
+        let kitty_vterm = self.vterm.clone();
         let scrollbar = self.scrollbar_geometry().map(|(_, geometry)| geometry);
 
         div()
@@ -1215,7 +1279,7 @@ impl Render for TermView {
             .bg(rgba(term_theme.bg0))
             .child(
                 canvas(
-                    move |bounds, window, _cx| {
+                    move |bounds, window, cx| {
                         let padding_x = ui_px(TERM_PADDING_X);
                         let padding_y = ui_px(TERM_PADDING_Y);
                         let (inner_width, inner_height) = inner_extent(
@@ -1264,8 +1328,19 @@ impl Render for TermView {
                             if *last != (cols, rows) {
                                 *last = (cols, rows);
                                 vt_resize.resize(cols, rows);
+                                let px_w = (f32::from(measured_cell) * cols as f32) as u16;
+                                let px_h = (f32::from(line_height) * rows as f32) as u16;
+                                // 给 CSI 14t 等窗口像素尺寸查询用的现押几何。
+                                vt_resize.set_window_pixel_geometry(
+                                    cols,
+                                    rows,
+                                    f32::from(measured_cell) as u16,
+                                    f32::from(line_height) as u16,
+                                );
                                 if let Some(writer) = &writer_resize {
-                                    let _ = writer.resize(cols, rows);
+                                    // pixel_width/height 不填就只有 rows/cols，Kitty 图形协议的
+                                    // 客户端（如 kitten icat）会因为拿不到像素尺寸直接拒绝发图。
+                                    let _ = writer.resize(cols, rows, px_w, px_h);
                                 }
                                 if let Some(remote) = &remote_resize {
                                     let _ = remote.send(RemoteTermCommand::Resize(cols, rows));
@@ -1284,6 +1359,46 @@ impl Render for TermView {
                             cache.rows.clear();
                             cache.rows.resize_with(snapshot.rows.len(), || None);
                         }
+                        let resolve_image_run = |image_id: u32,
+                                                       img_row: u32,
+                                                       img_col: u32,
+                                                       cell_origin: Point<Pixels>|
+         -> Option<(Arc<RenderImage>, Bounds<Pixels>)> {
+                            let image = {
+                                let mut guard = kitty_image_cache.lock().ok()?;
+                                match guard.get(&image_id) {
+                                    Some(cached) => cached.clone(),
+                                    None => {
+                                        // 图片数据可能还没传完（分片中）或者根本没发；先不画，等下一帧。
+                                        let stored = kitty_vterm.kitty_image(image_id)?;
+                                        let decoded = match decode_kitty_image(&stored, cx) {
+                                            Ok(decoded) => decoded,
+                                            Err(error) => {
+                                                tracing::warn!(image_id, format = stored.format, %error, "kitty placeholder: decode failed");
+                                                return None;
+                                            }
+                                        };
+                                        guard.insert(image_id, decoded.clone());
+                                        decoded
+                                    }
+                                }
+                            };
+                            let (total_cols, total_rows) = kitty_vterm
+                                .kitty_placement_size(image_id)
+                                .unwrap_or((1, 1));
+                            let image_bounds = Bounds {
+                                origin: point(
+                                    cell_origin.x - measured_cell * img_col as f32,
+                                    cell_origin.y - line_height * img_row as f32,
+                                ),
+                                size: size(
+                                    measured_cell * total_cols.max(1) as f32,
+                                    line_height * total_rows.max(1) as f32,
+                                ),
+                            };
+                            Some((image, image_bounds))
+                        };
+
                         let mut runs = Vec::new();
                         for (row, render_row) in snapshot.rows.iter().enumerate() {
                             let hit = cache.rows[row].as_ref().is_some_and(|cached| {
@@ -1298,6 +1413,8 @@ impl Render for TermView {
                                                 && key.italic == run.style.italic
                                                 && key.underline == run.style.underline
                                                 && key.dim == run.style.dim
+                                                && key.image
+                                                    == run.image.map(|i| (i.image_id, i.row, i.col))
                                         },
                                     )
                             });
@@ -1314,6 +1431,7 @@ impl Render for TermView {
                                         italic: run.style.italic,
                                         underline: run.style.underline,
                                         dim: run.style.dim,
+                                        image: run.image.map(|i| (i.image_id, i.row, i.col)),
                                     })
                                     .collect();
                                 let shaped = render_row
@@ -1366,6 +1484,13 @@ impl Render for TermView {
                             }
                             let cached = cache.rows[row].as_ref().expect("row shaped above");
                             for (run, shaped) in render_row.runs.iter().zip(cached.shaped.iter()) {
+                                let image = run.image.and_then(|img| {
+                                    let cell_origin = point(
+                                        inner.origin.x + measured_cell * run.start_col as f32,
+                                        inner.origin.y + line_height * row as f32,
+                                    );
+                                    resolve_image_run(img.image_id, img.row, img.col, cell_origin)
+                                });
                                 runs.push(PaintRun {
                                     shaped: shaped.clone(),
                                     start_col: run.start_col,
@@ -1378,6 +1503,7 @@ impl Render for TermView {
                                     })
                                     .into(),
                                     selected: run.style.selected,
+                                    image,
                                 });
                             }
                         }
@@ -1422,6 +1548,24 @@ impl Render for TermView {
                                             + state.cell_width * run.start_col as f32,
                                         state.inner.origin.y + state.line_height * run.row as f32,
                                     );
+                                    if let Some((image, image_bounds)) = &run.image {
+                                        let cell_bounds = Bounds {
+                                            origin,
+                                            size: size(
+                                                state.cell_width * run.cells as f32,
+                                                state.line_height,
+                                            ),
+                                        };
+                                        let _ = window.paint_image(
+                                            cell_bounds,
+                                            *image_bounds,
+                                            gpui::Corners::default(),
+                                            image.clone(),
+                                            0,
+                                            false,
+                                        );
+                                        continue;
+                                    }
                                     let bg = if run.selected {
                                         rgba(term_theme.selection()).into()
                                     } else {

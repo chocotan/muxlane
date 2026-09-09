@@ -22,6 +22,9 @@ gpui.workspace = true
 gpui_platform.workspace = true
 muxlane-store = { path = "../muxlane-store" }
 notify-rust = "4"
+# 给 Kitty f=24/32 原始像素帧拼 RenderImage 用；feature 与 gpui 统一后实际不额外编译什么。
+image = { version = "0.25", default-features = false }
+smallvec = "1"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

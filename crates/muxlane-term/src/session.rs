@@ -372,15 +372,18 @@ impl PtySession {
         self.focused.load(Ordering::Relaxed)
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+    /// `pixel_width`/`pixel_height`：整个终端区域的像素尺寸（cols*cell_width, rows*line_height）。
+    /// TIOCGWINSZ 不填这两个字段的话，Kitty 图形协议的客户端（如 `kitten icat`）会直接拒绝发图，
+    /// 因为它无法把像素尺寸换算成格子。
+    pub fn resize(&self, cols: u16, rows: u16, pixel_width: u16, pixel_height: u16) -> Result<()> {
         self.pty_master
             .lock()
             .map_err(|_| anyhow::anyhow!("pty master lock poisoned"))?
             .resize(portable_pty::PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width,
+                pixel_height,
             })?;
         Ok(())
     }
@@ -516,6 +519,9 @@ fn configure_tmux_server_inner(server: &str, config_path: &Path) -> bool {
         ("history-limit", "50000"),
         ("set-clipboard", "external"),
         ("set-titles", "off"),
+        // Kitty 图形协议的 APC 序列靠 tmux passthrough 才能穿过 tmux 到达 muxlane；
+        // 关着的话 tmux 会把图片数据整个吞掉，只剩占位符。
+        ("allow-passthrough", "on"),
     ] {
         let ok = std::process::Command::new("tmux")
             .args(["-L", server, "set-option", "-g", option, value])
@@ -560,6 +566,7 @@ set-option -g xterm-keys on
 set-option -g history-limit 50000
 set-option -g window-size latest
 set-option -g mouse on
+set-option -g allow-passthrough on
 set-option -g set-clipboard external
 set-option -g copy-command \"if command -v pbcopy >/dev/null 2>&1; then pbcopy; elif command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; else cat >/dev/null; fi\"
 set-option -sg escape-time 10

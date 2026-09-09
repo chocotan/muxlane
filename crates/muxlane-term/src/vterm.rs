@@ -1,11 +1,12 @@
 //! VTerm：alacritty_terminal 真彩色网格（本地/镜像共用）
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 
@@ -14,8 +15,21 @@ use crate::kitty_graphics::{KittyGraphicsScanner, StoredImage};
 #[derive(Clone)]
 pub struct VTerm {
     inner: Arc<Mutex<VTermInner>>,
+    /// (cols, rows, cell_width_px, cell_height_px) 打包进一个 u64，给 XTWINOPS 查询（如
+    /// `CSI 14t` 报窗口像素尺寸）现押答。不进锁：写频率低（只在 resize 时），
+    /// 读频率也低（只在程序主动查询时），用 Mutex 不划算。
+    window_size: Arc<AtomicU64>,
     pub cols: u16,
     pub rows: u16,
+}
+
+/// 终端主动产生的副作用：剪贴板写入，或需要回写进 PTY 的字节（光标位置报告、
+/// 窗口像素尺寸查询等标准 xterm 查询/应答协议，alacritty_terminal 自己会解码请求，
+/// 但必须由嵌入方把结果写回 PTY，否则客户端程序（如 `kitten icat`）会一直等超时。
+#[derive(Debug, Clone)]
+pub enum TermSideEffect {
+    ClipboardStore(String),
+    PtyWrite(Vec<u8>),
 }
 
 struct VTermInner {
@@ -82,15 +96,42 @@ fn diacritic_index(c: char) -> Option<u32> {
 
 #[derive(Clone)]
 struct ClipboardBridge {
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::UnboundedSender<TermSideEffect>,
+    window_size: Arc<AtomicU64>,
+}
+
+fn pack_window_size(cols: u16, rows: u16, cell_width: u16, cell_height: u16) -> u64 {
+    ((cols as u64) << 48) | ((rows as u64) << 32) | ((cell_width as u64) << 16) | cell_height as u64
+}
+
+fn unpack_window_size(packed: u64) -> WindowSize {
+    WindowSize {
+        num_cols: (packed >> 48) as u16,
+        num_lines: (packed >> 32) as u16,
+        cell_width: (packed >> 16) as u16,
+        cell_height: packed as u16,
+    }
 }
 
 impl EventListener for ClipboardBridge {
     fn send_event(&self, event: Event) {
-        if let Event::ClipboardStore(_, text) = event {
-            if !text.is_empty() {
-                let _ = self.tx.send(text);
+        match event {
+            Event::ClipboardStore(_, text) if !text.is_empty() => {
+                let _ = self.tx.send(TermSideEffect::ClipboardStore(text));
             }
+            // 光标位置报告、DA1/DA2 设备属性、CSI 8t 字符格尺寸……alacritty_terminal 自己
+            // 组好了应答文本，只需要回写进 PTY。
+            Event::PtyWrite(text) => {
+                let _ = self.tx.send(TermSideEffect::PtyWrite(text.into_bytes()));
+            }
+            // CSI 14t 报窗口像素尺寸：用最近一次 set_cell_pixel_size 写入的尺寸回答。拿不到
+            // 真实像素尺寸的话（pixel_width/height=0）kitten icat 这类工具会直接拒绝发图。
+            Event::TextAreaSizeRequest(formatter) => {
+                let window_size = unpack_window_size(self.window_size.load(Ordering::Relaxed));
+                let text = formatter(window_size);
+                let _ = self.tx.send(TermSideEffect::PtyWrite(text.into_bytes()));
+            }
+            _ => {}
         }
     }
 }
@@ -188,14 +229,27 @@ impl VTerm {
         Self::new_with_clipboard(cols, rows).0
     }
 
-    pub fn new_with_clipboard(cols: u16, rows: u16) -> (Self, mpsc::UnboundedReceiver<String>) {
+    pub fn new_with_clipboard(
+        cols: u16,
+        rows: u16,
+    ) -> (Self, mpsc::UnboundedReceiver<TermSideEffect>) {
         let size = TermDim {
             columns: cols as usize,
             lines: rows as usize,
             scrollback: SCROLLBACK_LINES,
         };
         let (tx, rx) = mpsc::unbounded_channel();
-        let term = Term::new(Default::default(), &size, ClipboardBridge { tx });
+        // 初始像素尺寸用个合理估值（和 term_view 的 FALLBACK_CELL_W/H 同数量级），
+        // 真实字体度量出来后会很快通过 set_cell_pixel_size 更新。
+        let window_size = Arc::new(AtomicU64::new(pack_window_size(cols, rows, 8, 17)));
+        let term = Term::new(
+            Default::default(),
+            &size,
+            ClipboardBridge {
+                tx,
+                window_size: Arc::clone(&window_size),
+            },
+        );
         (
             VTerm {
                 inner: Arc::new(Mutex::new(VTermInner {
@@ -205,11 +259,27 @@ impl VTerm {
                     cached: None,
                     damage: ContentDamage::Full,
                 })),
+                window_size,
                 cols,
                 rows,
             },
             rx,
         )
+    }
+
+    /// 终端区域的实际行列数 + 每个格子的真实像素尺寸（GPUI 字体度量结果），
+    /// 配合 resize 一起调。不调的话 `CSI 14t` 等查询回答的是默认估值，不准确但不会卡住。
+    pub fn set_window_pixel_geometry(
+        &self,
+        cols: u16,
+        rows: u16,
+        cell_width: u16,
+        cell_height: u16,
+    ) {
+        self.window_size.store(
+            pack_window_size(cols, rows, cell_width, cell_height),
+            Ordering::Relaxed,
+        );
     }
 
     fn lock_inner(&self) -> Option<MutexGuard<'_, VTermInner>> {
@@ -449,6 +519,11 @@ impl VTerm {
     /// 取一张已经接收完整的 Kitty 图片（用 Unicode Placeholder 解码出来的 image id 查）。
     pub fn kitty_image(&self, id: u32) -> Option<Arc<StoredImage>> {
         self.lock_inner()?.kitty.image(id)
+    }
+
+    /// 取一张图的虚拟占位网格尺寸（cols, rows），用于把整张图切块。
+    pub fn kitty_placement_size(&self, id: u32) -> Option<(u32, u32)> {
+        self.lock_inner()?.kitty.placement_size(id)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -781,12 +856,48 @@ mod selection_tests {
     use super::*;
 
     #[test]
+    fn cursor_position_report_is_forwarded_as_pty_write() {
+        // CSI 6n 是光标位置报告查询，alacritty_terminal 会自己组好 `ESC[row;colR` 并通过
+        // Event::PtyWrite 回调，之前 ClipboardBridge 直接丢掉了这类事件，导致查询永远等不到回复。
+        let (vterm, mut rx) = VTerm::new_with_clipboard(80, 24);
+        vterm.feed(b"\x1b[6n");
+        let effect = rx.try_recv().expect("cursor position report forwarded");
+        match effect {
+            TermSideEffect::PtyWrite(bytes) => {
+                assert!(bytes.starts_with(b"\x1b["), "got {bytes:?}");
+                assert!(bytes.ends_with(b"R"), "got {bytes:?}");
+            }
+            other => panic!("expected PtyWrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn window_pixel_size_query_uses_set_geometry() {
+        // CSI 14t 报窗口像素尺寸：kitten icat 等 Kitty 图形客户端靠这个查询判断终端能不能显图，
+        // 拿到 0x0 就直接拒绝。
+        let (vterm, mut rx) = VTerm::new_with_clipboard(80, 24);
+        vterm.set_window_pixel_geometry(80, 24, 9, 18);
+        vterm.feed(b"\x1b[14t");
+        let effect = rx.try_recv().expect("window size report forwarded");
+        match effect {
+            TermSideEffect::PtyWrite(bytes) => {
+                // 格式 `ESC[4;height;widtht`，height=24*18=432, width=80*9=720。
+                assert_eq!(bytes, b"\x1b[4;432;720t");
+            }
+            other => panic!("expected PtyWrite, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn osc52_clipboard_store_is_emitted() {
         let (vterm, mut rx) = VTerm::new_with_clipboard(80, 24);
         let payload = muxlane_core::protocol::b64_encode(b"copied-from-tmux");
         vterm.feed(format!("\x1b]52;c;{payload}\x07").as_bytes());
-        let text = rx.try_recv().expect("osc52 clipboard event");
-        assert_eq!(text, "copied-from-tmux");
+        let effect = rx.try_recv().expect("osc52 clipboard event");
+        match effect {
+            TermSideEffect::ClipboardStore(text) => assert_eq!(text, "copied-from-tmux"),
+            other => panic!("expected ClipboardStore, got {other:?}"),
+        }
     }
 
     #[test]

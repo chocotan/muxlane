@@ -3320,11 +3320,12 @@ dependencies = [
 
 [[package]]
 name = "muxlane-app"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "gpui",
  "gpui_platform",
+ "image",
  "muxlane-client",
  "muxlane-core",
  "muxlane-server",
@@ -3333,6 +3334,7 @@ dependencies = [
  "notify-rust",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "tokio",
  "tracing",
@@ -3341,7 +3343,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-client"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3359,7 +3361,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-core"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "base64",
  "hmac",
@@ -3378,7 +3380,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-server"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3396,7 +3398,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-store"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "muxlane-core",
@@ -3407,12 +3409,13 @@ dependencies = [
 
 [[package]]
 name = "muxlane-term"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64",
  "bytes",
+ "flate2",
  "muxlane-core",
  "portable-pty",
  "tokio",

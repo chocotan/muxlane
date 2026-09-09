@@ -310,7 +310,9 @@ impl MuxlaneServer {
         let Some(session) = self.sessions.lock().await.get(&params.agent).cloned() else {
             return Ok(Response::err(req.id, "no_such_agent", params.agent));
         };
-        session.resize(params.cols, params.rows)?;
+        // 远程 RPC 协议目前不携带真实像素尺寸；给个合理估值总比 0x0 强，
+        // 否则 kitten icat 这类客户端会因为拿不到像素尺寸直接拒绝发图。
+        session.resize(params.cols, params.rows, params.cols * 8, params.rows * 17)?;
         Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
     }
 
