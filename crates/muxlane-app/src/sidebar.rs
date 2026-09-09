@@ -1172,9 +1172,13 @@ impl MuxlaneApp {
     ) -> gpui::AnyElement {
         let (unread_count, has_blocked, notifications_open) = self.notifications.read(cx).summary();
         div()
-            .h(ui_px(40.))
+            .min_h(ui_px(40.))
+            .flex_none()
             .px_2()
+            .py_1()
             .flex()
+            .flex_wrap()
+            .justify_between()
             .items_center()
             .gap_1()
             .border_t_1()
@@ -1194,6 +1198,7 @@ impl MuxlaneApp {
                 let label = i18n::text(self.language, key);
                 semantic_button(id, label, theme)
                     .debug_selector(move || id.into())
+                    .flex_none()
                     .w(ui_px(32.))
                     .h(ui_px(32.))
                     .flex()
@@ -1215,6 +1220,10 @@ impl MuxlaneApp {
                     i18n::text(self.language, "sidebar.hide"),
                     theme,
                 )
+                .when(cfg!(test), |button| {
+                    button.debug_selector(|| "sidebar-hide-button".into())
+                })
+                .flex_none()
                 .w(ui_px(32.))
                 .h(ui_px(32.))
                 .flex()
@@ -1229,7 +1238,6 @@ impl MuxlaneApp {
                 }))
                 .child(panel_icon(SIDEBAR_COLLAPSE_ICON, theme.fg1)),
             )
-            .child(div().flex_1())
             .child({
                 let badge_color = if has_blocked {
                     theme.yellow
@@ -1249,7 +1257,11 @@ impl MuxlaneApp {
                     i18n::text(self.language, "sidebar.notifications"),
                     theme,
                 )
+                .when(cfg!(test), |button| {
+                    button.debug_selector(|| "sidebar-notification-button".into())
+                })
                 .relative()
+                .flex_none()
                 .w(ui_px(32.))
                 .h(ui_px(32.))
                 .flex()
@@ -1314,6 +1326,7 @@ impl MuxlaneApp {
                 .when(cfg!(test), |button| {
                     button.debug_selector(|| "ux-open-settings".into())
                 })
+                .flex_none()
                 .w(ui_px(32.))
                 .h(ui_px(32.))
                 .flex()

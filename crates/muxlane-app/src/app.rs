@@ -168,6 +168,8 @@ pub struct MuxlaneApp {
     pub(crate) settings_language_menu: bool,
     pub(crate) settings_terminal_preset_menu: bool,
     pub(crate) settings_scale_menu: bool,
+    pub(crate) settings_scale_input: Entity<TextField>,
+    pub(crate) settings_scale_error: bool,
     pub(crate) shortcut_bindings: muxlane_store::PersistedShortcutBindings,
     pub(crate) shortcut_capture: Option<ShortcutAction>,
     pub(crate) shortcut_capture_subscription: Option<Subscription>,
@@ -597,6 +599,13 @@ impl MuxlaneApp {
             field
         });
 
+        let settings_scale_input = cx.new(|cx| {
+            let mut field = TextField::new("75–200", window, cx);
+            field.set_theme_mode(theme_mode, cx);
+            field.set_text(crate::ui_scale::percent().to_string(), cx);
+            field
+        });
+
         let mut app = MuxlaneApp {
             focus: cx.focus_handle(),
             server,
@@ -624,6 +633,8 @@ impl MuxlaneApp {
             settings_language_menu: false,
             settings_terminal_preset_menu: false,
             settings_scale_menu: false,
+            settings_scale_input,
+            settings_scale_error: false,
             shortcut_bindings: crate::shortcuts::recover_defaults(&persisted.shortcut_bindings),
             shortcut_capture: None,
             shortcut_capture_subscription: None,
@@ -1142,10 +1153,7 @@ impl Render for MuxlaneApp {
             ))
             .on_drag_move::<SidebarDividerDrag>(cx.listener(
                 |this, ev: &gpui::DragMoveEvent<SidebarDividerDrag>, _window, cx| {
-                    if this
-                        .sidebar
-                        .update_drag(f32::from(ev.event.position.x) / crate::ui_scale::factor())
-                    {
+                    if this.sidebar.update_drag(f32::from(ev.event.position.x)) {
                         cx.notify();
                     }
                 },
@@ -1162,10 +1170,7 @@ impl Render for MuxlaneApp {
                 if this.split_drag.is_some() {
                     this.update_split_drag(ev.position, cx);
                 }
-                if this
-                    .sidebar
-                    .update_drag(f32::from(ev.position.x) / crate::ui_scale::factor())
-                {
+                if this.sidebar.update_drag(f32::from(ev.position.x)) {
                     cx.notify();
                 }
             }))
@@ -1191,14 +1196,17 @@ impl Render for MuxlaneApp {
         root = root.child(
             div()
                 .id("sidebar-shell")
+                .when(cfg!(test), |shell| {
+                    shell.debug_selector(|| "ux-sidebar-shell".into())
+                })
                 .relative()
-                .w(ui_px(displayed_sidebar_width))
+                .w(px(displayed_sidebar_width))
                 .h_full()
                 .flex_none()
                 .child(
                     div().size_full().overflow_hidden().child(
                         div()
-                            .w(ui_px(sidebar_width))
+                            .w(px(sidebar_width))
                             .h_full()
                             .flex_none()
                             .flex()
@@ -1224,7 +1232,10 @@ impl Render for MuxlaneApp {
                     .absolute()
                     .top_0()
                     .right_0()
-                    .w(ui_px(SIDEBAR_RAIL_WIDTH))
+                    .when(cfg!(test), |rail| {
+                        rail.debug_selector(|| "ux-sidebar-rail".into())
+                    })
+                    .w(px(SIDEBAR_RAIL_WIDTH))
                     .h_full()
                     .bg(rgba(Theme::with_alpha(theme.line, 0x80)))
                     .hover(|style| style.bg(rgba(Theme::with_alpha(theme.accent, 0x70))))
@@ -1238,9 +1249,7 @@ impl Render for MuxlaneApp {
                                 MouseButton::Left,
                                 cx.listener(
                                     move |this, event: &gpui::MouseDownEvent, _window, cx| {
-                                        this.sidebar.start_drag(
-                                            f32::from(event.position.x) / crate::ui_scale::factor(),
-                                        );
+                                        this.sidebar.start_drag(f32::from(event.position.x));
                                         cx.stop_propagation();
                                         cx.notify();
                                     },
@@ -1266,10 +1275,7 @@ impl Render for MuxlaneApp {
                     if this.split_drag.is_some() {
                         this.update_split_drag(ev.position, cx);
                     }
-                    if this
-                        .sidebar
-                        .update_drag(f32::from(ev.position.x) / crate::ui_scale::factor())
-                    {
+                    if this.sidebar.update_drag(f32::from(ev.position.x)) {
                         cx.notify();
                     }
                 }))

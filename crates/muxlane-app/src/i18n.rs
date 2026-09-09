@@ -510,8 +510,14 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("settings.ui_scale", "界面缩放", "Interface Scale"),
     (
         "settings.ui_scale_help",
-        "调整整个 muxlane 界面的大小",
-        "Scale the entire muxlane interface",
+        "输入 75–200 的整数百分比，按回车或应用；侧栏宽度独立调整",
+        "Enter a whole percentage from 75–200, then press Enter or Apply; sidebar width is independent",
+    ),
+    ("settings.ui_scale_apply", "应用", "Apply"),
+    (
+        "settings.ui_scale_invalid",
+        "请输入 75–200 之间的整数",
+        "Enter a whole number from 75 to 200",
     ),
     (
         "terminal.attaching",

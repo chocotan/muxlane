@@ -152,12 +152,14 @@ fn editor_exit_failure_notifies_the_user() {
         let bin = directory.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let program = bin.join("zed");
-        std::fs::write(&program, "#!/bin/sh\necho 'cannot open display' >&2\nexit 7\n")
-            .unwrap();
+        std::fs::write(
+            &program,
+            "#!/bin/sh\necho 'cannot open display' >&2\nexit 7\n",
+        )
+        .unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-                .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let launchers = crate::editors::detect_with_for_test(&bin, directory.path());
         cx.update(|cx| {
@@ -204,7 +206,8 @@ fn project_menu_offers_only_detected_local_editors() {
             std::fs::create_dir(&project_path).unwrap();
             cx.update(|cx| {
                 view.update(cx, |app, cx| {
-                    app.local_editors = crate::editors::detect_with_for_test(&bin, directory.path());
+                    app.local_editors =
+                        crate::editors::detect_with_for_test(&bin, directory.path());
                     assert_eq!(app.local_editors.len(), 1);
                     app.project_dialog = true;
                     app.submit_local_project(project_path.display().to_string(), false, cx);

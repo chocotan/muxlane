@@ -169,11 +169,18 @@ fn detect_with(
             // and follows IDE upgrades, unlike older hand-written PATH wrappers.
             let mut candidates: Vec<PathBuf> = home
                 .into_iter()
-                .flat_map(|home| editor.home_binaries().iter().map(move |path| home.join(path)))
+                .flat_map(|home| {
+                    editor
+                        .home_binaries()
+                        .iter()
+                        .map(move |path| home.join(path))
+                })
                 .collect();
-            candidates.extend(editor.commands().iter().flat_map(|command| {
-                std::env::split_paths(path).map(move |dir| dir.join(command))
-            }));
+            candidates.extend(
+                editor.commands().iter().flat_map(|command| {
+                    std::env::split_paths(path).map(move |dir| dir.join(command))
+                }),
+            );
             for bundle in editor.bundle_binaries() {
                 candidates.push(PathBuf::from(bundle));
                 if let Some(home) = home {
@@ -267,8 +274,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("zed");
         executable(&program);
-        std::fs::write(&program, "#!/bin/sh\necho 'cannot open display' >&2\nexit 7\n")
-            .unwrap();
+        std::fs::write(
+            &program,
+            "#!/bin/sh\necho 'cannot open display' >&2\nexit 7\n",
+        )
+        .unwrap();
         let launcher = EditorLauncher {
             editor: Editor::Zed,
             program: program.clone(),
@@ -294,7 +304,10 @@ mod tests {
         executable(&bin.join("idea"));
         let path = std::env::join_paths([&bin]).unwrap();
         let found = detect_with(&path, Some(directory.path()), &[]);
-        let idea = found.iter().find(|item| item.editor == Editor::Idea).unwrap();
+        let idea = found
+            .iter()
+            .find(|item| item.editor == Editor::Idea)
+            .unwrap();
         assert_eq!(idea.program, toolbox);
         assert_eq!(
             idea.command(Path::new("/tmp/project with spaces"))
@@ -309,7 +322,10 @@ mod tests {
             .join("Applications/IntelliJ IDEA.app/Contents/MacOS/idea");
         executable(&bundle);
         let found = detect_with(std::ffi::OsStr::new(""), Some(directory.path()), &[]);
-        let idea = found.iter().find(|item| item.editor == Editor::Idea).unwrap();
+        let idea = found
+            .iter()
+            .find(|item| item.editor == Editor::Idea)
+            .unwrap();
         assert_eq!(idea.program, bundle);
         std::fs::remove_file(bundle).unwrap();
 
@@ -319,7 +335,10 @@ mod tests {
                 Some(directory.path()),
                 &[(*id).into()],
             );
-            let idea = found.iter().find(|item| item.editor == Editor::Idea).unwrap();
+            let idea = found
+                .iter()
+                .find(|item| item.editor == Editor::Idea)
+                .unwrap();
             let command = idea.command(Path::new("/tmp/project with spaces"));
             assert_eq!(command.get_program(), "flatpak");
             assert_eq!(

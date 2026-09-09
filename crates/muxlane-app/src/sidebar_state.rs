@@ -2,7 +2,7 @@
 use std::time::{Duration, Instant};
 
 pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 230.0;
-pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.0;
+pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 pub(crate) const MAX_SIDEBAR_WIDTH: f32 = 480.0;
 pub(crate) const SIDEBAR_RAIL_WIDTH: f32 = 5.0;
 
@@ -27,6 +27,7 @@ pub(crate) struct SidebarTransition {
 pub(crate) struct SidebarState {
     /// Persisted visibility target. The panel remains mounted while transitioning.
     pub(crate) visible: bool,
+    /// Window logical pixels, independent of interface content scaling.
     pub(crate) width: f32,
     pub(crate) drag: Option<SidebarDrag>,
     pub(crate) reveal_progress: f32,

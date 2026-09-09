@@ -6,8 +6,8 @@ use crate::theme::{Theme, ThemeMode};
 use crate::ui_scale::px as ui_px;
 use crate::widgets::semantic_button;
 use gpui::{
-    deferred, div, prelude::*, relative, rgba, Context, Div, MouseButton, ParentElement, Stateful,
-    Styled, Window,
+    deferred, div, prelude::*, relative, rgba, Context, Div, Focusable, MouseButton, ParentElement,
+    Stateful, Styled, Window,
 };
 
 pub(crate) const FONT_FAMILIES: &[&str] = &[
@@ -154,6 +154,10 @@ impl MuxlaneApp {
         }
         self.settings_focus.previous = window.focused(cx).map(|focus| focus.downgrade());
         self.settings_open = true;
+        self.settings_scale_input.update(cx, |input, cx| {
+            input.set_text(crate::ui_scale::percent().to_string(), cx);
+        });
+        self.settings_scale_error = false;
         self.palette_open = false;
         cx.notify();
     }
@@ -183,6 +187,8 @@ impl MuxlaneApp {
         self.notifications.update(cx, |center, cx| {
             center.set_appearance(mode, self.language, cx)
         });
+        self.settings_scale_input
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.palette_input
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.connect_input
@@ -235,8 +241,27 @@ impl MuxlaneApp {
         cx.notify();
     }
 
+    pub(crate) fn apply_custom_ui_scale(&mut self, cx: &mut Context<Self>) {
+        let text = self.settings_scale_input.read(cx).text();
+        if let Some(percent) = crate::ui_scale::parse_percent(&text) {
+            self.set_ui_scale(percent, cx);
+        } else {
+            self.settings_scale_error = true;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ui_scale_for_test(&mut self, percent: u32, cx: &mut Context<Self>) {
+        self.set_ui_scale(percent, cx);
+    }
+
     fn set_ui_scale(&mut self, percent: u32, cx: &mut Context<Self>) {
         crate::ui_scale::set_percent(percent);
+        self.settings_scale_input.update(cx, |input, cx| {
+            input.set_text(crate::ui_scale::percent().to_string(), cx);
+        });
+        self.settings_scale_error = false;
         self.dismiss_settings_menus();
         for term in self.terms.values() {
             term.update(cx, |term, cx| term.refresh_ui_scale(cx));
@@ -846,6 +871,9 @@ impl MuxlaneApp {
                 .relative()
                 .child(
                     semantic_button("settings-scale-select", format!("{current_scale}%"), theme)
+                        .when(cfg!(test), |button| {
+                            button.debug_selector(|| "ux-scale-select".into())
+                        })
                         .track_focus(&self.settings_focus.control("settings-scale-select", cx))
                         .w(ui_px(180.))
                         .h(ui_px(28.))
@@ -918,6 +946,11 @@ impl MuxlaneApp {
                                                 format!("{percent}%"),
                                                 theme,
                                             )
+                                            .when(cfg!(test), |button| {
+                                                button.debug_selector(move || {
+                                                    format!("ux-scale-option-{percent}").into()
+                                                })
+                                            })
                                             .track_focus(&self.settings_focus.control(
                                                 format!("settings-scale-option-{percent}"),
                                                 cx,
@@ -949,6 +982,72 @@ impl MuxlaneApp {
                     )
                 })
         };
+
+        let input_focus = self.settings_scale_input.focus_handle(cx);
+        self.settings_focus.order.push(input_focus);
+        let apply_label = i18n::text(self.language, "settings.ui_scale_apply");
+        let scale_select = div()
+            .w(ui_px(180.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(scale_select)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "enter"
+                            && this
+                                .settings_scale_input
+                                .focus_handle(cx)
+                                .is_focused(window)
+                        {
+                            this.apply_custom_ui_scale(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .id("settings-scale-input")
+                            .when(cfg!(test), |input| {
+                                input.debug_selector(|| "ux-scale-input".into())
+                            })
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(self.settings_scale_input.clone()),
+                    )
+                    .child(div().text_size(ui_px(11.)).child("%"))
+                    .child(
+                        semantic_button("settings-scale-apply", apply_label, theme)
+                            .when(cfg!(test), |button| {
+                                button.debug_selector(|| "ux-scale-apply".into())
+                            })
+                            .track_focus(&self.settings_focus.control("settings-scale-apply", cx))
+                            .h(ui_px(34.))
+                            .px_2()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .text_size(ui_px(11.))
+                            .border_1()
+                            .border_color(rgba(theme.line))
+                            .bg(rgba(theme.bg0))
+                            .hover(|style| style.bg(rgba(theme.bg2)))
+                            .on_click(cx.listener(|this, _, _, cx| this.apply_custom_ui_scale(cx)))
+                            .child(apply_label),
+                    ),
+            )
+            .when(self.settings_scale_error, |control| {
+                control.child(
+                    div()
+                        .text_size(ui_px(10.))
+                        .text_color(rgba(theme.red))
+                        .child(i18n::text(self.language, "settings.ui_scale_invalid")),
+                )
+            });
 
         let language_select = div()
             .relative()

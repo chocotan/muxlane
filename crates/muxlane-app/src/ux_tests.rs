@@ -928,3 +928,95 @@ fn settings_tab_and_f6_cycle_locally_and_restore_focus() {
         assert!(!cx.update(|cx| view.read(cx).settings_open));
     });
 }
+
+#[test]
+fn sidebar_width_and_custom_scale_are_independent() {
+    with_app(|cx, window, view| {
+        let previous = crate::ui_scale::percent();
+        cx.update(|cx| {
+            view.update(cx, |app, cx| {
+                app.sidebar.start_drag(app.sidebar.width);
+                assert!(app.sidebar.update_drag(0.0));
+                assert!(app.sidebar.end_drag());
+                assert_eq!(app.sidebar.width, crate::sidebar_state::MIN_SIDEBAR_WIDTH);
+                cx.notify();
+            });
+        });
+        draw(cx, window);
+        let mut visual = gpui::VisualTestContext::from_window(window, cx);
+        let width_at_100 = visual.debug_bounds("ux-sidebar-shell").unwrap().size.width;
+        assert_eq!(width_at_100, px(crate::sidebar_state::MIN_SIDEBAR_WIDTH));
+        assert_eq!(
+            visual.debug_bounds("ux-sidebar-rail").unwrap().size.width,
+            px(crate::sidebar_state::SIDEBAR_RAIL_WIDTH)
+        );
+        for selector in [
+            "ux-open-settings",
+            "sidebar-hide-button",
+            "sidebar-notification-button",
+        ] {
+            let button = visual.debug_bounds(selector).unwrap();
+            assert!(
+                button.right() <= width_at_100 + px(0.5),
+                "{selector} overflowed"
+            );
+        }
+
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.open_settings(window, cx);
+                app.settings_page = crate::settings::SettingsPage::Appearance;
+                app.settings_scale_input
+                    .update(cx, |input, cx| input.set_text("abc", cx));
+                app.apply_custom_ui_scale(cx);
+                assert!(app.settings_scale_error);
+                assert_eq!(crate::ui_scale::percent(), previous);
+                app.settings_scale_input
+                    .update(cx, |input, cx| input.set_text("187%", cx));
+                app.apply_custom_ui_scale(cx);
+                assert!(!app.settings_scale_error);
+                assert_eq!(app.settings_scale_input.read(cx).text(), "187");
+            });
+        })
+        .unwrap();
+        assert_eq!(crate::ui_scale::percent(), 187);
+        draw(cx, window);
+        let mut visual = gpui::VisualTestContext::from_window(window, cx);
+        assert_eq!(
+            visual.debug_bounds("ux-sidebar-shell").unwrap().size.width,
+            width_at_100,
+            "sidebar width must not follow the interface scale"
+        );
+        let select_width = visual.debug_bounds("ux-scale-select").unwrap().size.width;
+        assert!(
+            (select_width - ui_px(180.)).abs() <= px(1.),
+            "scale select must follow the interface scale: {select_width:?}"
+        );
+        for selector in ["ux-scale-input", "ux-scale-apply"] {
+            assert!(
+                visual.debug_bounds(selector).is_some(),
+                "{selector} missing"
+            );
+        }
+
+        cx.update(|cx| {
+            view.update(cx, |app, cx| {
+                app.sidebar.start_drag(app.sidebar.width);
+                assert!(app.sidebar.update_drag(app.sidebar.width + 100.0));
+                assert!(app.sidebar.end_drag());
+                assert_eq!(
+                    app.sidebar.width,
+                    crate::sidebar_state::MIN_SIDEBAR_WIDTH + 100.0
+                );
+                cx.notify();
+            });
+        });
+        draw(cx, window);
+        let mut visual = gpui::VisualTestContext::from_window(window, cx);
+        assert_eq!(
+            visual.debug_bounds("ux-sidebar-shell").unwrap().size.width,
+            px(crate::sidebar_state::MIN_SIDEBAR_WIDTH + 100.0)
+        );
+        cx.update(|cx| view.update(cx, |app, cx| app.set_ui_scale_for_test(previous, cx)));
+    });
+}
