@@ -6,7 +6,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 
@@ -19,6 +19,7 @@ pub struct VTerm {
     /// `CSI 14t` 报窗口像素尺寸）现押答。不进锁：写频率低（只在 resize 时），
     /// 读频率也低（只在程序主动查询时），用 Mutex 不划算。
     window_size: Arc<AtomicU64>,
+    silent: Arc<AtomicBool>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -98,6 +99,8 @@ fn diacritic_index(c: char) -> Option<u32> {
 struct ClipboardBridge {
     tx: mpsc::UnboundedSender<TermSideEffect>,
     window_size: Arc<AtomicU64>,
+    /// 喂历史回放时置位：终端查询的应答不能再写回 PTY（当时已经答过了）。
+    silent: Arc<AtomicBool>,
 }
 
 fn pack_window_size(cols: u16, rows: u16, cell_width: u16, cell_height: u16) -> u64 {
@@ -121,12 +124,12 @@ impl EventListener for ClipboardBridge {
             }
             // 光标位置报告、DA1/DA2 设备属性、CSI 8t 字符格尺寸……alacritty_terminal 自己
             // 组好了应答文本，只需要回写进 PTY。
-            Event::PtyWrite(text) => {
+            Event::PtyWrite(text) if !self.silent.load(Ordering::Relaxed) => {
                 let _ = self.tx.send(TermSideEffect::PtyWrite(text.into_bytes()));
             }
             // CSI 14t 报窗口像素尺寸：用最近一次 set_cell_pixel_size 写入的尺寸回答。拿不到
             // 真实像素尺寸的话（pixel_width/height=0）kitten icat 这类工具会直接拒绝发图。
-            Event::TextAreaSizeRequest(formatter) => {
+            Event::TextAreaSizeRequest(formatter) if !self.silent.load(Ordering::Relaxed) => {
                 let window_size = unpack_window_size(self.window_size.load(Ordering::Relaxed));
                 let text = formatter(window_size);
                 let _ = self.tx.send(TermSideEffect::PtyWrite(text.into_bytes()));
@@ -162,6 +165,8 @@ pub struct RenderStyle {
     pub underline: bool,
     pub dim: bool,
     pub selected: bool,
+    /// cell 带 INVERSE 标志（fg/bg 已互换）。tmux copy-mode 的选区用这个表示。
+    pub inverse: bool,
 }
 
 /// 占位符 cell 指向的图片子区域（Kitty Unicode Placeholder 协议解码结果）。
@@ -242,12 +247,14 @@ impl VTerm {
         // 初始像素尺寸用个合理估值（和 term_view 的 FALLBACK_CELL_W/H 同数量级），
         // 真实字体度量出来后会很快通过 set_cell_pixel_size 更新。
         let window_size = Arc::new(AtomicU64::new(pack_window_size(cols, rows, 8, 17)));
+        let silent = Arc::new(AtomicBool::new(false));
         let term = Term::new(
             Default::default(),
             &size,
             ClipboardBridge {
                 tx,
                 window_size: Arc::clone(&window_size),
+                silent: Arc::clone(&silent),
             },
         );
         (
@@ -260,11 +267,21 @@ impl VTerm {
                     damage: ContentDamage::Full,
                 })),
                 window_size,
+                silent,
                 cols,
                 rows,
             },
             rx,
         )
+    }
+
+    /// 喂历史回放字节：和 feed 一样解析，但不把终端查询（CSI 6n / 14t / DA…）的应答写回 PTY。
+    /// 回放里的查询在它第一次被输出时就已经回答过了；再答一次会变成一串垃圾字符落进
+    /// 前台程序（比如 pi 的输入框里冒出 `?6c>0;2600;1c8;32;120t4;544;960t`）。
+    pub fn feed_silent(&self, data: &[u8]) {
+        self.silent.store(true, Ordering::Relaxed);
+        self.feed(data);
+        self.silent.store(false, Ordering::Relaxed);
     }
 
     /// 终端区域的实际行列数 + 每个格子的真实像素尺寸（GPUI 字体度量结果），
@@ -684,6 +701,7 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
             selected: selection_range.as_ref().is_some_and(|selection| {
                 selection.contains(Point::new(Line(buffer_line), Column(col)))
             }),
+            inverse: cell.flags.contains(Flags::INVERSE),
         };
         let ch = if cell.flags.contains(Flags::HIDDEN) {
             ' '
@@ -692,7 +710,10 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
         };
 
         if ch == KITTY_PLACEHOLDER {
-            if let Some(image_ref) = decode_placeholder(fg, cell.zerowidth(), &mut prev_placeholder)
+            // image id 编码在 cell 真实的前景色里；tmux 选区/反显用的是 INVERSE 标志，
+            // 上面已经把 fg/bg 换了位，这里必须用 cell.fg 而不是换位后的 fg。
+            if let Some(image_ref) =
+                decode_placeholder(cell.fg, cell.zerowidth(), &mut prev_placeholder)
             {
                 if let Some(r) = current.take() {
                     runs.push(r);
@@ -886,6 +907,18 @@ mod selection_tests {
             }
             other => panic!("expected PtyWrite, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn feed_silent_parses_but_does_not_answer_queries() {
+        // 历史回放里的 CSI 6n 不能再写回 PTY，否则应答会变成键盘输入落进前台程序。
+        let (vterm, mut rx) = VTerm::new_with_clipboard(80, 24);
+        vterm.feed_silent(b"hello\x1b[6n\x1b[14t");
+        assert!(rx.try_recv().is_err(), "silent feed must not emit PtyWrite");
+        assert_eq!(vterm.line_text(0).unwrap().trim_end(), "hello");
+        // 之后的正常 feed 恢复应答。
+        vterm.feed(b"\x1b[6n");
+        assert!(matches!(rx.try_recv(), Ok(TermSideEffect::PtyWrite(_))));
     }
 
     #[test]
@@ -1084,5 +1117,24 @@ mod kitty_placeholder_tests {
         vterm.feed(b"hello world\r\n");
         let snap = vterm.render_snapshot();
         assert!(snap.rows[0].runs.iter().all(|r| r.image.is_none()));
+    }
+
+    /// tmux copy-mode 选中用 SGR 7（INVERSE）反显，fg/bg 互换后 image id 不能丢。
+    #[test]
+    fn inverse_video_keeps_placeholder_image_id() {
+        let vterm = VTerm::new(80, 24);
+        let line = format!(
+            "\x1b[7m\x1b[38;5;42m{}\x1b[0m\r\n",
+            placeholder(&['\u{0305}', '\u{0305}']),
+        );
+        vterm.feed(line.as_bytes());
+        let snap = vterm.render_snapshot();
+        let run = snap.rows[0]
+            .runs
+            .iter()
+            .find(|r| r.image.is_some())
+            .expect("still an image run");
+        assert_eq!(run.image.unwrap().image_id, 42);
+        assert!(run.style.inverse);
     }
 }

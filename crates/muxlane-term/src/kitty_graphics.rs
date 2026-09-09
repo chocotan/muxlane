@@ -41,6 +41,8 @@ enum ScanState {
     Esc,
     Apc,
     ApcEsc,
+    /// APC 中间插进来了一段其他转义序列（CSI/OSC/DCS），收完原样透传，再回到 Apc。
+    ApcInterleaved(u8),
 }
 
 /// 有状态的扫描器：字节可以跨多次 `process()` 调用被截断（PTY 读取粒度不可控），
@@ -48,6 +50,7 @@ enum ScanState {
 pub struct KittyGraphicsScanner {
     state: ScanState,
     apc_buf: Vec<u8>,
+    interleave_buf: Vec<u8>,
     pending: HashMap<u32, PendingImage>,
     /// 分片传输（`m=1`）时，后续分片可能不带 `i=`，要记住“当前在传哪张图”。
     current_id: Option<u32>,
@@ -67,6 +70,7 @@ impl KittyGraphicsScanner {
         Self {
             state: ScanState::Normal,
             apc_buf: Vec::new(),
+            interleave_buf: Vec::new(),
             pending: HashMap::new(),
             current_id: None,
             images: HashMap::new(),
@@ -111,9 +115,38 @@ impl KittyGraphicsScanner {
                         self.handle_apc();
                         self.state = ScanState::Normal;
                     } else {
-                        // 不是 ST 终止符：ESC 是 APC 数据里的字面字节（极少见），继续收集。
-                        self.apc_buf.push(0x1b);
-                        self.apc_buf.push(b);
+                        // 不是 ST 终止符：APC 里突然出现另一个转义序列。这在 tmux 里会发生：
+                        // 上层应用（pi TUI）的光标移动/SGR 被 tmux 与 passthrough 的图片数据交错输出。
+                        // 把这段非 APC 内容原样透传给 vte（否则它进 base64 会把整张图弄坏），
+                        // APC 本身继续收集。
+                        if b == b'[' || b == b']' || b == b'P' {
+                            self.state = ScanState::ApcInterleaved(b);
+                            self.interleave_buf.clear();
+                            self.interleave_buf.push(0x1b);
+                            self.interleave_buf.push(b);
+                        } else {
+                            self.apc_buf.push(0x1b);
+                            self.apc_buf.push(b);
+                            self.state = ScanState::Apc;
+                        }
+                    }
+                }
+                ScanState::ApcInterleaved(kind) => {
+                    self.interleave_buf.push(b);
+                    let done = match kind {
+                        // CSI：参数/中间字节 0x20..=0x3F，终止字节 0x40..=0x7E。
+                        b'[' => (0x40..=0x7e).contains(&b),
+                        // OSC / DCS：BEL 或 ST（ESC \）终止。ESC 先记下，下一字节再判。
+                        _ => {
+                            b == 0x07
+                                || (b == b'\\'
+                                    && self.interleave_buf.len() >= 2
+                                    && self.interleave_buf[self.interleave_buf.len() - 2] == 0x1b)
+                        }
+                    };
+                    if done {
+                        out.extend_from_slice(&self.interleave_buf);
+                        self.interleave_buf.clear();
                         self.state = ScanState::Apc;
                     }
                 }
@@ -366,6 +399,24 @@ mod tests {
         // 剔掉 = 后重新按连续流解码：“hello” 5 字节不是 3 的倍数，所以 a 的最后一个字符与 b
         // 的前几个字符会被重新分组，结果不等于直接拼接；这里只断言不报错且有输出。
         assert!(!image.bytes.is_empty());
+    }
+
+    #[test]
+    fn csi_interleaved_inside_apc_is_passed_through_not_swallowed() {
+        // tmux 会把上层 TUI 的光标移动/SGR 插到 passthrough 的图片数据中间。
+        let mut scanner = KittyGraphicsScanner::new();
+        let payload =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"hello world!");
+        let (a, b) = payload.split_at(6);
+        let mut input = format!("\x1b_Ga=T,f=100,i=3;{a}").into_bytes();
+        input.extend_from_slice(b"\x1b[12;5H\x1b[0m"); // 插进来的 CSI
+        input.extend_from_slice(format!("{b}\x1b\\tail").as_bytes());
+        let out = scanner.process(&input);
+        assert_eq!(
+            out, b"\x1b[12;5H\x1b[0mtail",
+            "CSI 必须透传，APC 必须被摘掉"
+        );
+        assert_eq!(scanner.image(3).unwrap().bytes, b"hello world!");
     }
 
     #[test]

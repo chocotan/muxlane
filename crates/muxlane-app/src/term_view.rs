@@ -50,8 +50,12 @@ fn decode_kitty_image(
     cx: &App,
 ) -> anyhow::Result<Arc<RenderImage>> {
     match stored.format {
-        100 => Image::from_bytes(ImageFormat::Png, stored.bytes.clone())
-            .to_image_data(cx.svg_renderer()),
+        // f=100 名义上是 PNG，但 muxlane 自带的 pi 扩展会把 JPEG/WebP/GIF 原样发过来（不构建依赖 sharp、
+        // 不在 JS 里转码）；按 magic bytes 分辨，交给 gpui 内置的 image 解码器。
+        100 => {
+            let format = sniff_image_format(&stored.bytes).unwrap_or(ImageFormat::Png);
+            Image::from_bytes(format, stored.bytes.clone()).to_image_data(cx.svg_renderer())
+        }
         24 | 32 => {
             let (Some(width), Some(height)) = (stored.width, stored.height) else {
                 anyhow::bail!("raw pixel image without s=/v= size");
@@ -77,6 +81,22 @@ fn decode_kitty_image(
             ))))
         }
         other => anyhow::bail!("unsupported kitty image format f={other}"),
+    }
+}
+
+fn sniff_image_format(bytes: &[u8]) -> Option<ImageFormat> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(ImageFormat::Png)
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some(ImageFormat::Jpeg)
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(ImageFormat::Webp)
+    } else if bytes.starts_with(b"GIF8") {
+        Some(ImageFormat::Gif)
+    } else if bytes.starts_with(b"BM") {
+        Some(ImageFormat::Bmp)
+    } else {
+        None
     }
 }
 
@@ -148,6 +168,9 @@ struct PaintRun {
     cells: usize,
     bg: Hsla,
     selected: bool,
+    /// cell 带 INVERSE（tmux copy-mode 选区就是这么表示的）。普通文字已经在 vterm 里换过 fg/bg，
+    /// 图片格子没有字形可换，靠这个标志叠一层选区色。
+    inverse: bool,
     /// 非空时这个 run 是一个图片占位符单元格：(已解码的整张图, 整张图摆放范围)。
     /// image_bounds 比单元格大，用位置偏移标记这个单元格是整张图的哪一块；
     /// paint_image 会自动根据 bounds∩image_bounds 裁出对应的 UV 子区域。
@@ -568,7 +591,9 @@ impl TermView {
         let clipboard =
             Self::clipboard_task(clipboard_rx, Arc::clone(&osc52_clipboard_enabled), cx);
         let (replay, mut rx) = session.subscribe();
-        vterm.feed(&replay);
+        // replay 是历史字节，里面的终端查询（CSI 6n / 14t / DA…）当时已经回答过了；重新喂一遍时
+        // 必须静默，否则会第二次把应答写进 PTY，当成键盘输入落到前台程序的输入框里。
+        vterm.feed_silent(&replay);
         let vterm_for_task = vterm.clone();
         let session_for_task = Arc::clone(&session);
         let drain = cx.spawn(async move |view, cx| {
@@ -588,7 +613,7 @@ impl TermView {
                         cx.background_executor()
                             .spawn(async move {
                                 vterm.feed(b"\x1bc");
-                                vterm.feed(&snapshot);
+                                vterm.feed_silent(&snapshot);
                             })
                             .await;
                         last_feed = std::time::Instant::now();
@@ -648,7 +673,7 @@ impl TermView {
                     cx.background_executor()
                         .spawn(async move {
                             vterm.feed(b"\x1bc");
-                            vterm.feed(&snapshot);
+                            vterm.feed_silent(&snapshot);
                         })
                         .await;
                     last_feed = std::time::Instant::now();
@@ -1370,6 +1395,7 @@ impl Render for TermView {
                                     Some(cached) => cached.clone(),
                                     None => {
                                         // 图片数据可能还没传完（分片中）或者根本没发；先不画，等下一帧。
+                                        // 图片数据可能还没传完（分片中）或者根本没发；先不画，等下一帧。
                                         let stored = kitty_vterm.kitty_image(image_id)?;
                                         let decoded = match decode_kitty_image(&stored, cx) {
                                             Ok(decoded) => decoded,
@@ -1503,6 +1529,7 @@ impl Render for TermView {
                                     })
                                     .into(),
                                     selected: run.style.selected,
+                                    inverse: run.style.inverse,
                                     image,
                                 });
                             }
@@ -1564,6 +1591,12 @@ impl Render for TermView {
                                             0,
                                             false,
                                         );
+                                        // 选中的图片格子：在图上盖一层半透明选区色，而不是退化成画字形。
+                                        if run.selected || run.inverse {
+                                            let mut tint = rgba(term_theme.selection());
+                                            tint.a = 0.45;
+                                            window.paint_quad(fill(cell_bounds, tint));
+                                        }
                                         continue;
                                     }
                                     let bg = if run.selected {

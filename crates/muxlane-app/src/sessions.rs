@@ -296,7 +296,8 @@ impl MuxlaneApp {
                             match update {
                                 muxlane_client::TermUpdate::Resync(bytes) => {
                                     vterm3.feed(b"\x1bc");
-                                    vterm3.feed(&bytes);
+                                    // 历史回放，里面的终端查询早已被回答过，不能再答一次。
+                                    vterm3.feed_silent(&bytes);
                                 }
                                 muxlane_client::TermUpdate::Data(bytes) => vterm3.feed(&bytes),
                             }

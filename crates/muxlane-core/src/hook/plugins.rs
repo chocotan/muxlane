@@ -18,6 +18,7 @@ pub const OPENCODE_PLUGIN: &str = concat!(
 /// Pi extension：基于 pi-wechat-notifier 模式支持待确认(ask_user)、Subagent 状态区分及异常捕获。
 pub const PI_EXTENSION: &str = concat!(
     include_str!("../../hooks/shared-prelude.js"),
+    include_str!("../../hooks/pi-images.js"),
     include_str!("../../hooks/pi-extension.js")
 );
 

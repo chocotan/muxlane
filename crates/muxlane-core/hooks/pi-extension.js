@@ -37,6 +37,7 @@ export function shouldIgnoreRun(ctx) {
 }
 
 export default function (pi) {
+  registerInlineImages(pi)
   let latestAssistant = ""
   const seenAskUserCalls = new Set()
   let doneReported = false

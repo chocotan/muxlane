@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-/// 回放缓冲 512KB
-const REPLAY_CAP: usize = 512 * 1024;
+/// 回放缓冲 4MB。一张 Kitty 图片 base64 后 ~600KB，512KB 会把图片数据截断，
+/// 重连/新 tab 时只剩占位符没像素。4MB 够放几张图；再大的历史让 tmux 自己兜底。
+const REPLAY_CAP: usize = 4 * 1024 * 1024;
 /// broadcast channel 容量（慢订阅者丢最旧帧）
 const BROADCAST_CAP: usize = 256;
 
@@ -148,6 +149,13 @@ impl PtySession {
             }
             cfg
         };
+        // 告诉 muxlane 自带的 pi 扩展：这个 pane 由 muxlane 渲染，走 Kitty Unicode Placeholder
+        // 发图（tmux passthrough 已由 configure_tmux_server 打开）。必须进 cfg.env 才能穿过
+        // tmux 到达 pane 里的进程（`new-session -e` + `set-environment`）。
+        let mut cfg = cfg;
+        if !cfg.env.iter().any(|(k, _)| k == "MUXLANE_KITTY_GRAPHICS") {
+            cfg.env.push(("MUXLANE_KITTY_GRAPHICS".into(), "1".into()));
+        }
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(portable_pty::PtySize {
