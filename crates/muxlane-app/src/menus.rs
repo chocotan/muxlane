@@ -410,13 +410,21 @@ impl MuxlaneApp {
         path: &std::path::Path,
         cx: &mut Context<Self>,
     ) {
-        let message = match launcher.command(path).spawn() {
-            Ok(_) => return,
-            Err(error) => i18n::text(self.language, "error.open_editor")
-                .replace("{error}", &error.to_string()),
-        };
-        self.notifications
-            .update(cx, |center, cx| center.show_error(message, cx));
+        let launcher = launcher.clone();
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { launcher.open(&path) }).await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "failed to open project in editor");
+                let _ = this.update(cx, |this, cx| {
+                    let message = i18n::text(this.language, "error.open_editor")
+                        .replace("{error}", &error);
+                    this.notifications
+                        .update(cx, |center, cx| center.show_error(message, cx));
+                });
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn render_delete_confirm(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {

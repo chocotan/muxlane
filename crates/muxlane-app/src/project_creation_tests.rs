@@ -146,82 +146,128 @@ fn invalid_project_keeps_dialog_open_and_reports_error() {
 }
 
 #[test]
-fn project_menu_offers_only_detected_local_editors() {
-    with_app(|cx, window, view| {
+fn editor_exit_failure_notifies_the_user() {
+    with_app(|cx, _window, view| {
         let directory = tempfile::tempdir().unwrap();
         let bin = directory.path().join("bin");
-        let marker = directory.path().join("opened");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("zed"),
-            format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", marker.display()),
-        )
-        .unwrap();
+        std::fs::create_dir(&bin).unwrap();
+        let program = bin.join("zed");
+        std::fs::write(&program, "#!/bin/sh\necho 'cannot open display' >&2\nexit 7\n")
+            .unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(bin.join("zed"), std::fs::Permissions::from_mode(0o755))
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
-        let project_path = directory.path().join("zbase");
-        std::fs::create_dir(&project_path).unwrap();
+        let launchers = crate::editors::detect_with_for_test(&bin, directory.path());
         cx.update(|cx| {
             view.update(cx, |app, cx| {
-                app.local_editors = crate::editors::detect_with_for_test(&bin, directory.path());
-                assert_eq!(app.local_editors.len(), 1);
-                app.project_dialog = true;
-                app.submit_local_project(project_path.display().to_string(), false, cx);
+                assert!(!app.notifications.read(cx).has_activity());
+                app.open_project_in_editor(&launchers[0], directory.path(), cx);
             });
         });
-        wait_for_project_request(cx, &view);
-        let open_menu = |cx: &mut gpui::TestAppContext, target| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if cx.update(|cx| view.read(cx).notifications.read(cx).has_activity()) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "editor failure was not reported");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+}
+
+#[test]
+fn project_menu_offers_only_detected_local_editors() {
+    for (command, selector) in [
+        ("code", "tree-open-vscode"),
+        ("zed", "tree-open-zed"),
+        ("idea", "tree-open-idea"),
+    ] {
+        with_app(|cx, window, view| {
+            let directory = tempfile::tempdir().unwrap();
+            let bin = directory.path().join("bin");
+            let marker = directory.path().join("opened");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(
+                bin.join(command),
+                format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", marker.display()),
+            )
+            .unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(bin.join(command), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            let project_path = directory.path().join("project with spaces");
+            std::fs::create_dir(&project_path).unwrap();
             cx.update(|cx| {
                 view.update(cx, |app, cx| {
-                    app.tree_menu = Some(crate::menus::TreeMenu {
-                        target,
-                        position: gpui::Point::new(px(40.), px(40.)),
-                    });
-                    cx.notify();
+                    app.local_editors = crate::editors::detect_with_for_test(&bin, directory.path());
+                    assert_eq!(app.local_editors.len(), 1);
+                    app.project_dialog = true;
+                    app.submit_local_project(project_path.display().to_string(), false, cx);
                 });
             });
-        };
-        let project_id = cx.update(|cx| view.read(cx).last_snapshot.projects[0].id.clone());
-        open_menu(
-            cx,
-            crate::menus::DeleteTarget::LocalProject {
-                project: project_id,
-                label: "zbase".into(),
-            },
-        );
-        draw(cx, window);
-        let mut visual = gpui::VisualTestContext::from_window(window, cx);
-        assert!(visual.debug_bounds("tree-open-vscode").is_none());
-        let zed = visual.debug_bounds("tree-open-zed").unwrap();
-        visual.simulate_click(zed.center(), Default::default());
-        draw(cx, window);
-        assert!(cx.update(|cx| view.read(cx).tree_menu.is_none()));
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !marker.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "editor was not launched"
+            wait_for_project_request(cx, &view);
+            let open_menu = |cx: &mut gpui::TestAppContext, target| {
+                cx.update(|cx| {
+                    view.update(cx, |app, cx| {
+                        app.tree_menu = Some(crate::menus::TreeMenu {
+                            target,
+                            position: gpui::Point::new(px(40.), px(40.)),
+                        });
+                        cx.notify();
+                    });
+                });
+            };
+            let project_id = cx.update(|cx| view.read(cx).last_snapshot.projects[0].id.clone());
+            open_menu(
+                cx,
+                crate::menus::DeleteTarget::LocalProject {
+                    project: project_id,
+                    label: "zbase".into(),
+                },
             );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(
-            std::fs::read_to_string(&marker).unwrap(),
-            project_path.canonicalize().unwrap().display().to_string()
-        );
-        // Remote projects must not offer local editors.
-        open_menu(
-            cx,
-            crate::menus::DeleteTarget::RemoteProject {
-                host: "peer".into(),
-                project: "r".into(),
-                label: "r".into(),
-            },
-        );
-        draw(cx, window);
-        let mut visual = gpui::VisualTestContext::from_window(window, cx);
-        assert!(visual.debug_bounds("tree-open-zed").is_none());
-    });
+            draw(cx, window);
+            let mut visual = gpui::VisualTestContext::from_window(window, cx);
+            for other in ["tree-open-vscode", "tree-open-zed", "tree-open-idea"] {
+                if other != selector {
+                    assert!(visual.debug_bounds(other).is_none());
+                }
+            }
+            let editor = visual.debug_bounds(selector).unwrap();
+            visual.simulate_click(editor.center(), Default::default());
+            draw(cx, window);
+            assert!(cx.update(|cx| view.read(cx).tree_menu.is_none()));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !marker.exists() {
+                cx.run_until_parked();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "editor was not launched"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                std::fs::read_to_string(&marker).unwrap(),
+                project_path.canonicalize().unwrap().display().to_string()
+            );
+            // Remote projects must not offer local editors.
+            open_menu(
+                cx,
+                crate::menus::DeleteTarget::RemoteProject {
+                    host: "peer".into(),
+                    project: "r".into(),
+                    label: "r".into(),
+                },
+            );
+            draw(cx, window);
+            let mut visual = gpui::VisualTestContext::from_window(window, cx);
+            for selector in ["tree-open-vscode", "tree-open-zed", "tree-open-idea"] {
+                assert!(visual.debug_bounds(selector).is_none());
+            }
+        });
+    }
 }

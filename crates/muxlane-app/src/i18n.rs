@@ -175,6 +175,11 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("menu.open_in_vscode", "在 VS Code 中打开", "Open in VS Code"),
     ("menu.open_in_zed", "在 Zed 中打开", "Open in Zed"),
     (
+        "menu.open_in_idea",
+        "在 IntelliJ IDEA 中打开",
+        "Open in IntelliJ IDEA",
+    ),
+    (
         "error.open_editor",
         "无法打开编辑器：{error}",
         "Failed to open editor: {error}",
