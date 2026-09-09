@@ -1905,13 +1905,24 @@ mod tests {
             );
             assert_eq!(view.bound_window, Some(b.window_id()));
             let bounds = view.last_bounds.lock().unwrap().unwrap();
-            assert_eq!(
+            // GPUI 布局经过 scale_factor 换算，比较 f32 会差到 ulp 量级；用容差而不是精确相等。
+            let close =
+                |a: gpui::Pixels, b: gpui::Pixels| (f32::from(a) - f32::from(b)).abs() < 0.01;
+            let expected_origin = old_bounds.origin + point(gpui::px(40.), gpui::px(40.));
+            let expected_size = old_bounds.size - size(gpui::px(80.), gpui::px(80.));
+            assert!(
+                close(bounds.origin.x, expected_origin.x)
+                    && close(bounds.origin.y, expected_origin.y),
+                "origin {:?} != {:?}",
                 bounds.origin,
-                old_bounds.origin + point(gpui::px(40.), gpui::px(40.))
+                expected_origin
             );
-            assert_eq!(
+            assert!(
+                close(bounds.size.width, expected_size.width)
+                    && close(bounds.size.height, expected_size.height),
+                "size {:?} != {:?}",
                 bounds.size,
-                old_bounds.size - size(gpui::px(80.), gpui::px(80.))
+                expected_size
             );
             assert!(bounds.size.width > gpui::px(0.));
             assert!(bounds.size.height > gpui::px(0.));
