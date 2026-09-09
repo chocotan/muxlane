@@ -3,6 +3,7 @@ mod actions;
 mod app;
 mod bootstrap;
 mod dialogs;
+mod editors;
 mod floating;
 mod i18n;
 mod icons;
@@ -12,6 +13,8 @@ mod persistence;
 mod remotes;
 mod sessions;
 mod settings;
+#[cfg(any(target_os = "macos", test))]
+mod shell_environment;
 mod shortcuts;
 mod sidebar_state;
 mod sound;
@@ -88,6 +91,12 @@ fn main() {
         )
         .try_init()
         .ok();
+
+    #[cfg(target_os = "macos")]
+    if let Err(error) = shell_environment::import_login_path(&muxlane_term::default_shell_program())
+    {
+        tracing::warn!(%error, "could not prepare macOS terminal PATH");
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

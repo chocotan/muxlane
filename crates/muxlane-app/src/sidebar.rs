@@ -345,6 +345,10 @@ impl MuxlaneApp {
             .text_color(rgba(theme.fg0))
             .group(project_group.clone())
             .when(is_current, |row| row.bg(rgba(theme.bg2)))
+            .when(cfg!(test), |row| {
+                let selector = format!("ux-project-{}", project.name);
+                row.debug_selector(move || selector.clone())
+            })
             .hover(|style| style.bg(rgba(theme.bg2)))
             .when_some(drag_payload, |row, payload| {
                 row.on_drag(payload, {
@@ -393,7 +397,10 @@ impl MuxlaneApp {
                         position: clamp_menu_position(
                             event.position,
                             window.viewport_size(),
-                            size(ui_px(190.), ui_px(150.)),
+                            size(
+                                ui_px(190.),
+                                ui_px(150. + 34. * this.local_editors.len() as f32),
+                            ),
                         ),
                     });
                     cx.stop_propagation();

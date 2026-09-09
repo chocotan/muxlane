@@ -111,7 +111,74 @@ impl MuxlaneServer {
             }
         }
         self.remove_exited_sessions(&exited).await;
-        self.observe_screens(&screens).await;
+        let foregrounds = self.sample_foregrounds_if_due(&screens).await;
+        self.observe_screens(&screens, &foregrounds).await;
+    }
+
+    /// One shared sampler for the periodic tick and hook path. Sampling only happens
+    /// while a Shell-origin session exists, at most once per second.
+    async fn sample_foregrounds_if_due(
+        &self,
+        screens: &[(AgentId, ScreenInput)],
+    ) -> std::collections::HashMap<String, crate::foreground::ShellForeground> {
+        const INTERVAL: Duration = Duration::from_millis(1000);
+        if screens.is_empty() {
+            return Default::default();
+        }
+        let has_shell_origin = {
+            let state = self.state.read().await;
+            screens.iter().any(|(id, _)| state.is_shell_origin(id))
+        };
+        if !has_shell_origin {
+            return Default::default();
+        }
+        let mut last = self.foreground_sampled_at.lock().await;
+        if last.is_some_and(|instant| instant.elapsed() < INTERVAL) {
+            return Default::default();
+        }
+        let sample = crate::foreground::sample().await;
+        *last = Some(std::time::Instant::now());
+        sample
+    }
+
+    /// A first hook can arrive before the periodic sampler; resolve identity before
+    /// emitting its notification. Native Agent presets need no additional query.
+    pub(crate) async fn refresh_shell_identity_for_hook(&self, id: &AgentId) {
+        let name = {
+            let state = self.state.read().await;
+            state
+                .agents
+                .iter()
+                .find(|agent| &agent.id == id)
+                .filter(|agent| agent.agent_type == muxlane_core::AgentType::Shell)
+                .and_then(|agent| agent.tmux_session.clone())
+        };
+        let Some(name) = name else {
+            return;
+        };
+        // Only the first hook of a fresh Shell-origin session needs an early sample;
+        // once identity is known the periodic sampler owns it.
+        let mut last = self.foreground_sampled_at.lock().await;
+        if last.is_some_and(|instant| instant.elapsed() < Duration::from_millis(1000)) {
+            return;
+        }
+        let foregrounds = crate::foreground::sample().await;
+        *last = Some(std::time::Instant::now());
+        drop(last);
+        let Some(foreground) = foregrounds.get(&name) else {
+            return;
+        };
+        let title = self.sessions.lock().await.get(id).and_then(|session| {
+            muxlane_core::protocol::extract_osc_title(&session.replay_tail(16 * 1024))
+        });
+        if self
+            .state
+            .write()
+            .await
+            .observe_foreground(id, foreground, title.as_deref())
+        {
+            self.dirty.bump();
+        }
     }
 
     async fn recover_session(&self, id: &AgentId, tmux_session: String) -> anyhow::Result<()> {
@@ -213,13 +280,29 @@ impl MuxlaneServer {
         }
     }
 
-    async fn observe_screens(&self, screens: &[(AgentId, ScreenInput)]) {
+    async fn observe_screens(
+        &self,
+        screens: &[(AgentId, ScreenInput)],
+        foregrounds: &std::collections::HashMap<String, crate::foreground::ShellForeground>,
+    ) {
         if screens.is_empty() {
             return;
         }
         let mut state = self.state.write().await;
         let mut changed = false;
         for (id, screen) in screens {
+            let foreground = state
+                .agents
+                .iter()
+                .find(|agent| &agent.id == id)
+                .and_then(|agent| agent.tmux_session.as_ref())
+                .and_then(|name| foregrounds.get(name));
+            if let Some(foreground) = foreground {
+                if state.observe_foreground(id, foreground, screen.osc_title.as_deref()) {
+                    changed = true;
+                    continue; // The sampled screen may still belong to the previous process.
+                }
+            }
             if !state.observe_screen(id, screen).is_empty() {
                 changed = true;
             }

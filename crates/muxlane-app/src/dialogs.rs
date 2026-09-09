@@ -79,6 +79,8 @@ impl MuxlaneApp {
             return;
         }
         self.project_add_busy = true;
+        self.dialog_error = None;
+        cx.notify();
         let server = Arc::clone(&self.server);
         let requested_path = path.clone();
         let params = muxlane_core::protocol::ProjectAddParams {
@@ -89,20 +91,26 @@ impl MuxlaneApp {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    server.add_project(params).await?;
-                    Ok::<_, anyhow::Error>(server.snapshot().await)
+                    let project = server.add_project(params).await?;
+                    Ok::<_, anyhow::Error>((project, server.snapshot().await))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.project_add_busy = false;
                 match result {
-                    Ok(snapshot) => {
-                        this.last_snapshot = snapshot;
+                    Ok((project, snapshot)) => {
+                        this.apply_local_snapshot(snapshot, cx);
+                        this.collapsed_machines.remove("local");
+                        this.collapsed_projects
+                            .remove(&format!("local:{}", project.id));
                         this.project_dialog = false;
                         this.pending_project_creation = None;
                         this.dialog_error = None;
                         this.project_input.update(cx, |input, cx| input.reset(cx));
-                        this.persist();
+                        this.select_project_workspace_inner(
+                            crate::workspace::ProjectKey::new(this.local_machine_id(), project.id),
+                            cx,
+                        );
                     }
                     Err(error) => {
                         let error_code = error
@@ -637,6 +645,9 @@ impl MuxlaneApp {
                                     },
                                     theme,
                                 )
+                                .when(cfg!(test), |button| {
+                                    button.debug_selector(|| "ux-project-submit".into())
+                                })
                                 .px_3()
                                 .py_1()
                                 .bg(rgba(theme.accent))

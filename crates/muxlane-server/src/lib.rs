@@ -1,5 +1,6 @@
 //! muxlane-server：本机 Unix socket 服务端（client 也能连它：对端机器的 muxlane、或本机 hook 脚本）
 mod api;
+mod foreground;
 mod state;
 mod subs;
 mod supervisor;
@@ -54,6 +55,8 @@ pub struct MuxlaneServer {
     events: tokio::sync::broadcast::Sender<EventMsg>,
     auth: muxlane_core::AuthSecret,
     lifecycle: Arc<Mutex<()>>,
+    /// Last foreground process sample; bounds `ps` usage across tick and hook paths.
+    foreground_sampled_at: Mutex<Option<std::time::Instant>>,
     persistence_path: StdRwLock<Option<PathBuf>>,
 }
 
@@ -103,6 +106,7 @@ impl MuxlaneServer {
             events,
             auth,
             lifecycle: Arc::new(Mutex::new(())),
+            foreground_sampled_at: Mutex::new(None),
             persistence_path: StdRwLock::new(None),
         });
         // 转发任务退出时自行摘除条目需要注册表自身的 Weak。
@@ -408,6 +412,7 @@ impl MuxlaneServer {
                 "invalid or expired hook token",
             ));
         }
+        self.refresh_shell_identity_for_hook(&params.agent).await;
         let _ = self.state.write().await.report_hook(&params).await;
         self.dirty.bump();
         Ok(Response::ok(req.id, serde_json::json!({"ok": true})))

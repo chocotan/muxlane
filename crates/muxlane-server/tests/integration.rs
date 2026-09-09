@@ -1074,3 +1074,106 @@ async fn restore_sessions_publishes_one_batched_notification_with_all_sessions()
         "restore must not notify once per session"
     );
 }
+
+#[tokio::test]
+async fn shell_foreground_agent_identity_tracks_process_entry_exit_and_reentry() {
+    let (server, _socket, _state, _dirty, directory) = spawn_server().await;
+    let project = server
+        .add_project(project_params(
+            directory.path().display().to_string(),
+            false,
+        ))
+        .await
+        .unwrap();
+    let agent = server
+        .spawn_agent(muxlane_core::protocol::AgentSpawnParams {
+            project: project.id,
+            agent_type: Some(AgentType::Shell),
+            program: Some("/bin/bash".into()),
+            args: Some(vec!["--noprofile".into(), "--norc".into(), "-i".into()]),
+            env: Some(vec![("PS1".into(), "MUXLANE_TEST_READY> ".into())]),
+            preset_name: Some("Shell".into()),
+        })
+        .await
+        .unwrap();
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args([
+                    "-L",
+                    "muxlane",
+                    "kill-session",
+                    "-t",
+                    &format!("={}", self.0),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+    let _cleanup = Cleanup(agent.tmux_session.clone().unwrap());
+    let session = server.session(&agent.id).await.unwrap();
+    // Wait for the real interactive shell, then run synthetic foreground processes
+    // with Agent argv[0] names. No installed Agent, API request, or credentials needed.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if String::from_utf8_lossy(&session.replay_tail(4096)).contains("MUXLANE_TEST_READY>") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    for (command, kind, title) in [
+        (
+            "/bin/bash -c 'exec -a pi /bin/sleep 30'\r",
+            AgentType::Pi,
+            "Pi",
+        ),
+        (
+            "/bin/bash -c 'exec -a codex /bin/sleep 30'\r",
+            AgentType::Codex,
+            "Codex",
+        ),
+    ] {
+        session.write_input(command.as_bytes());
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                server.maintain_sessions().await;
+                let snapshot = server.snapshot().await;
+                if snapshot.agent(&agent.id).unwrap().agent_type == kind {
+                    assert_eq!(snapshot.agent(&agent.id).unwrap().title, title);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("foreground Agent was not recognized");
+        session.write_input(b"\x03");
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                server.maintain_sessions().await;
+                let snapshot = server.snapshot().await;
+                let instance = snapshot.agent(&agent.id).unwrap();
+                if instance.agent_type == AgentType::Shell {
+                    assert_eq!(instance.title, "Shell");
+                    assert_eq!(instance.status, AgentStatus::Idle);
+                    assert!(instance.seen);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("exited Agent did not return to Shell");
+    }
+    assert!(server
+        .delete_agent(&agent.id)
+        .await
+        .unwrap()
+        .failed_agents
+        .is_empty());
+}

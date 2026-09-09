@@ -112,6 +112,7 @@ fn remote_status_events_only_alert_background_tabs_and_preserve_reads_before_sna
                 muxlane_client::ClientEvent::StatusChanged {
                     host: "remote".into(),
                     agent: agent.into(),
+                    agent_type: None,
                     from: AgentStatus::Working,
                     to: AgentStatus::Failed,
                     message: None,
@@ -144,6 +145,7 @@ fn remote_status_events_only_alert_background_tabs_and_preserve_reads_before_sna
             muxlane_client::ClientEvent::StatusChanged {
                 host: "remote".into(),
                 agent: "remote-a".into(),
+                agent_type: None,
                 from: AgentStatus::Working,
                 to: AgentStatus::Failed,
                 message: None,

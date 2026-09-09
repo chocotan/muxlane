@@ -183,6 +183,8 @@ pub struct MuxlaneApp {
     palette_project_scroll: ScrollHandle,
     palette_column: PaletteColumn,
     pub(crate) presets: Vec<muxlane_core::AgentPreset>,
+    /// Editors found on this machine at startup; shown in local project menus.
+    pub(crate) local_editors: Vec<crate::editors::EditorLauncher>,
     pub(crate) new_session_target: Option<NewSessionTarget>,
 
     // 退出确认
@@ -252,8 +254,11 @@ impl MuxlaneApp {
                         >(ev.params)
                         {
                             this.update(cx, |this, cx| {
-                                let draft =
+                                let mut draft =
                                     this.notification_draft(p.agent, p.from, p.to, p.message);
+                                if let Some(agent_type) = p.agent_type {
+                                    draft.agent_type = agent_type;
+                                }
                                 this.notifications
                                     .update(cx, |center, cx| center.push_notification(draft, cx));
                                 cx.notify();
@@ -426,6 +431,7 @@ impl MuxlaneApp {
                             muxlane_client::ClientEvent::StatusChanged {
                                 host,
                                 agent,
+                                agent_type,
                                 from,
                                 to,
                                 message,
@@ -440,7 +446,10 @@ impl MuxlaneApp {
                                         }
                                     }
                                 }
-                                let draft = this.notification_draft(agent, from, to, message);
+                                let mut draft = this.notification_draft(agent, from, to, message);
+                                if let Some(agent_type) = agent_type {
+                                    draft.agent_type = agent_type;
+                                }
                                 this.notifications
                                     .update(cx, |center, cx| center.push_notification(draft, cx));
                             }
@@ -634,6 +643,7 @@ impl MuxlaneApp {
             palette_project_scroll: ScrollHandle::new(),
             palette_column: PaletteColumn::Presets,
             presets: muxlane_core::builtin_presets(muxlane_term::default_shell_program()),
+            local_editors: crate::editors::detect_local_editors(),
             connect_dialog: false,
             connect_input,
             connect_auth_mode: ConnectAuthMode::SshConfig,

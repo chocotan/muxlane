@@ -1,5 +1,8 @@
 //! In-process GPUI tests. The server has no agents and is never served; no PTY or SSH is started.
 
+#[path = "project_creation_tests.rs"]
+mod project_creation_tests;
+
 #[path = "floating_tests.rs"]
 mod floating_tests;
 

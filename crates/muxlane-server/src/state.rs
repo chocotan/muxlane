@@ -1,7 +1,14 @@
 //! 服务端状态：快照 + agent 会话表 + hook 上报处理
 use muxlane_core::detect::{DetectionEngine, HookEvent};
-use muxlane_core::model::{AgentId, AgentInstance, AgentStatus, MachineInfo, Project, Snapshot};
+use muxlane_core::model::{
+    AgentId, AgentInstance, AgentStatus, AgentType, MachineInfo, Project, Snapshot,
+};
 use muxlane_core::protocol::{AgentReportParams, EventMsg};
+
+struct ShellIdentity {
+    title: String,
+    last_osc: Option<String>,
+}
 
 pub struct ServerState {
     pub machine: MachineInfo,
@@ -9,6 +16,7 @@ pub struct ServerState {
     pub agents: Vec<AgentInstance>,
     /// 状态检测
     pub detector: DetectionEngine,
+    shell_identities: std::collections::HashMap<AgentId, ShellIdentity>,
     /// 全局状态事件广播（app 内部路径与 wire 协议共用）
     pub events: tokio::sync::broadcast::Sender<muxlane_core::protocol::EventMsg>,
 }
@@ -25,6 +33,7 @@ impl ServerState {
             projects: vec![],
             agents: vec![],
             detector,
+            shell_identities: Default::default(),
             events,
         }
     }
@@ -80,6 +89,7 @@ impl ServerState {
         }
         self.agents.retain(|a| &a.id != agent);
         self.detector.forget(agent);
+        self.shell_identities.remove(agent);
         // 项目空了也保留（历史项目还在）；v1 不做清理
     }
 
@@ -97,32 +107,98 @@ impl ServerState {
         agents
     }
 
+    /// Shell presets, plus shells currently running an Agent in the foreground.
+    pub(crate) fn is_shell_origin(&self, agent: &AgentId) -> bool {
+        self.shell_identities.contains_key(agent)
+            || self
+                .agents
+                .iter()
+                .any(|instance| &instance.id == agent && instance.agent_type == AgentType::Shell)
+    }
+
+    /// Only a verified foreground process sample may change a shell's identity.
+    /// Identity changes are state updates, not task completion notifications.
+    pub(crate) fn observe_foreground(
+        &mut self,
+        agent: &AgentId,
+        foreground: &crate::foreground::ShellForeground,
+        osc_title: Option<&str>,
+    ) -> bool {
+        let Some(instance) = self
+            .agents
+            .iter_mut()
+            .find(|instance| &instance.id == agent)
+        else {
+            return false;
+        };
+        let identity = self
+            .shell_identities
+            .entry(agent.clone())
+            .or_insert_with(|| ShellIdentity {
+                title: if instance.agent_type == AgentType::Shell {
+                    instance.title.clone()
+                } else {
+                    foreground.shell.clone()
+                },
+                last_osc: osc_title.map(str::to_owned),
+            });
+        if instance.agent_type == foreground.agent_type {
+            return false;
+        }
+        instance.agent_type = foreground.agent_type;
+        instance.title = if foreground.agent_type == AgentType::Shell {
+            identity.title.clone()
+        } else {
+            muxlane_core::builtin_presets("")
+                .into_iter()
+                .find(|preset| preset.agent_type == foreground.agent_type)
+                .map(|preset| preset.label)
+                .unwrap_or_else(|| foreground.agent_type.as_str().into())
+        };
+        // Replay still contains the previous application's OSC and prompt. Do not
+        // immediately overwrite the new title with that old output.
+        identity.last_osc = osc_title.map(str::to_owned);
+        instance.status = AgentStatus::Idle;
+        instance.seen = true;
+        instance.status_since = muxlane_core::model::now_secs();
+        self.detector.forget(agent);
+        true
+    }
+
     /// 屏幕检测兜底（hook 权威窗口内 DetectionEngine 会自动忽略屏幕结果）。
     pub fn observe_screen(
         &mut self,
         agent: &AgentId,
         input: &muxlane_core::detect::ScreenInput,
     ) -> Vec<EventMsg> {
-        let title_changed = input.osc_title.as_deref().is_some_and(|raw| {
-            let title: String = raw
-                .trim()
-                .chars()
-                .filter(|ch| !ch.is_control())
-                .take(80)
-                .collect();
-            if title.is_empty() || looks_like_tmux_copy_title(&title) {
-                return false;
-            }
-            let Some(instance) = self.agents.iter_mut().find(|item| &item.id == agent) else {
-                return false;
-            };
-            if instance.title == title {
-                false
-            } else {
-                instance.title = title;
-                true
-            }
-        });
+        let fresh_title = if let Some(identity) = self.shell_identities.get_mut(agent) {
+            let fresh = identity.last_osc.as_ref() != input.osc_title.as_ref();
+            identity.last_osc = input.osc_title.clone();
+            fresh
+        } else {
+            true
+        };
+        let title_changed = fresh_title
+            && input.osc_title.as_deref().is_some_and(|raw| {
+                let title: String = raw
+                    .trim()
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .take(80)
+                    .collect();
+                if title.is_empty() || looks_like_tmux_copy_title(&title) {
+                    return false;
+                }
+                let Some(instance) = self.agents.iter_mut().find(|item| &item.id == agent) else {
+                    return false;
+                };
+                if instance.title == title {
+                    false
+                } else {
+                    instance.title = title;
+                    true
+                }
+            });
         let Some((current, agent_type)) = self
             .agents
             .iter()
@@ -166,6 +242,12 @@ impl ServerState {
         let Some(inst) = self.agents.iter().find(|a| a.id == params.agent) else {
             return vec![];
         };
+        // Late/background hook messages must not put a returned shell back into
+        // the old Agent's Working/Done state. Foreground polling owns identity.
+        if self.shell_identities.contains_key(&params.agent) && inst.agent_type == AgentType::Shell
+        {
+            return vec![];
+        }
         let current = inst.status;
         let target = ev.to_status();
         if let Some(upd) = self.detector.report(&params.agent, current, ev) {
@@ -180,6 +262,7 @@ impl ServerState {
                 muxlane_core::protocol::events::AGENT_STATUS,
                 serde_json::to_value(muxlane_core::protocol::AgentStatusEvent {
                     agent: params.agent.clone(),
+                    agent_type: Some(inst.agent_type),
                     from: current,
                     to: current,
                     message: params.message.clone(),
@@ -234,6 +317,7 @@ impl ServerState {
             muxlane_core::protocol::events::AGENT_STATUS,
             serde_json::to_value(muxlane_core::protocol::AgentStatusEvent {
                 agent: agent.clone(),
+                agent_type: Some(inst.agent_type),
                 from,
                 to,
                 message,
@@ -268,6 +352,87 @@ fn looks_like_tmux_copy_title(title: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn shell_identity_changes_clear_authority_and_do_not_reuse_old_titles() {
+        let mut state = ServerState::new(MachineInfo {
+            machine_id: "test".into(),
+            name: "test".into(),
+            os: "test".into(),
+            version: "test".into(),
+        });
+        let id = "shell_test".to_string();
+        state.add_agent(
+            Project {
+                id: "p".into(),
+                name: "p".into(),
+                path: "/tmp".into(),
+                branch: None,
+                agents: vec![],
+            },
+            AgentInstance {
+                id: id.clone(),
+                project: "p".into(),
+                agent_type: AgentType::Shell,
+                title: "Shell".into(),
+                status: AgentStatus::Idle,
+                status_since: 0,
+                seen: true,
+                tmux_session: None,
+            },
+        );
+        let mut foreground = crate::foreground::ShellForeground {
+            shell: "zsh".into(),
+            agent_type: AgentType::Pi,
+        };
+        assert!(state.observe_foreground(&id, &foreground, Some("old shell title")));
+        assert_eq!(state.agents[0].title, "Pi");
+        let report = AgentReportParams {
+            token: "unused".into(),
+            agent: id.clone(),
+            event: "working".into(),
+            message: None,
+        };
+        let events = state.report_hook(&report).await;
+        assert_eq!(events[0].params["agent_type"], "pi");
+        assert!(state.detector.has_hook_authority(&id));
+        let screen = muxlane_core::detect::ScreenInput {
+            osc_title: Some("Agent task title".into()),
+            ..Default::default()
+        };
+        state.observe_screen(&id, &screen);
+        assert_eq!(state.agents[0].title, "Agent task title");
+        // A completed turn is not a process exit: identity remains Pi.
+        state
+            .report_hook(&AgentReportParams {
+                event: "done".into(),
+                ..report.clone()
+            })
+            .await;
+        assert_eq!(state.agents[0].agent_type, AgentType::Pi);
+        foreground.agent_type = AgentType::Shell;
+        assert!(state.observe_foreground(&id, &foreground, screen.osc_title.as_deref()));
+        assert_eq!(state.agents[0].title, "Shell");
+        assert_eq!(state.agents[0].status, AgentStatus::Idle);
+        assert!(state.agents[0].seen);
+        assert!(!state.detector.has_hook_authority(&id));
+        state.observe_screen(&id, &screen);
+        assert_eq!(
+            state.agents[0].title, "Shell",
+            "old OSC in replay must not restore Agent title"
+        );
+        assert!(
+            state.report_hook(&report).await.is_empty(),
+            "late hooks must not reactivate an exited Agent"
+        );
+        foreground.agent_type = AgentType::Codex;
+        assert!(state.observe_foreground(&id, &foreground, screen.osc_title.as_deref()));
+        assert_eq!(state.agents[0].title, "Codex");
+        assert_eq!(
+            state.report_hook(&report).await[0].params["agent_type"],
+            "codex"
+        );
+    }
+
     #[test]
     fn removing_project_keeps_unrelated_agents() {
         let mut st = ServerState::new(MachineInfo {

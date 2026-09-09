@@ -321,28 +321,68 @@ impl MuxlaneApp {
                     }
                     _ => unreachable!(),
                 };
-                div()
+                let editors: Vec<_> = match &menu.target {
+                    DeleteTarget::LocalProject { project, .. } => self
+                        .last_snapshot
+                        .project(project)
+                        .map(|project| project.path.clone())
+                        .map(|path| {
+                            self.local_editors
+                                .iter()
+                                .map(|launcher| (launcher.clone(), path.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let mut menu_el = div()
                     .w(ui_px(190.))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .shadow_lg()
-                    .child(
-                        semantic_button("tree-delete-project", label, theme)
+                    .shadow_lg();
+                for (launcher, path) in &editors {
+                    let label = i18n::text(self.language, launcher.editor.label_key());
+                    let launcher = launcher.clone();
+                    let path = path.clone();
+                    menu_el = menu_el.child(
+                        semantic_button(launcher.editor.button_id(), label, theme)
+                            .when(cfg!(test), |button| {
+                                let id = launcher.editor.button_id();
+                                button.debug_selector(move || id.into())
+                            })
                             .px_3()
                             .py_2()
                             .text_size(ui_px(12.))
-                            .text_color(rgba(theme.red))
+                            .text_color(rgba(theme.fg0))
                             .hover(|style| style.bg(rgba(theme.bg2)))
-                            .on_click(cx.listener({
-                                let target = menu.target.clone();
-                                move |this, _event, _window, cx| {
-                                    this.tree_menu = None;
-                                    this.begin_delete(target.clone(), cx);
-                                }
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.tree_menu = None;
+                                this.open_project_in_editor(&launcher, &path, cx);
+                                cx.notify();
                             }))
                             .child(label),
-                    )
+                    );
+                }
+                if !editors.is_empty() {
+                    menu_el = menu_el.child(div().h(ui_px(1.)).bg(rgba(theme.line)).my_1());
+                }
+                menu_el.child(
+                    semantic_button("tree-delete-project", label, theme)
+                        .px_3()
+                        .py_2()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.red))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener({
+                            let target = menu.target.clone();
+                            move |this, _event, _window, cx| {
+                                this.tree_menu = None;
+                                this.begin_delete(target.clone(), cx);
+                            }
+                        }))
+                        .child(label),
+                )
             }
         };
         div()
@@ -362,6 +402,21 @@ impl MuxlaneApp {
             .top(menu.position.y)
             .child(menu_el)
             .into_any_element()
+    }
+
+    pub(crate) fn open_project_in_editor(
+        &mut self,
+        launcher: &crate::editors::EditorLauncher,
+        path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) {
+        let message = match launcher.command(path).spawn() {
+            Ok(_) => return,
+            Err(error) => i18n::text(self.language, "error.open_editor")
+                .replace("{error}", &error.to_string()),
+        };
+        self.notifications
+            .update(cx, |center, cx| center.show_error(message, cx));
     }
 
     pub(crate) fn render_delete_confirm(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {

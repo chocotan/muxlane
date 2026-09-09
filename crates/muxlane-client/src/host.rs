@@ -335,6 +335,7 @@ pub enum ClientEvent {
     StatusChanged {
         host: String,
         agent: muxlane_core::model::AgentId,
+        agent_type: Option<muxlane_core::model::AgentType>,
         from: muxlane_core::model::AgentStatus,
         to: muxlane_core::model::AgentStatus,
         message: Option<String>,
@@ -960,6 +961,7 @@ impl RemoteHost {
                                             .send(ClientEvent::StatusChanged {
                                                 host: this.cfg.name.clone(),
                                                 agent: s.agent,
+                                                agent_type: s.agent_type,
                                                 from: s.from,
                                                 to: s.to,
                                                 message: s.message,

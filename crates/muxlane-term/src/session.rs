@@ -136,6 +136,18 @@ impl PtySession {
     }
 
     fn spawn_with_tmux_socket(cfg: LaunchCfg, tmux_server_name: &str) -> Result<Arc<PtySession>> {
+        #[cfg(target_os = "macos")]
+        let cfg = {
+            let mut cfg = cfg;
+            // Existing tmux servers retain the environment from their first launch.
+            // Pass the recovered GUI PATH to each new session as well as the client.
+            if !cfg.env.iter().any(|(key, _)| key == "PATH") {
+                if let Ok(path) = std::env::var("PATH") {
+                    cfg.env.push(("PATH".into(), path));
+                }
+            }
+            cfg
+        };
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(portable_pty::PtySize {

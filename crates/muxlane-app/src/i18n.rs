@@ -172,6 +172,13 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "muxlane: failed to read state file {path}: {error}\nStartup was aborted to avoid overwriting existing data.",
     ),
     ("menu.add_remote_project", "添加远程项目…", "Add Remote Project…"),
+    ("menu.open_in_vscode", "在 VS Code 中打开", "Open in VS Code"),
+    ("menu.open_in_zed", "在 Zed 中打开", "Open in Zed"),
+    (
+        "error.open_editor",
+        "无法打开编辑器：{error}",
+        "Failed to open editor: {error}",
+    ),
     ("menu.confirm_delete", "确认删除", "Delete"),
     ("menu.delete_project", "删除项目", "Delete Project"),
     ("menu.delete_project_ellipsis", "删除项目…", "Delete Project…"),

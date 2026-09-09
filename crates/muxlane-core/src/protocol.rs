@@ -271,6 +271,9 @@ pub struct TermResyncEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStatusEvent {
     pub agent: AgentId,
+    /// Identity at emission time; older peers may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<crate::model::AgentType>,
     pub from: AgentStatus,
     pub to: AgentStatus,
     #[serde(default)]
