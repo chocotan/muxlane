@@ -948,7 +948,7 @@ impl MuxlaneApp {
                                             )
                                             .when(cfg!(test), |button| {
                                                 button.debug_selector(move || {
-                                                    format!("ux-scale-option-{percent}").into()
+                                                    format!("ux-scale-option-{percent}")
                                                 })
                                             })
                                             .track_focus(&self.settings_focus.control(
