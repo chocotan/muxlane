@@ -9,6 +9,8 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 
+use crate::kitty_graphics::{KittyGraphicsScanner, StoredImage};
+
 #[derive(Clone)]
 pub struct VTerm {
     inner: Arc<Mutex<VTermInner>>,
@@ -19,8 +21,63 @@ pub struct VTerm {
 struct VTermInner {
     term: Term<ClipboardBridge>,
     parser: Processor,
+    kitty: KittyGraphicsScanner,
     cached: Option<Arc<RenderSnapshot>>,
     damage: ContentDamage,
+}
+
+/// Kitty Unicode Placeholder 用的 PUA 占位符（协议固定值，见 kitty graphics-protocol 文档）。
+const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
+/// `rowcolumn-diacritics.txt`（Unicode 6.0.0 冻结版）：下标即编码的行/列/MSB 数值。
+/// 来源：https://sw.kovidgoyal.net/kitty/_downloads/f0a0de9ec8d9ff4456206db8e0814937/rowcolumn-diacritics.txt
+#[rustfmt::skip]
+const ROWCOLUMN_DIACRITICS: [u32; 297] = [
+    0x305, 0x30D, 0x30E, 0x310, 0x312, 0x33D, 0x33E, 0x33F,
+    0x346, 0x34A, 0x34B, 0x34C, 0x350, 0x351, 0x352, 0x357,
+    0x35B, 0x363, 0x364, 0x365, 0x366, 0x367, 0x368, 0x369,
+    0x36A, 0x36B, 0x36C, 0x36D, 0x36E, 0x36F, 0x483, 0x484,
+    0x485, 0x486, 0x487, 0x592, 0x593, 0x594, 0x595, 0x597,
+    0x598, 0x599, 0x59C, 0x59D, 0x59E, 0x59F, 0x5A0, 0x5A1,
+    0x5A8, 0x5A9, 0x5AB, 0x5AC, 0x5AF, 0x5C4, 0x610, 0x611,
+    0x612, 0x613, 0x614, 0x615, 0x616, 0x617, 0x657, 0x658,
+    0x659, 0x65A, 0x65B, 0x65D, 0x65E, 0x6D6, 0x6D7, 0x6D8,
+    0x6D9, 0x6DA, 0x6DB, 0x6DC, 0x6DF, 0x6E0, 0x6E1, 0x6E2,
+    0x6E4, 0x6E7, 0x6E8, 0x6EB, 0x6EC, 0x730, 0x732, 0x733,
+    0x735, 0x736, 0x73A, 0x73D, 0x73F, 0x740, 0x741, 0x743,
+    0x745, 0x747, 0x749, 0x74A, 0x7EB, 0x7EC, 0x7ED, 0x7EE,
+    0x7EF, 0x7F0, 0x7F1, 0x7F3, 0x816, 0x817, 0x818, 0x819,
+    0x81B, 0x81C, 0x81D, 0x81E, 0x81F, 0x820, 0x821, 0x822,
+    0x823, 0x825, 0x826, 0x827, 0x829, 0x82A, 0x82B, 0x82C,
+    0x82D, 0x951, 0x953, 0x954, 0xF82, 0xF83, 0xF86, 0xF87,
+    0x135D, 0x135E, 0x135F, 0x17DD, 0x193A, 0x1A17, 0x1A75, 0x1A76,
+    0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C, 0x1B6B, 0x1B6D,
+    0x1B6E, 0x1B6F, 0x1B70, 0x1B71, 0x1B72, 0x1B73, 0x1CD0, 0x1CD1,
+    0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4,
+    0x1DC5, 0x1DC6, 0x1DC7, 0x1DC8, 0x1DC9, 0x1DCB, 0x1DCC, 0x1DD1,
+    0x1DD2, 0x1DD3, 0x1DD4, 0x1DD5, 0x1DD6, 0x1DD7, 0x1DD8, 0x1DD9,
+    0x1DDA, 0x1DDB, 0x1DDC, 0x1DDD, 0x1DDE, 0x1DDF, 0x1DE0, 0x1DE1,
+    0x1DE2, 0x1DE3, 0x1DE4, 0x1DE5, 0x1DE6, 0x1DFE, 0x20D0, 0x20D1,
+    0x20D4, 0x20D5, 0x20D6, 0x20D7, 0x20DB, 0x20DC, 0x20E1, 0x20E7,
+    0x20E9, 0x20F0, 0x2CEF, 0x2CF0, 0x2CF1, 0x2DE0, 0x2DE1, 0x2DE2,
+    0x2DE3, 0x2DE4, 0x2DE5, 0x2DE6, 0x2DE7, 0x2DE8, 0x2DE9, 0x2DEA,
+    0x2DEB, 0x2DEC, 0x2DED, 0x2DEE, 0x2DEF, 0x2DF0, 0x2DF1, 0x2DF2,
+    0x2DF3, 0x2DF4, 0x2DF5, 0x2DF6, 0x2DF7, 0x2DF8, 0x2DF9, 0x2DFA,
+    0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D,
+    0xA6F0, 0xA6F1, 0xA8E0, 0xA8E1, 0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5,
+    0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9, 0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED,
+    0xA8EE, 0xA8EF, 0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2, 0xAAB3, 0xAAB7,
+    0xAAB8, 0xAABE, 0xAABF, 0xAAC1, 0xFE20, 0xFE21, 0xFE22, 0xFE23,
+    0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187,
+    0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243,
+    0x1D244,
+];
+
+fn diacritic_index(c: char) -> Option<u32> {
+    ROWCOLUMN_DIACRITICS
+        .binary_search(&(c as u32))
+        .ok()
+        .map(|i| i as u32)
 }
 
 #[derive(Clone)]
@@ -66,12 +123,22 @@ pub struct RenderStyle {
     pub selected: bool,
 }
 
+/// 占位符 cell 指向的图片子区域（Kitty Unicode Placeholder 协议解码结果）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageCellRef {
+    pub image_id: u32,
+    pub row: u32,
+    pub col: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderRun {
     pub text: String,
     pub start_col: usize,
     pub cells: usize,
     pub style: RenderStyle,
+    /// 非空时，这个 run 是一个图片占位符 cell（cells 总是 1），调用方应画图而不是画字形。
+    pub image: Option<ImageCellRef>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +201,7 @@ impl VTerm {
                 inner: Arc::new(Mutex::new(VTermInner {
                     term,
                     parser: Processor::new(),
+                    kitty: KittyGraphicsScanner::new(),
                     cached: None,
                     damage: ContentDamage::Full,
                 })),
@@ -156,8 +224,16 @@ impl VTerm {
 
     pub fn feed(&self, data: &[u8]) {
         if let Some(mut guard) = self.lock_inner() {
-            let VTermInner { term, parser, .. } = &mut *guard;
-            parser.advance(term, data);
+            let VTermInner {
+                term,
+                parser,
+                kitty,
+                ..
+            } = &mut *guard;
+            // Kitty 图片 APC 序列（ESC _G...ESC \）vte 0.13 不认识，会被直接吸掉；
+            // 先拦下来自己解析，剩下的字节再交给 alacritty 正常处理。
+            let filtered = kitty.process(data);
+            parser.advance(term, &filtered);
             let damage = match term.damage() {
                 TermDamage::Full => ContentDamage::Full,
                 TermDamage::Partial(lines) => {
@@ -370,6 +446,11 @@ impl VTerm {
             .unwrap_or(false)
     }
 
+    /// 取一张已经接收完整的 Kitty 图片（用 Unicode Placeholder 解码出来的 image id 查）。
+    pub fn kitty_image(&self, id: u32) -> Option<Arc<StoredImage>> {
+        self.lock_inner()?.kitty.image(id)
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) {
         if let Some(mut guard) = self.lock_inner() {
             guard.term.resize(TermDim {
@@ -502,6 +583,8 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
         .and_then(|selection| selection.to_range(term));
     let mut runs: Vec<RenderRun> = vec![];
     let mut current: Option<RenderRun> = None;
+    // Kitty Unicode Placeholder 的行/列/MSB 变音符可以省略，继承左侧 placeholder cell 的值。
+    let mut prev_placeholder: Option<(Color, u32, u32, u32)> = None;
     for col in 0..columns {
         let cell = &grid[Point::new(Line(buffer_line), Column(col))];
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -532,9 +615,28 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
         } else {
             cell.c
         };
+
+        if ch == KITTY_PLACEHOLDER {
+            if let Some(image_ref) = decode_placeholder(fg, cell.zerowidth(), &mut prev_placeholder)
+            {
+                if let Some(r) = current.take() {
+                    runs.push(r);
+                }
+                runs.push(RenderRun {
+                    text: String::new(),
+                    start_col: col,
+                    cells: 1,
+                    style,
+                    image: Some(image_ref),
+                });
+                continue;
+            }
+        }
+        prev_placeholder = None;
+
         let append = current
             .as_ref()
-            .is_some_and(|r| r.style == style && r.start_col + r.cells == col);
+            .is_some_and(|r| r.image.is_none() && r.style == style && r.start_col + r.cells == col);
         if append {
             let r = current.as_mut().unwrap();
             r.text.push(ch);
@@ -555,6 +657,7 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
                 start_col: col,
                 cells: 1,
                 style,
+                image: None,
             });
         }
     }
@@ -562,6 +665,58 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
         runs.push(r);
     }
     RenderRow { runs }
+}
+
+/// Kitty Unicode Placeholder 解码：从占位符 cell 的前景色 + 变音符里换出 (image_id, row, col)。
+/// `prev` 是左边上一个已解码的 placeholder 单元格（fg, row, col, msb），用于补全被省略的变音符；
+/// 解码成功后会就地更新它，下一个 cell 继续继承。
+fn decode_placeholder(
+    fg: Color,
+    zerowidth: Option<&[char]>,
+    prev: &mut Option<(Color, u32, u32, u32)>,
+) -> Option<ImageCellRef> {
+    let Some(base_id) = color_base_id(fg) else {
+        *prev = None;
+        return None;
+    };
+    let diacritics = zerowidth.unwrap_or(&[]);
+    let row_d = diacritics.first().copied().and_then(diacritic_index);
+    let col_d = diacritics.get(1).copied().and_then(diacritic_index);
+    let msb_d = diacritics.get(2).copied().and_then(diacritic_index);
+
+    let same_image = prev.as_ref().is_some_and(|(prev_fg, ..)| *prev_fg == fg);
+    let row = match (row_d, same_image) {
+        (Some(v), _) => v,
+        (None, true) => prev.unwrap().1,
+        (None, false) => return None,
+    };
+    let col = match (col_d, same_image) {
+        (Some(v), _) => v,
+        (None, true) => prev.unwrap().2 + 1,
+        (None, false) => return None,
+    };
+    let msb = match (msb_d, same_image) {
+        (Some(v), _) => v,
+        (None, true) => prev.unwrap().3,
+        (None, false) => 0,
+    };
+
+    *prev = Some((fg, row, col, msb));
+    Some(ImageCellRef {
+        image_id: base_id | (msb << 24),
+        row,
+        col,
+    })
+}
+
+/// 前景色直接编码的 image id 低位部分：真彩色取 24 位 RGB，256 色取索引值。
+/// `Color::Named` 无法表示图片 id，视为不是 placeholder。
+fn color_base_id(c: Color) -> Option<u32> {
+    match c {
+        Color::Spec(Rgb { r, g, b }) => Some(((r as u32) << 16) | ((g as u32) << 8) | b as u32),
+        Color::Indexed(i) => Some(i as u32),
+        Color::Named(_) => None,
+    }
 }
 
 fn color_u32(c: Color, default_fg: u32, default_bg: u32) -> u32 {
@@ -699,5 +854,124 @@ mod scrollback_tests {
             vterm.scroll_display(3),
             "scroll_display should move viewport"
         );
+    }
+}
+
+#[cfg(test)]
+mod kitty_placeholder_tests {
+    use super::*;
+
+    fn placeholder(diacritics: &[char]) -> String {
+        let mut s = String::from(KITTY_PLACEHOLDER);
+        s.extend(diacritics.iter());
+        s
+    }
+
+    /// 直接搭 kitty 官方文档里的 2x2 示例（image id 42，256 色模式）。
+    #[test]
+    fn unicode_placeholder_2x2_grid_decodes_row_col_and_id() {
+        let vterm = VTerm::new(80, 24);
+        let row0 = format!(
+            "\x1b[38;5;42m{}{}\x1b[39m\r\n",
+            placeholder(&['\u{0305}', '\u{0305}']), // row=0, col=0
+            placeholder(&['\u{0305}', '\u{030D}']), // row=0, col=1
+        );
+        let row1 = format!(
+            "\x1b[38;5;42m{}{}\x1b[39m\r\n",
+            placeholder(&['\u{030D}', '\u{0305}']), // row=1, col=0
+            placeholder(&['\u{030D}', '\u{030D}']), // row=1, col=1
+        );
+        vterm.feed(row0.as_bytes());
+        vterm.feed(row1.as_bytes());
+
+        let snap = vterm.render_snapshot();
+        let images_in = |row: usize| -> Vec<ImageCellRef> {
+            snap.rows[row].runs.iter().filter_map(|r| r.image).collect()
+        };
+        assert_eq!(
+            images_in(0),
+            vec![
+                ImageCellRef {
+                    image_id: 42,
+                    row: 0,
+                    col: 0
+                },
+                ImageCellRef {
+                    image_id: 42,
+                    row: 0,
+                    col: 1
+                },
+            ]
+        );
+        assert_eq!(
+            images_in(1),
+            vec![
+                ImageCellRef {
+                    image_id: 42,
+                    row: 1,
+                    col: 0
+                },
+                ImageCellRef {
+                    image_id: 42,
+                    row: 1,
+                    col: 1
+                },
+            ]
+        );
+    }
+
+    /// MSB 变音符（第三个）把 image id 扩展到 24 位以上：42 + (2<<24) = 33554474。
+    #[test]
+    fn msb_diacritic_extends_image_id_beyond_24_bits() {
+        let vterm = VTerm::new(80, 24);
+        let line = format!(
+            "\x1b[38;5;42m{}\x1b[39m\r\n",
+            placeholder(&['\u{0305}', '\u{0305}', '\u{030E}']), // row=0,col=0,msb=2
+        );
+        vterm.feed(line.as_bytes());
+
+        let snap = vterm.render_snapshot();
+        let image = snap.rows[0].runs.iter().find_map(|r| r.image).unwrap();
+        assert_eq!(image.image_id, 42 + (2 << 24));
+        assert_eq!((image.row, image.col), (0, 0));
+    }
+
+    /// 省略的变音符从左侧 placeholder cell 继承：行号继承，列号 = 左侧 + 1。
+    #[test]
+    fn omitted_diacritics_inherit_from_left_placeholder_cell() {
+        let vterm = VTerm::new(80, 24);
+        let line = format!(
+            "\x1b[38;5;7m{}{}\x1b[39m\r\n",
+            placeholder(&['\u{030D}', '\u{0305}']), // row=1, col=0
+            placeholder(&[]),                       // 全部省略 -> row=1, col=1
+        );
+        vterm.feed(line.as_bytes());
+
+        let snap = vterm.render_snapshot();
+        let images: Vec<ImageCellRef> = snap.rows[0].runs.iter().filter_map(|r| r.image).collect();
+        assert_eq!(
+            images,
+            vec![
+                ImageCellRef {
+                    image_id: 7,
+                    row: 1,
+                    col: 0
+                },
+                ImageCellRef {
+                    image_id: 7,
+                    row: 1,
+                    col: 1
+                },
+            ]
+        );
+    }
+
+    /// 普通文字不受影响，不会被误识别成图片占位符。
+    #[test]
+    fn plain_text_has_no_image_ref() {
+        let vterm = VTerm::new(80, 24);
+        vterm.feed(b"hello world\r\n");
+        let snap = vterm.render_snapshot();
+        assert!(snap.rows[0].runs.iter().all(|r| r.image.is_none()));
     }
 }

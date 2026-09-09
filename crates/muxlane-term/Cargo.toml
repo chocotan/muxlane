@@ -13,3 +13,6 @@ bytes = "1"
 portable-pty = "0.9"
 alacritty_terminal = "0.26"
 vte = { version = "0.13", features = ["ansi"] }
+
+[dev-dependencies]
+base64.workspace = true
