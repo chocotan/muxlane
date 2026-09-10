@@ -280,6 +280,10 @@ impl MuxlaneApp {
                 let vterm2 = vterm.clone();
                 let language = self.language;
                 self.server.rt_spawn(async move {
+                    enum RemoteTermUpdate {
+                        Resync(Vec<u8>),
+                        Data(Vec<u8>),
+                    }
                     let mut backoff = 250u64;
                     loop {
                         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
@@ -292,18 +296,50 @@ impl MuxlaneApp {
                         };
                         let vterm3 = vterm2.clone();
                         let notify = mirror_notify.clone();
-                        let result = muxlane_client::stream_term(&sock, &agent2, move |update| {
-                            match update {
-                                muxlane_client::TermUpdate::Resync(bytes) => {
-                                    vterm3.feed(b"\x1bc");
-                                    // 历史回放，里面的终端查询早已被回答过，不能再答一次。
-                                    vterm3.feed_silent(&bytes);
+                        let (update_tx, mut update_rx) =
+                            tokio::sync::mpsc::unbounded_channel::<RemoteTermUpdate>();
+                        let parser = tokio::spawn(async move {
+                            while let Some(first) = update_rx.recv().await {
+                                let mut batch = vec![first];
+                                while let Ok(update) = update_rx.try_recv() {
+                                    batch.push(update);
+                                    if batch.len() >= 64 {
+                                        break;
+                                    }
                                 }
-                                muxlane_client::TermUpdate::Data(bytes) => vterm3.feed(&bytes),
+                                let vterm = vterm3.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    for update in batch {
+                                        match update {
+                                            RemoteTermUpdate::Resync(bytes) => {
+                                                vterm.feed(b"\x1bc");
+                                                // 历史回放，里面的终端查询早已回答过，不能再答一次。
+                                                vterm.feed_silent(&bytes);
+                                            }
+                                            RemoteTermUpdate::Data(bytes) => vterm.feed(&bytes),
+                                        }
+                                    }
+                                })
+                                .await
+                                .ok();
+                                let _ = notify.try_send(());
                             }
-                            let _ = notify.try_send(());
+                        });
+                        let result = muxlane_client::stream_term(&sock, &agent2, move |update| {
+                            let update = match update {
+                                muxlane_client::TermUpdate::Resync(bytes) => {
+                                    RemoteTermUpdate::Resync(bytes)
+                                }
+                                muxlane_client::TermUpdate::Data(bytes) => {
+                                    RemoteTermUpdate::Data(bytes)
+                                }
+                            };
+                            // 网络读取不能被 VTerm 解析阻塞；解析器按顺序批量消费。
+                            let _ = update_tx.send(update);
                         })
                         .await;
+                        parser.abort();
+
                         if result.is_ok() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
                             break;
                         }

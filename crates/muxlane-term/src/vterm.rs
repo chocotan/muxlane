@@ -372,6 +372,7 @@ impl VTerm {
             }
         };
         let damage = std::mem::replace(&mut guard.damage, ContentDamage::None);
+        let fallback_id = guard.kitty.latest_placement_id();
         let need_full = guard.cached.is_none()
             || matches!(damage, ContentDamage::Full)
             || guard.cached.as_ref().is_some_and(|c| {
@@ -379,7 +380,7 @@ impl VTerm {
             });
 
         let mut snap = if need_full {
-            Arc::new(build_snapshot(&guard.term))
+            Arc::new(build_snapshot(&guard.term, fallback_id))
         } else {
             guard.cached.take().unwrap()
         };
@@ -388,7 +389,7 @@ impl VTerm {
             let snap = Arc::make_mut(&mut snap);
             for row in rows {
                 if row < snap.rows.len() {
-                    snap.rows[row] = build_row(&guard.term, row);
+                    snap.rows[row] = build_row(&guard.term, row, fallback_id);
                 }
             }
             snap.cursor = cursor_of(&guard.term);
@@ -626,9 +627,9 @@ fn merge_damage(a: ContentDamage, b: ContentDamage) -> ContentDamage {
     }
 }
 
-fn build_snapshot(term: &Term<ClipboardBridge>) -> RenderSnapshot {
+fn build_snapshot(term: &Term<ClipboardBridge>, fallback_id: Option<u32>) -> RenderSnapshot {
     let rows = (0..term.screen_lines())
-        .map(|r| build_row(term, r))
+        .map(|r| build_row(term, r, fallback_id))
         .collect();
     RenderSnapshot {
         rows,
@@ -662,7 +663,7 @@ fn logical_cursor_of(term: &Term<ClipboardBridge>) -> Option<RenderCursor> {
     })
 }
 
-fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
+fn build_row(term: &Term<ClipboardBridge>, visual: usize, fallback_id: Option<u32>) -> RenderRow {
     let grid = term.grid();
     let columns = grid.columns();
     let buffer_line = visual as i32 - grid.display_offset() as i32;
@@ -712,12 +713,16 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize) -> RenderRow {
         if ch == KITTY_PLACEHOLDER {
             // image id 编码在 cell 真实的前景色里；tmux 选区/反显用的是 INVERSE 标志，
             // 上面已经把 fg/bg 换了位，这里必须用 cell.fg 而不是换位后的 fg。
-            if let Some(image_ref) =
-                decode_placeholder(cell.fg, cell.zerowidth(), &mut prev_placeholder)
+            if let Some((image_ref, id_fallback)) =
+                decode_placeholder(cell.fg, cell.zerowidth(), &mut prev_placeholder, fallback_id)
             {
                 if let Some(r) = current.take() {
                     runs.push(r);
                 }
+                // id 是从最近占位里兜底出来的（前景色被 tmux 选区改了）：
+                // 把这个 cell 标记为选中，画上选区高亮。
+                let mut style = style;
+                style.selected |= id_fallback;
                 runs.push(RenderRun {
                     text: String::new(),
                     start_col: col,
@@ -770,12 +775,25 @@ fn decode_placeholder(
     fg: Color,
     zerowidth: Option<&[char]>,
     prev: &mut Option<(Color, u32, u32, u32)>,
-) -> Option<ImageCellRef> {
-    let Some(base_id) = color_base_id(fg) else {
-        *prev = None;
-        return None;
-    };
+    fallback_id: Option<u32>,
+) -> Option<(ImageCellRef, bool)> {
     let diacritics = zerowidth.unwrap_or(&[]);
+    // 前景色被外部改掉（tmux copy-mode 选区色）时 color_base_id 拿不到 id：
+    // 只要行/列变音符还在，就用最近建过占位的 image id 兑底。
+    let (base_id, id_fallback) = match color_base_id(fg) {
+        Some(id) => (id, false),
+        None => match (
+            fallback_id,
+            diacritics.first().copied().and_then(diacritic_index),
+            diacritics.get(1).copied().and_then(diacritic_index),
+        ) {
+            (Some(id), Some(_), Some(_)) => (id, true),
+            _ => {
+                *prev = None;
+                return None;
+            }
+        },
+    };
     let row_d = diacritics.first().copied().and_then(diacritic_index);
     let col_d = diacritics.get(1).copied().and_then(diacritic_index);
     let msb_d = diacritics.get(2).copied().and_then(diacritic_index);
@@ -798,11 +816,14 @@ fn decode_placeholder(
     };
 
     *prev = Some((fg, row, col, msb));
-    Some(ImageCellRef {
-        image_id: base_id | (msb << 24),
-        row,
-        col,
-    })
+    Some((
+        ImageCellRef {
+            image_id: base_id | (msb << 24),
+            row,
+            col,
+        },
+        id_fallback,
+    ))
 }
 
 /// 前景色直接编码的 image id 低位部分：真彩色取 24 位 RGB，256 色取索引值。
@@ -1136,5 +1157,27 @@ mod kitty_placeholder_tests {
             .expect("still an image run");
         assert_eq!(run.image.unwrap().image_id, 42);
         assert!(run.style.inverse);
+    }
+
+    /// tmux copy-mode 选区会把占位符 cell 的前景色改成选区色（Named），fg 里解不出 id：
+    /// 只要行/列变音符还在，就用最近建过占位的 id 兜底，并标记为选中。
+    #[test]
+    fn clobbered_fg_falls_back_to_latest_placement_id() {
+        let vterm = VTerm::new(80, 24);
+        // 先有 U=1 占位命令登记 id=42，再用命名前景色（白色）发占位符。
+        vterm.feed(b"\x1b_Ga=p,i=42,U=1,c=1,r=1,q=2;\x1b\\");
+        let line = format!(
+            "\x1b[37m{}\x1b[0m\r\n",
+            placeholder(&['\u{0305}', '\u{0305}']),
+        );
+        vterm.feed(line.as_bytes());
+        let snap = vterm.render_snapshot();
+        let run = snap.rows[0]
+            .runs
+            .iter()
+            .find(|r| r.image.is_some())
+            .expect("still an image run");
+        assert_eq!(run.image.unwrap().image_id, 42);
+        assert!(run.style.selected);
     }
 }

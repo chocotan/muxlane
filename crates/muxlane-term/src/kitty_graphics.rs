@@ -57,6 +57,9 @@ pub struct KittyGraphicsScanner {
     images: HashMap<u32, Arc<StoredImage>>,
     /// image id -> 虚拟占位的总列数/总行数（`U=1,c=,r=`）。渲染时把整张图按这个网格切块。
     placements: HashMap<u32, (u32, u32)>,
+    /// 最近一次建虚拟占位的 image id：tmux copy-mode 选区会改掉占位符 cell 的前景色，
+    /// 渲染端解不出 id 时用它兜底（同一屏幕通常只有一张图）。
+    last_placement: Option<u32>,
 }
 
 impl Default for KittyGraphicsScanner {
@@ -75,6 +78,7 @@ impl KittyGraphicsScanner {
             current_id: None,
             images: HashMap::new(),
             placements: HashMap::new(),
+            last_placement: None,
         }
     }
 
@@ -165,6 +169,11 @@ impl KittyGraphicsScanner {
         self.placements.get(&id).copied()
     }
 
+    /// 最近建过虚拟占位的 image id，供渲染端在前景色被改时兜底。
+    pub fn latest_placement_id(&self) -> Option<u32> {
+        self.last_placement
+    }
+
     fn handle_apc(&mut self) {
         let buf = std::mem::take(&mut self.apc_buf);
         // 只关心 Kitty 图形协议：`_G...`。其余 APC（少见）直接丢弃，等价于 vte 原本的行为。
@@ -197,6 +206,7 @@ impl KittyGraphicsScanner {
                 fields.get("r").and_then(|v| v.parse().ok()),
             ) {
                 self.placements.insert(id, (cols, rows));
+                self.last_placement = Some(id);
             }
         }
 

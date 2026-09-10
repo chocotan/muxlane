@@ -227,6 +227,11 @@ impl PtySession {
         for (k, v) in &cfg.env {
             cmd.env(k, v);
         }
+        // Never leak the parent Pi process's session identity into a new pane.
+        // When muxlane itself is launched from Pi, its long-lived tmux server can
+        // otherwise make every child Pi reuse the parent's session file/id.
+        cmd.env_remove("PI_SESSION_FILE");
+        cmd.env_remove("PI_SESSION_ID");
         cmd.env("MUXLANE_AGENT_ID", &cfg.agent);
 
         let child = pair.slave.spawn_command(cmd).context("spawn command")?;
@@ -548,6 +553,18 @@ fn configure_tmux_server_inner(server: &str, config_path: &Path) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
+    // The tmux server inherits the environment of the process that first starts
+    // it. Clear Pi's identity there too, otherwise `new-session -A` can re-inject
+    // the stale values into panes even after the client environment is sanitized.
+    for name in ["PI_SESSION_FILE", "PI_SESSION_ID"] {
+        let ok = std::process::Command::new("tmux")
+            .args(["-L", server, "set-environment", "-gu", name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        all_ok &= ok;
+    }
     all_ok && sourced
 }
 
@@ -579,6 +596,8 @@ set-option -g set-clipboard external
 set-option -g copy-command \"if command -v pbcopy >/dev/null 2>&1; then pbcopy; elif command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; else cat >/dev/null; fi\"
 set-option -sg escape-time 10
 set-environment -gu NO_COLOR
+set-environment -gu PI_SESSION_FILE
+set-environment -gu PI_SESSION_ID
 set-environment -g COLORTERM truecolor
 set-environment -g CLICOLOR 1
 set-environment -g CLICOLOR_FORCE 1
@@ -675,6 +694,8 @@ mod tests {
         assert!(config.contains("set-option -g copy-command"));
         assert!(config.contains("set-option -g xterm-keys on"));
         assert!(config.contains("set-option -g history-limit 50000"));
+        assert!(config.contains("set-environment -gu PI_SESSION_FILE"));
+        assert!(config.contains("set-environment -gu PI_SESSION_ID"));
         assert!(config.contains("copy-mode -M"));
         assert!(config.contains("bind-key -T copy-mode-vi WheelDownPane"));
         assert!(config.contains("bind-key -T copy-mode WheelDownPane"));

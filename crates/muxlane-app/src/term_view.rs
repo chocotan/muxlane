@@ -1569,6 +1569,9 @@ impl Render for TermView {
                                 bounds: state.inner,
                             }),
                             |window| {
+                                // 同一张图的占位 cell 每帧可能有几百个，paint_image 每个都调一次会很卡；
+                                // 整张图每帧只画一次（image_bounds 已覆盖整图），cell 级只留选区高亮。
+                                let mut painted_images = std::collections::HashSet::new();
                                 for run in &state.runs {
                                     let origin = point(
                                         state.inner.origin.x
@@ -1583,14 +1586,16 @@ impl Render for TermView {
                                                 state.line_height,
                                             ),
                                         };
-                                        let _ = window.paint_image(
-                                            cell_bounds,
-                                            *image_bounds,
-                                            gpui::Corners::default(),
-                                            image.clone(),
-                                            0,
-                                            false,
-                                        );
+                                        if painted_images.insert(Arc::as_ptr(image)) {
+                                            let _ = window.paint_image(
+                                                *image_bounds,
+                                                *image_bounds,
+                                                gpui::Corners::default(),
+                                                image.clone(),
+                                                0,
+                                                false,
+                                            );
+                                        }
                                         // 选中的图片格子：在图上盖一层半透明选区色，而不是退化成画字形。
                                         if run.selected || run.inverse {
                                             let mut tint = rgba(term_theme.selection());

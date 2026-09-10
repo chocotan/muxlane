@@ -39,12 +39,16 @@ export function shouldIgnoreRun(ctx) {
 export default function (pi) {
   registerInlineImages(pi)
   let latestAssistant = ""
+  // 最近一条 assistant 错误消息（stopReason === "error"）。agent_end/agent_settled
+  // 事件本身不带 error 字段，只能靠消息流判断最终是不是失败。
+  let lastError = ""
   const seenAskUserCalls = new Set()
   let doneReported = false
 
   pi.on("session_start", async (_event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
     latestAssistant = ""
+    lastError = ""
     doneReported = false
     seenAskUserCalls.clear()
   })
@@ -77,6 +81,11 @@ export default function (pi) {
     if (shouldIgnoreRun(ctx)) return
     const message = event?.message
     if (message?.role === "assistant") {
+      if (message.stopReason === "error") {
+        lastError = shortText(message.errorMessage || "执行出错")
+      } else {
+        lastError = ""
+      }
       const text = typeof message.content === "string" ? message.content : assistantText([message])
       if (text) latestAssistant = shortText(text, 180)
     }
@@ -93,6 +102,9 @@ export default function (pi) {
     if (event?.error || ctx?.error) {
       const err = shortText(event?.error || ctx?.error || "执行出错")
       await report("failed", `任务异常: ${err}`)
+    } else if (lastError) {
+      await report("failed", `任务异常: ${lastError}`)
+      lastError = ""
     } else {
       await report("done", msg || "任务已完成")
     }
@@ -108,6 +120,9 @@ export default function (pi) {
     if (event?.error || ctx?.error) {
       const err = shortText(event?.error || ctx?.error || "执行出错")
       await report("failed", `任务异常: ${err}`)
+    } else if (lastError) {
+      await report("failed", `任务异常: ${lastError}`)
+      lastError = ""
     } else {
       await report("done", msg || "任务已完成")
     }
