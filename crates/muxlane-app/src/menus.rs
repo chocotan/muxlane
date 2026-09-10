@@ -8,6 +8,7 @@ use gpui::{
     div, prelude::*, relative, rgba, Context, Focusable, ParentElement, Pixels, Point, Styled,
 };
 use muxlane_core::model::AgentId;
+use std::sync::Arc;
 
 pub(crate) fn clamp_menu_position(
     anchor: Point<Pixels>,
@@ -192,12 +193,34 @@ impl MuxlaneApp {
                 let host_name_2 = host.clone();
                 let host_name_3 = host.clone();
                 let host_obj = self.remotes.iter().find(|r| r.cfg.name == *host).cloned();
+                let refresh_host = host_obj.clone();
                 div()
                     .w(ui_px(200.))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
                     .shadow_lg()
+                    .child(
+                        semantic_button(
+                            "tree-refresh-remote",
+                            i18n::text(self.language, "menu.refresh_remote"),
+                            theme,
+                        )
+                        .px_3()
+                        .py_2()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.fg0))
+                        .hover(|style| style.bg(rgba(theme.bg2)))
+                        .on_click(cx.listener(move |this, _event, window, cx| {
+                            if let Some(remote) = &refresh_host {
+                                this.refresh_remote(Arc::clone(remote), cx);
+                                this.focus.focus(window, cx);
+                            }
+                            this.tree_menu = None;
+                            cx.notify();
+                        }))
+                        .child(i18n::text(self.language, "menu.refresh_remote")),
+                    )
                     .child(
                         semantic_button(
                             "tree-reconnect",

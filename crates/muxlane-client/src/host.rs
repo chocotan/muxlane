@@ -511,6 +511,18 @@ impl RemoteHost {
         result
     }
 
+    /// Immediately fetch and publish the authoritative project/session list.
+    ///
+    /// Unlike `reconnect`, this keeps the healthy subscription connection in
+    /// place. Publishing through the normal state event keeps every UI client
+    /// on the same snapshot reconciliation path.
+    pub async fn refresh_snapshot(&self) -> anyhow::Result<()> {
+        let snapshot = self.fetch_snapshot().await?;
+        self.set_state(RemoteState::Online(snapshot), &self.events_tx)
+            .await;
+        Ok(())
+    }
+
     pub async fn send_term_input(
         &self,
         agent: &muxlane_core::model::AgentId,

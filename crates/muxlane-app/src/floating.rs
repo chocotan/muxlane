@@ -480,7 +480,15 @@ impl MuxlaneApp {
     /// the two windows fight over the same terminal.
     fn remove_from_all_layouts(&mut self, agent: &AgentId) {
         if let Some(pane) = self.pane_tree.pane_for_agent(agent) {
+            let closes_maximized = self.maximized_pane.as_ref() == Some(&pane);
             self.pane_tree.close_tab(&pane, agent);
+            if closes_maximized {
+                self.maximized_pane = None;
+            }
+            if self.pane_tree.group(&self.active_pane).is_none() {
+                self.active_pane = self.pane_tree.first_pane_id();
+                self.maximized_pane = None;
+            }
         }
         self.workspace
             .remove_agents(&HashSet::from([agent.clone()]));

@@ -1,4 +1,7 @@
-use muxlane_client::{stream_term, Connection, HostCfg, RemoteHost, SshAuth, Target, TermUpdate};
+use muxlane_client::{
+    stream_term, ClientEvent, Connection, HostCfg, RemoteHost, RemoteState, SshAuth, Target,
+    TermUpdate,
+};
 use muxlane_core::protocol::b64_encode;
 use muxlane_core::protocol::{
     read_frame, write_frame, EventMsg, Request, Response, TermSubscribeResult,
@@ -85,6 +88,56 @@ async fn remote_host_reuses_rpc_connection() {
     );
     host.fetch_snapshot().await.unwrap();
     host.fetch_snapshot().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn refresh_snapshot_publishes_the_fetched_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("refresh.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let mut expected = muxlane_core::model::Snapshot::default();
+    expected.projects.push(muxlane_core::model::Project {
+        id: "project-1".into(),
+        name: "Project 1".into(),
+        path: "/tmp/project-1".into(),
+        branch: None,
+        agents: Vec::new(),
+    });
+    let response_snapshot = expected.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut r = tokio::io::BufReader::new(r);
+        let req: Request = serde_json::from_value(read_frame(&mut r).await.unwrap()).unwrap();
+        write_frame(
+            &mut w,
+            &Response::ok(req.id, serde_json::to_value(response_snapshot).unwrap()),
+        )
+        .await
+        .unwrap();
+    });
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(1);
+    let host = RemoteHost::new(
+        HostCfg {
+            name: "test".into(),
+            target: Target::Socket(sock.to_string_lossy().into_owned()),
+            auth: SshAuth::default(),
+            retry_base_ms: 200,
+        },
+        events_tx,
+    );
+
+    host.refresh_snapshot().await.unwrap();
+
+    let event = events_rx.recv().await.unwrap();
+    assert!(matches!(
+        event,
+        ClientEvent::StateChanged {
+            host,
+            state: RemoteState::Online(snapshot),
+        } if host == "test" && snapshot == expected
+    ));
     server.await.unwrap();
 }
 

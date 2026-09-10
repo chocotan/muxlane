@@ -222,15 +222,28 @@ impl PaneNode {
         }
     }
     pub fn close_tab(&mut self, pane: &PaneId, agent: &AgentId) -> bool {
-        if let Some(g) = self.group_mut(pane) {
+        let removed = if let Some(g) = self.group_mut(pane) {
             if !g.tabs.contains(agent) {
                 return false;
             }
             g.close(agent);
             true
         } else {
-            false
+            return false;
+        };
+        if removed && self.group(pane).is_some_and(|group| group.tabs.is_empty()) {
+            // A pane with no tabs is no longer useful. Reuse the existing
+            // tree normalization so its parent split collapses and sibling
+            // sizes are renormalized.
+            if let Some(next) = self.without_pane(pane) {
+                *self = next;
+            } else {
+                // Keep one empty root pane as the insertion target for the
+                // next session when the tree had only one pane.
+                *self = PaneNode::empty();
+            }
         }
+        removed
     }
 
     /// 清理已不存在的 agent tab（重启恢复布局骨架时使用）。
@@ -400,6 +413,20 @@ mod tests {
         assert!(!tree.close_tab(&pane, &"missing".into()));
         assert!(tree.close_tab(&pane, &"a".into()));
         assert!(!tree.close_tab(&pane, &"a".into()));
+    }
+
+    #[test]
+    fn closing_last_tab_removes_its_pane_and_collapses_split() {
+        let mut tree = PaneNode::with_tab("a".into());
+        let first = tree.first_pane_id();
+        let second = tree
+            .split(&first, SplitAxis::Horizontal, "b".into())
+            .unwrap();
+
+        assert!(tree.close_tab(&second, &"b".into()));
+        assert_eq!(tree.leaf_count(), 1);
+        assert!(tree.group(&second).is_none());
+        assert_eq!(tree.group(&first).unwrap().tabs, vec!["a".to_string()]);
     }
     #[test]
     fn activating_a_tab_preserves_its_pane_identity() {

@@ -219,7 +219,17 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "No open sessions",
     ),
     ("menu.deleting", "删除中…", "Deleting…"),
+    (
+        "menu.refresh_remote",
+        "刷新项目和会话列表",
+        "Refresh Projects and Sessions",
+    ),
     ("menu.reconnect", "重新连接", "Reconnect"),
+    (
+        "error.refresh_remote",
+        "刷新远端项目和会话失败：{error}",
+        "Failed to refresh remote projects and sessions: {error}",
+    ),
     (
         "menu.reinstall_remote",
         "重新部署 / 安装远端 Muxlane…",

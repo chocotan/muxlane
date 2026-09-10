@@ -204,6 +204,41 @@ impl MuxlaneApp {
         cx.notify();
     }
 
+    pub(crate) fn refresh_remote(
+        &mut self,
+        remote: Arc<muxlane_client::RemoteHost>,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(
+            self.remote_states.get(&remote.cfg.name),
+            Some(muxlane_client::RemoteState::Online(_))
+        ) {
+            // An offline/connecting host has no healthy subscription to keep.
+            // Wake its connection loop; that path fetches a full snapshot once
+            // the service becomes reachable.
+            remote.reconnect();
+            cx.notify();
+            return;
+        }
+        let task = self.spawn_remote_operation({
+            let remote = Arc::clone(&remote);
+            async move { remote.refresh_snapshot().await }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    let message = i18n::text(this.language, "error.refresh_remote")
+                        .replace("{error}", &error.to_string());
+                    this.notifications
+                        .update(cx, |center, cx| center.show_error(message, cx));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn begin_delete(&mut self, target: DeleteTarget, cx: &mut Context<Self>) {
         if self.delete_busy {
             return;
