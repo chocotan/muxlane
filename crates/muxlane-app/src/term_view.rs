@@ -1218,6 +1218,17 @@ impl Render for TermView {
                 cx.notify();
             });
             let activation = cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    let focus = this.focus.clone();
+                    // X11/fcitx 在 FocusIn 时重建 XIM context；等这一轮窗口状态和
+                    // InputHandler 都注册完，再恢复 focus/候选框位置。
+                    window.on_next_frame(move |window, cx| {
+                        if window.is_window_active() {
+                            focus.focus(window, cx);
+                            window.invalidate_character_coordinates();
+                        }
+                    });
+                }
                 cx.emit(TermFocusEvent {
                     agent: this.agent.clone(),
                     window: window.window_handle().window_id(),
@@ -1227,7 +1238,7 @@ impl Render for TermView {
             });
             self.focus_subscriptions = Some((focus_in, focus_out, activation));
         }
-        let focused = self.focus.is_focused(window);
+        let focused = window.is_window_active() && self.focus.is_focused(window);
         let font_family = self.font_family.clone();
         let term_theme = self.theme;
         if let Some(writer) = &self.writer {

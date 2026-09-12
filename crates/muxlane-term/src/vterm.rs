@@ -713,9 +713,12 @@ fn build_row(term: &Term<ClipboardBridge>, visual: usize, fallback_id: Option<u3
         if ch == KITTY_PLACEHOLDER {
             // image id 编码在 cell 真实的前景色里；tmux 选区/反显用的是 INVERSE 标志，
             // 上面已经把 fg/bg 换了位，这里必须用 cell.fg 而不是换位后的 fg。
-            if let Some((image_ref, id_fallback)) =
-                decode_placeholder(cell.fg, cell.zerowidth(), &mut prev_placeholder, fallback_id)
-            {
+            if let Some((image_ref, id_fallback)) = decode_placeholder(
+                cell.fg,
+                cell.zerowidth(),
+                &mut prev_placeholder,
+                fallback_id,
+            ) {
                 if let Some(r) = current.take() {
                     runs.push(r);
                 }

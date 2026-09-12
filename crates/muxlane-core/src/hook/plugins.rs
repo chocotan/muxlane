@@ -107,7 +107,10 @@ assert.equal(extension.isSubagentSession(context("parent.jsonl", "forked investi
 assert.equal(extension.isSubagentSession(context(undefined, "worker#76869bf6")), false)
 
 const handlers = new Map()
-extension.default({ on: (name, callback) => handlers.set(name, callback) })
+extension.default({
+  on: (name, callback) => handlers.set(name, callback),
+  registerEntryRenderer: () => {},
+})
 assert.equal(handlers.size, 7)
 const event = new Proxy({}, { get() { throw new Error("ignored event was inspected") } })
 for (const callback of handlers.values()) await callback(event, child)
