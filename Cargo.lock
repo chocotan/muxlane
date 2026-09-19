@@ -3320,7 +3320,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-app"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3343,7 +3343,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-client"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-core"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "base64",
  "hmac",
@@ -3381,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-server"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3399,7 +3399,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-store"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "muxlane-core",
@@ -3410,7 +3410,7 @@ dependencies = [
 
 [[package]]
 name = "muxlane-term"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
