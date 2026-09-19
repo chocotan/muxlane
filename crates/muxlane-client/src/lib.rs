@@ -11,6 +11,15 @@ pub async fn release_remote_tunnel(host: &str) {
     tunnel::release_tunnel(host).await;
 }
 
+/// 小文件直传（剪贴板图片粘贴到远端）
+pub async fn upload_bytes_to_remote(
+    cfg: &HostCfg,
+    bytes: &[u8],
+    remote_path: &str,
+) -> Result<(), crate::tunnel::TunnelError> {
+    tunnel::upload_bytes(cfg, bytes, remote_path).await
+}
+
 use anyhow::Result;
 use muxlane_core::model::Snapshot;
 use muxlane_core::protocol::{

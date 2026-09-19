@@ -301,6 +301,11 @@ impl ShapeCache {
 pub enum RemoteTermCommand {
     Input(Vec<u8>),
     Resize(u16, u16),
+    /// 剪贴板图片：先经 SSH 落到远端 /tmp，再粘贴远端路径
+    PasteImage {
+        bytes: Vec<u8>,
+        ext: String,
+    },
 }
 
 #[derive(Clone)]
@@ -914,6 +919,24 @@ impl TermView {
 
     fn paste_clipboard(&self, cx: &mut Context<Self>) {
         let clipboard = cx.read_from_clipboard();
+        // 远端会话粘贴图片：不能把本地临时路径发给远端（远端上不存在），
+        // 改经 SSH 上传到远端 /tmp 后粘贴远端路径。
+        if let Some(item) = &clipboard {
+            if item.text().is_none_or(|text| text.is_empty()) {
+                if let Some(sender) = self.remote_input.clone() {
+                    if let Some(entry) = item.entries().iter().find_map(|entry| match entry {
+                        ClipboardEntry::Image(image) => Some(image),
+                        _ => None,
+                    }) {
+                        let _ = sender.send(RemoteTermCommand::PasteImage {
+                            bytes: entry.bytes().to_vec(),
+                            ext: entry.format().extension().to_string(),
+                        });
+                        return;
+                    }
+                }
+            }
+        }
         let text = match clipboard {
             Some(item) => {
                 if let Some(text) = item.text().filter(|text| !text.is_empty()) {

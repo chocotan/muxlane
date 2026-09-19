@@ -196,3 +196,53 @@ fn parses_socket_and_ssh_targets() {
             if host == "choco@nuc" && socket.ends_with("/muxlane.sock")
     ));
 }
+
+/// 真机集成检查：MUXLANE_TEST_SSH_HOST=host cargo test -- --ignored
+/// 验证 upload_bytes 落盘远端且内容一致（粘贴图片链路的核心）。
+#[tokio::test]
+#[ignore = "set MUXLANE_TEST_SSH_HOST to run against a real host"]
+async fn upload_bytes_lands_file_on_remote_host() {
+    use muxlane_client::HostCfg;
+    use sha2::Digest;
+    let host = std::env::var("MUXLANE_TEST_SSH_HOST").expect("MUXLANE_TEST_SSH_HOST not set");
+    let cfg = HostCfg {
+        name: host.clone(),
+        target: muxlane_client::Target::Ssh {
+            host,
+            socket: String::new(),
+        },
+        auth: muxlane_client::SshAuth::default(),
+        retry_base_ms: 200,
+    };
+    let payload: Vec<u8> = (0u8..=255).cycle().take(1024 * 33).collect();
+    let path = format!("/tmp/muxlane-upload-test-{}", std::process::id());
+    muxlane_client::upload_bytes_to_remote(&cfg, &payload, &path)
+        .await
+        .unwrap();
+    let output = std::process::Command::new("ssh")
+        .args(["-o", "BatchMode=yes", &format!("{}", cfg_target(&cfg))])
+        .arg("sha256sum")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let remote_hash = stdout.split_whitespace().next().unwrap();
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&payload);
+    let local_hash = format!("{:x}", hasher.finalize());
+    assert_eq!(remote_hash, local_hash, "remote file content mismatch");
+    std::process::Command::new("ssh")
+        .args(["-o", "BatchMode=yes", &cfg_target(&cfg)])
+        .arg("rm")
+        .arg(&path)
+        .output()
+        .unwrap();
+}
+
+fn cfg_target(cfg: &HostCfg) -> String {
+    match &cfg.target {
+        muxlane_client::Target::Ssh { host, .. } => host.clone(),
+        muxlane_client::Target::Socket(path) => path.clone(),
+    }
+}

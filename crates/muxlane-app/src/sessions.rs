@@ -243,6 +243,7 @@ impl MuxlaneApp {
                     while let Some(first) = command_rx.recv().await {
                         let mut input = Vec::new();
                         let mut resize = None;
+                        let mut pastes: Vec<crate::term_view::RemoteTermCommand> = Vec::new();
                         let mut collect =
                             |command: crate::term_view::RemoteTermCommand| match command {
                                 crate::term_view::RemoteTermCommand::Input(bytes) => {
@@ -250,6 +251,11 @@ impl MuxlaneApp {
                                 }
                                 crate::term_view::RemoteTermCommand::Resize(cols, rows) => {
                                     resize = Some((cols, rows));
+                                }
+                                paste @ crate::term_view::RemoteTermCommand::PasteImage {
+                                    ..
+                                } => {
+                                    pastes.push(paste);
                                 }
                             };
                         collect(first);
@@ -263,6 +269,45 @@ impl MuxlaneApp {
                             {
                                 command_vterm.feed(
                                     format!("\r\n\x1b[31mremote input failed: {error}\x1b[0m\r\n")
+                                        .as_bytes(),
+                                );
+                            }
+                        }
+                        for paste in pastes {
+                            let crate::term_view::RemoteTermCommand::PasteImage { bytes, ext } =
+                                paste
+                            else {
+                                continue;
+                            };
+                            // ponytail: 串行上传会阻塞后续按键批处理；粘贴图片是低频操作
+                            let path = format!(
+                                "/tmp/muxlane-paste-{}.{}",
+                                muxlane_core::model::new_id("image"),
+                                ext
+                            );
+                            let payload = if command_vterm.modes().bracketed_paste {
+                                let mut framed = b"\x1b[200~".to_vec();
+                                framed.extend_from_slice(path.as_bytes());
+                                framed.extend_from_slice(b"\x1b[201~");
+                                framed
+                            } else {
+                                path.clone().into_bytes()
+                            };
+                            let result = async {
+                                muxlane_client::upload_bytes_to_remote(
+                                    &command_remote.cfg,
+                                    &bytes,
+                                    &path,
+                                )
+                                .await?;
+                                command_remote
+                                    .send_term_input(&command_agent, &payload)
+                                    .await
+                            }
+                            .await;
+                            if let Err(error) = result {
+                                command_vterm.feed(
+                                    format!("\r\n\x1b[31mremote paste failed: {error}\x1b[0m\r\n")
                                         .as_bytes(),
                                 );
                             }

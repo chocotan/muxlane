@@ -1,5 +1,5 @@
 //! SSH 隧道：复用 ControlMaster，把远端 muxlane.sock 转发到本地。
-use crate::host::SshAuth;
+use crate::host::{HostCfg, SshAuth, Target};
 use crate::UploadProgress;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
@@ -287,6 +287,54 @@ fi"#;
     }
     let line = String::from_utf8_lossy(&output.stdout);
     parse_probe_output(&line)
+}
+
+/// 小文件直传（剪贴板图片粘贴到远端）：stdin `cat` 到远端路径，复用 ControlMaster。
+pub async fn upload_bytes(
+    cfg: &HostCfg,
+    bytes: &[u8],
+    remote_path: &str,
+) -> Result<(), TunnelError> {
+    let host = match &cfg.target {
+        Target::Ssh { host, .. } => host.clone(),
+        Target::Socket(_) => {
+            return Err(TunnelError::Other(
+                "direct socket target cannot receive uploads".into(),
+            ))
+        }
+    };
+    let destination = cfg.auth.destination(&host);
+    let script = format!("cat > {}", sh_quote(remote_path));
+    let mut child = ssh_command(&cfg.auth)
+        .args(shared_master_args(&destination))
+        .arg(&destination)
+        .arg(&script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| TunnelError::Other(error.to_string()))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| TunnelError::Other("SSH upload stdin unavailable".into()))?;
+    stdin
+        .write_all(bytes)
+        .await
+        .map_err(|error| TunnelError::Other(error.to_string()))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| TunnelError::Other(error.to_string()))?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| TunnelError::Other(error.to_string()))?;
+    if !output.status.success() {
+        return Err(classify_failure(&output.stderr));
+    }
+    Ok(())
 }
 
 async fn upload_binary(
