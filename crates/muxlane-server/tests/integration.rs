@@ -1179,7 +1179,7 @@ async fn shell_foreground_agent_identity_tracks_process_entry_exit_and_reentry()
     let session = server.session(&agent.id).await.unwrap();
     // Wait for the real interactive shell, then run synthetic foreground processes
     // with Agent argv[0] names. No installed Agent, API request, or credentials needed.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    if let Err(_) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if String::from_utf8_lossy(&session.replay_tail(4096)).contains("MUXLANE_TEST_READY>") {
                 break;
@@ -1188,7 +1188,18 @@ async fn shell_foreground_agent_identity_tracks_process_entry_exit_and_reentry()
         }
     })
     .await
-    .unwrap();
+    {
+        let replay = String::from_utf8_lossy(&session.replay_tail(8192)).into_owned();
+        let tmux_ls = std::process::Command::new("tmux")
+            .args(["-L", "muxlane", "ls"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        panic!(
+            "shell prompt never appeared\ntmux ls:\n{}\nreplay:\n{}",
+            tmux_ls, replay
+        );
+    }
     for (command, kind, title) in [
         (
             "/bin/bash -c 'exec -a pi /bin/sleep 30'\r",
