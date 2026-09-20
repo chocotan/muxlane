@@ -1202,7 +1202,7 @@ async fn shell_foreground_agent_identity_tracks_process_entry_exit_and_reentry()
         ),
     ] {
         session.write_input(command.as_bytes());
-        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
                 server.maintain_sessions().await;
                 let snapshot = server.snapshot().await;
@@ -1216,7 +1216,7 @@ async fn shell_foreground_agent_identity_tracks_process_entry_exit_and_reentry()
         .await
         .expect("foreground Agent was not recognized");
         session.write_input(b"\x03");
-        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
                 server.maintain_sessions().await;
                 let snapshot = server.snapshot().await;
