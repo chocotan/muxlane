@@ -1216,12 +1216,26 @@ async fn shell_foreground_agent_identity_tracks_process_entry_exit_and_reentry()
         .await
         .unwrap_or_else(|_| {
             let panes = std::process::Command::new("tmux")
-                .args(["-L", "muxlane", "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}"])
-                .output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+                .args([
+                    "-L",
+                    "muxlane",
+                    "list-panes",
+                    "-a",
+                    "-F",
+                    "#{session_name}\t#{pane_pid}",
+                ])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
             let ps = std::process::Command::new("ps")
                 .args(["-axo", "pid=,ppid=,pgid=,tpgid=,args="])
-                .output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-            panic!("foreground Agent was not recognized\npanes:\n{}\nps:\n{}", panes, ps);
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            panic!(
+                "foreground Agent was not recognized\npanes:\n{}\nps:\n{}",
+                panes, ps
+            );
         });
         session.write_input(b"\x03");
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
