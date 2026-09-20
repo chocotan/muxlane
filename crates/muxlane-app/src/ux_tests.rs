@@ -510,6 +510,59 @@ fn default_terminal_settings_select_all_presets_and_persist_without_installed_fi
 }
 
 #[test]
+fn relay_url_input_keeps_focus_and_accepts_typed_text() {
+    with_app(|cx, window, view| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.settings_page = SettingsPage::General;
+                app.open_settings(window, cx);
+            });
+        })
+        .unwrap();
+        draw(cx, window);
+        draw(cx, window);
+        // 点击输入框获得焦点（TextField 内部 on_click）。
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.settings_relay_input
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            });
+        })
+        .unwrap();
+        draw(cx, window);
+        // 帧同步后焦点必须仍在输入框上（on_next_frame 的 reconcile
+        // 只在焦点完全离开 settings 页时才重新分配）。
+        cx.update_window(window, |_, window, cx| {
+            let focused_on_input = view.update(cx, |app, cx| {
+                app.settings_relay_input
+                    .focus_handle(cx)
+                    .is_focused(window)
+            });
+            assert!(
+                focused_on_input,
+                "relay input lost focus after frame reconciliation"
+            );
+        })
+        .unwrap();
+        // 输入普通字符必须落到输入框。
+        cx.simulate_keystrokes(window, "w");
+        draw(cx, window);
+        cx.update(|cx| {
+            let text = view
+                .read(cx)
+                .settings_relay_input
+                .read(cx)
+                .text();
+            assert!(
+                text.contains('w'),
+                "typed text did not reach relay input: {text:?}"
+            );
+        });
+    });
+}
+
+#[test]
 fn settings_capture_rebinds_and_disables_all_default_terminal_actions() {
     with_app(|cx, window, view| {
         cx.update_window(window, |_, window, cx| {

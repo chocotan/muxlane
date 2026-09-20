@@ -531,6 +531,11 @@ impl MuxlaneApp {
     fn render_relay_url_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
         let apply_label = i18n::text(self.language, "settings.relay_url_apply");
+        // 输入框焦点必须进 Tab 循环：否则 open_settings 后 on_next_frame 的
+        // 焦点兑底会在每帧后把焦点拽回循环内控件，输入框永远无法保持焦点。
+        self.settings_focus
+            .order
+            .push(self.settings_relay_input.focus_handle(cx));
         div()
             .flex()
             .items_center()
