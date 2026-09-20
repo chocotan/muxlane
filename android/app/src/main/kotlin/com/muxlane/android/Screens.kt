@@ -38,6 +38,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -85,11 +87,16 @@ fun MuxlaneRoot(model: MuxlaneViewModel) {
 @Composable
 private fun PairScreen(model: MuxlaneViewModel) {
     val state by model.state.collectAsState()
-    var showRelay by remember { mutableStateOf(false) }
+    var showRelay by remember { mutableStateOf(true) }
     val codeFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { codeFocus.requestFocus() }
     Column(
-        Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(horizontal = 24.dp, vertical = 20.dp),
+        Modifier
+            .fillMaxSize()
+            .safeDrawingPadding()
+            .imePadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("把手机接到电脑", color = MuxFg0, fontSize = 22.sp, fontWeight = FontWeight.Medium, lineHeight = 28.sp)
