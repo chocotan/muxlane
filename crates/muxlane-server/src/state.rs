@@ -11,14 +11,14 @@ struct ShellIdentity {
 }
 
 pub struct ServerState {
-    pub machine: MachineInfo,
-    pub projects: Vec<Project>,
-    pub agents: Vec<AgentInstance>,
+    pub(crate) machine: MachineInfo,
+    pub(crate) projects: Vec<Project>,
+    pub(crate) agents: Vec<AgentInstance>,
     /// 状态检测
-    pub detector: DetectionEngine,
+    pub(crate) detector: DetectionEngine,
     shell_identities: std::collections::HashMap<AgentId, ShellIdentity>,
     /// 全局状态事件广播（app 内部路径与 wire 协议共用）
-    pub events: tokio::sync::broadcast::Sender<muxlane_core::protocol::EventMsg>,
+    pub(crate) events: tokio::sync::broadcast::Sender<muxlane_core::protocol::EventMsg>,
 }
 
 impl ServerState {
@@ -36,6 +36,31 @@ impl ServerState {
             shell_identities: Default::default(),
             events,
         }
+    }
+
+    /// 启动时装入持久化的项目列表（清掉其中缓存的运行时 agent 引用）。
+    pub fn with_projects(mut self, projects: Vec<Project>) -> Self {
+        self.projects = projects;
+        for project in &mut self.projects {
+            project.agents.clear();
+        }
+        self
+    }
+
+    #[doc(hidden)] // 测试夹具：绕过生命周期直接塞 project+agent
+    pub fn fixture_push(&mut self, project: Project, agent: AgentInstance) {
+        if let Some(existing) = self
+            .projects
+            .iter_mut()
+            .find(|existing| existing.id == project.id)
+        {
+            if !existing.agents.contains(&agent.id) {
+                existing.agents.push(agent.id.clone());
+            }
+        } else {
+            self.projects.push(project);
+        }
+        self.agents.push(agent);
     }
 
     pub fn snapshot(&self) -> Snapshot {

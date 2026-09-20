@@ -165,6 +165,18 @@ impl MuxlaneApp {
             return true;
         }
         let Some(sess) = self.server.try_session(agent) else {
+            // 会话表锁忙时 try_session 拿不到：走 async 锁兑底，避免这一帧挂不上终端。
+            let server = Arc::clone(&self.server);
+            let agent = agent.clone();
+            cx.spawn(async move |this, cx| {
+                if server.session(&agent).await.is_some() {
+                    let _ = this.update(cx, |this, cx| {
+                        this.ensure_local_terminal(&agent, cx);
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
             return false;
         };
         let term = Self::create_local_term(

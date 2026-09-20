@@ -57,23 +57,25 @@ fn remote_mark_seen_writes_through_and_survives_client_restart() {
     });
     runtime.block_on(async {
         let mut state = peer_state.write().await;
-        state.projects.push(Project {
-            id: "p1".into(),
-            name: "p1".into(),
-            path: "/tmp/p1".into(),
-            branch: None,
-            agents: vec![agent_id.clone()],
-        });
-        state.agents.push(AgentInstance {
-            id: agent_id.clone(),
-            project: "p1".into(),
-            agent_type: AgentType::Shell,
-            title: "Terminal".into(),
-            status: AgentStatus::Done,
-            status_since: 10,
-            seen: false,
-            tmux_session: None,
-        });
+        state.fixture_push(
+            Project {
+                id: "p1".into(),
+                name: "p1".into(),
+                path: "/tmp/p1".into(),
+                branch: None,
+                agents: vec![agent_id.clone()],
+            },
+            AgentInstance {
+                id: agent_id.clone(),
+                project: "p1".into(),
+                agent_type: AgentType::Shell,
+                title: "Terminal".into(),
+                status: AgentStatus::Done,
+                status_since: 10,
+                seen: false,
+                tmux_session: None,
+            },
+        );
     });
 
     with_app_on_runtime(&runtime, |cx, window, app| {
@@ -144,6 +146,7 @@ fn remote_mark_seen_writes_through_and_survives_client_restart() {
             peer_state
                 .read()
                 .await
+                .snapshot()
                 .agents
                 .iter()
                 .find(|a| a.id == agent_id)

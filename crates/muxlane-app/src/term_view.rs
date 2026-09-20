@@ -4,9 +4,9 @@ use crate::ui_scale::px as ui_px;
 use gpui::{
     canvas, div, fill, point, prelude::*, rgba, size, App, Bounds, ClipboardEntry, ClipboardItem,
     Context, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle,
-    FontWeight, Hsla, Image, ImageFormat, InputHandler, MouseButton, ParentElement, Pixels, Point,
-    Render, RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine, Styled, Subscription, Task,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    FontWeight, Hsla, ImageFormat, InputHandler, MouseButton, ParentElement, Pixels, Point, Render,
+    RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine, Styled, Subscription, Task, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use muxlane_core::model::AgentId;
 use muxlane_term::{PtySession, RenderSnapshot, VTerm};
@@ -43,23 +43,59 @@ fn refresh_snapshot_after_resize(vterm: &VTerm, snapshot: &mut Arc<RenderSnapsho
     *snapshot = vterm.render_snapshot();
 }
 
-/// 把 Kitty 传来的图片字节解成 GPUI 可直接 paint 的 RenderImage（BGRA）。
-/// f=100 走 PNG 解码；f=24/32 是原始 RGB/RGBA 像素，按 s=/v= 尺寸直接拼帧。
-fn decode_kitty_image(
-    stored: &muxlane_term::StoredImage,
-    cx: &App,
-) -> anyhow::Result<Arc<RenderImage>> {
+/// 解码尺寸上限：超过 8192×8192 的图不再解码（几十 MB 的巨图解码
+/// 会耗尽内存并长时间占用后台线程，终端里显示没有意义）。
+const KITTY_MAX_IMAGE_PIXELS: u32 = 8192;
+const KITTY_MAX_IMAGE_BYTES: usize = 256 * 1024 * 1024;
+
+/// 后台线程解码 Kitty 图片成 GPUI 可 paint 的 BGRA RenderImage。
+/// 不依赖任何 UI 上下文（gpui 的 to_image_data 需要 svg_renderer，只能主线程用）。
+fn decode_kitty_image_bytes(stored: &muxlane_term::StoredImage) -> anyhow::Result<RenderImage> {
+    anyhow::ensure!(
+        stored.bytes.len() <= KITTY_MAX_IMAGE_BYTES,
+        "image payload too large: {} bytes",
+        stored.bytes.len()
+    );
     match stored.format {
-        // f=100 名义上是 PNG，但 muxlane 自带的 pi 扩展会把 JPEG/WebP/GIF 原样发过来（不构建依赖 sharp、
-        // 不在 JS 里转码）；按 magic bytes 分辨，交给 gpui 内置的 image 解码器。
+        // f=100 名义上是 PNG，但 muxlane 自带的 pi 扩展会把 JPEG/WebP/GIF 原样发过来；
+        // 按 magic bytes 分辨后交给 image crate 同步解码（GIF 动图只取首帧）。
         100 => {
             let format = sniff_image_format(&stored.bytes).unwrap_or(ImageFormat::Png);
-            Image::from_bytes(format, stored.bytes.clone()).to_image_data(cx.svg_renderer())
+            let image_format = match format {
+                ImageFormat::Png => image::ImageFormat::Png,
+                ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+                ImageFormat::Webp => image::ImageFormat::WebP,
+                ImageFormat::Gif => image::ImageFormat::Gif,
+                ImageFormat::Bmp => image::ImageFormat::Bmp,
+                _ => anyhow::bail!("unsupported image format {format:?}"),
+            };
+            let decoder =
+                image::ImageReader::with_format(std::io::Cursor::new(&stored.bytes), image_format);
+            let (width, height) = decoder.into_dimensions()?;
+            anyhow::ensure!(
+                width <= KITTY_MAX_IMAGE_PIXELS && height <= KITTY_MAX_IMAGE_PIXELS,
+                "image {width}x{height} exceeds {KITTY_MAX_IMAGE_PIXELS}px limit"
+            );
+            let decoded =
+                image::ImageReader::with_format(std::io::Cursor::new(&stored.bytes), image_format)
+                    .decode()?;
+            let mut rgba = decoded.into_rgba8();
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            Ok(RenderImage::new(smallvec::SmallVec::from_elem(
+                image::Frame::new(rgba),
+                1,
+            )))
         }
         24 | 32 => {
             let (Some(width), Some(height)) = (stored.width, stored.height) else {
                 anyhow::bail!("raw pixel image without s=/v= size");
             };
+            anyhow::ensure!(
+                width <= KITTY_MAX_IMAGE_PIXELS && height <= KITTY_MAX_IMAGE_PIXELS,
+                "image {width}x{height} exceeds {KITTY_MAX_IMAGE_PIXELS}px limit"
+            );
             let channels = if stored.format == 24 { 3 } else { 4 };
             let expected = (width as usize) * (height as usize) * channels;
             anyhow::ensure!(
@@ -75,10 +111,10 @@ fn decode_kitty_image(
             }
             let buffer = image::RgbaImage::from_raw(width, height, bgra)
                 .ok_or_else(|| anyhow::anyhow!("RgbaImage::from_raw failed"))?;
-            Ok(Arc::new(RenderImage::new(smallvec::SmallVec::from_elem(
+            Ok(RenderImage::new(smallvec::SmallVec::from_elem(
                 image::Frame::new(buffer),
                 1,
-            ))))
+            )))
         }
         other => anyhow::bail!("unsupported kitty image format f={other}"),
     }
@@ -471,6 +507,8 @@ pub struct TermView {
     shape_cache: Arc<std::sync::Mutex<ShapeCache>>,
     /// Kitty 图片解码缓存：image id -> 已解码的 RenderImage，避免每帧重新 decode PNG。
     kitty_image_cache: Arc<std::sync::Mutex<HashMap<u32, Arc<RenderImage>>>>,
+    /// 正在后台解码的 image id，防止同帧重复 spawn 解码任务。
+    kitty_decode_inflight: Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
     pending_selection: Option<(i32, usize, bool)>,
     #[cfg(test)]
     renders: std::cell::Cell<usize>,
@@ -723,6 +761,9 @@ impl TermView {
             osc52_clipboard_enabled,
             shape_cache: Arc::new(std::sync::Mutex::new(ShapeCache::default())),
             kitty_image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            kitty_decode_inflight: Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
             pending_selection: None,
             #[cfg(test)]
             renders: std::cell::Cell::new(0),
@@ -773,6 +814,9 @@ impl TermView {
             osc52_clipboard_enabled,
             shape_cache: Arc::new(std::sync::Mutex::new(ShapeCache::default())),
             kitty_image_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            kitty_decode_inflight: Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
             pending_selection: None,
             #[cfg(test)]
             renders: std::cell::Cell::new(0),
@@ -950,13 +994,33 @@ impl TermView {
                     })
                 }
             }
-            None => read_system_clipboard_text()
-                .or_else(|| Self::read_primary(cx))
-                .filter(|text| !text.is_empty()),
+            None => {
+                // pbpaste/wl-paste/xclip 是同步子进程，放后台跑，避免卡 UI 线程；
+                // 回来后再走 primary 兜底。
+                cx.spawn(async move |this, cx| {
+                    let text = cx
+                        .background_spawn(async move { read_system_clipboard_text() })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        let text = text
+                            .filter(|text| !text.is_empty())
+                            .or_else(|| Self::read_primary(cx))
+                            .filter(|text| !text.is_empty());
+                        if let Some(text) = text {
+                            this.write_paste_text(text);
+                        }
+                    });
+                })
+                .detach();
+                return;
+            }
         };
-        let Some(text) = text else {
-            return;
-        };
+        if let Some(text) = text {
+            self.write_paste_text(text);
+        }
+    }
+
+    fn write_paste_text(&self, text: String) {
         let Some(sink) = self.input_sink() else {
             return;
         };
@@ -1279,6 +1343,7 @@ impl Render for TermView {
         let cell_size = Arc::clone(&self.cell_size);
         let shape_cache = Arc::clone(&self.shape_cache);
         let kitty_image_cache = Arc::clone(&self.kitty_image_cache);
+        let kitty_decode_inflight = Arc::clone(&self.kitty_decode_inflight);
         let kitty_vterm = self.vterm.clone();
         let scrollbar = self.scrollbar_geometry().map(|(_, geometry)| geometry);
 
@@ -1423,22 +1488,41 @@ impl Render for TermView {
                                                        cell_origin: Point<Pixels>|
          -> Option<(Arc<RenderImage>, Bounds<Pixels>)> {
                             let image = {
-                                let mut guard = kitty_image_cache.lock().ok()?;
+                                let guard = kitty_image_cache.lock().ok()?;
                                 match guard.get(&image_id) {
                                     Some(cached) => cached.clone(),
                                     None => {
                                         // 图片数据可能还没传完（分片中）或者根本没发；先不画，等下一帧。
-                                        // 图片数据可能还没传完（分片中）或者根本没发；先不画，等下一帧。
-                                        let stored = kitty_vterm.kitty_image(image_id)?;
-                                        let decoded = match decode_kitty_image(&stored, cx) {
-                                            Ok(decoded) => decoded,
-                                            Err(error) => {
-                                                tracing::warn!(image_id, format = stored.format, %error, "kitty placeholder: decode failed");
-                                                return None;
-                                            }
+                                        let Some(stored) = kitty_vterm.kitty_image(image_id) else {
+                                            return None;
                                         };
-                                        guard.insert(image_id, decoded.clone());
-                                        decoded
+                                        // 解码放后台：几十 MB 的图在主线程同步解码会冻结整个 UI。
+                                        // in-flight 去重；首帧先不画，解码完成后 notify 重绘。
+                                        if kitty_decode_inflight.lock().ok()?.insert(image_id) {
+                                            let cache = Arc::clone(&kitty_image_cache);
+                                            let inflight = Arc::clone(&kitty_decode_inflight);
+                                            let term = term.clone();
+                                            cx.spawn(async move |cx| {
+                                                // 解码跑后台线程池；完成后再回主线程插缓存并重绘
+                                                let decoded =
+                                                    cx.background_spawn(async move {
+                                                        decode_kitty_image_bytes(&stored)
+                                                    })
+                                                    .await;
+                                                if let Ok(decoded) = decoded {
+                                                    if let Ok(mut guard) = cache.lock() {
+                                                        guard.insert(image_id, Arc::new(decoded));
+                                                    }
+                                                }
+                                                if let Ok(mut guard) = inflight.lock() {
+                                                    guard.remove(&image_id);
+                                                }
+                                                let _ = term
+                                                    .update(cx, |_, cx| cx.notify());
+                                            })
+                                            .detach();
+                                        }
+                                        return None;
                                     }
                                 }
                             };
@@ -1585,15 +1669,15 @@ impl Render for TermView {
                             line_height,
                             base_half,
                             runs,
-                            visible_cursor: snapshot
-                                .cursor
-                                .as_ref()
-                                .map(cursor_bounds)
-                                .or_else(|| {
+                            visible_cursor: snapshot.cursor.as_ref().map(cursor_bounds).or_else(
+                                || {
                                     (focused && snapshot.cursor.is_none())
-                                        .then(|| snapshot.logical_cursor.as_ref().map(cursor_bounds))
+                                        .then(|| {
+                                            snapshot.logical_cursor.as_ref().map(cursor_bounds)
+                                        })
                                         .flatten()
-                                }),
+                                },
+                            ),
                             logical_cursor: snapshot.logical_cursor.as_ref().map(cursor_bounds),
                         }
                     },
