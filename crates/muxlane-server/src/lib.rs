@@ -1,22 +1,25 @@
 //! muxlane-server：本机 Unix socket 服务端（client 也能连它：对端机器的 muxlane、或本机 hook 脚本）
 mod api;
 mod foreground;
+mod relay;
 mod state;
 mod subs;
 mod supervisor;
 
 pub use api::ProjectAddError;
+pub use relay::{PairOffer, RelayHandle};
 pub use state::ServerState;
 pub use subs::SubRegistry;
 
 use fs2::FileExt;
 use muxlane_core::protocol::{
-    methods, read_frame, write_frame, AgentReportParams, EventMsg, Request, Response,
-    TermSubscribeParams, TermSubscribeResult,
+    methods, read_frame, write_frame, AgentReportParams, EventMsg, PairBeginParams, Request,
+    Response, TermSubscribeParams, TermSubscribeResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock as StdRwLock};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -58,6 +61,7 @@ pub struct MuxlaneServer {
     /// Last foreground process sample; bounds `ps` usage across tick and hook paths.
     foreground_sampled_at: Mutex<Option<std::time::Instant>>,
     persistence_path: StdRwLock<Option<PathBuf>>,
+    relay: RelayHandle,
 }
 
 impl MuxlaneServer {
@@ -108,6 +112,7 @@ impl MuxlaneServer {
             lifecycle: Arc::new(Mutex::new(())),
             foreground_sampled_at: Mutex::new(None),
             persistence_path: StdRwLock::new(None),
+            relay: RelayHandle::new(),
         });
         // 转发任务退出时自行摘除条目需要注册表自身的 Weak。
         if let Ok(mut subs) = server.subs.try_lock() {
@@ -146,7 +151,8 @@ impl MuxlaneServer {
             .and_then(|path| path.clone());
         let Some(path) = path else { return Ok(()) };
         let snapshot = self.state.read().await.snapshot();
-        let previous = muxlane_store::load(&path).unwrap_or_default();
+        // 损坏/未来版本的 state.json 必须报错，禁止当空文档再写（会连 secrets.json 一起覆盖）。
+        let previous = muxlane_store::load(&path)?;
         let persisted =
             muxlane_store::PersistedApp::from_snapshot(&snapshot).with_ui_prefs_from(&previous);
         muxlane_store::save(&path, &persisted)
@@ -205,6 +211,8 @@ impl MuxlaneServer {
                     muxlane_core::protocol::features::TERM_RESIZE.into(),
                     muxlane_core::protocol::features::TERM_REPLAY_CHUNKS.into(),
                     muxlane_core::protocol::features::AGENT_MARK_SEEN.into(),
+                    muxlane_core::protocol::features::PAIR.into(),
+                    muxlane_core::protocol::features::PRESET_LIST.into(),
                 ],
             })?,
         ))
@@ -334,7 +342,7 @@ impl MuxlaneServer {
             Ok(instance) => Ok(Response::ok(req.id, serde_json::to_value(instance)?)),
             Err(error) => {
                 let message = error.to_string();
-                let code = if message.starts_with("no such project:") {
+                let code = if error.downcast_ref::<crate::api::NoSuchProject>().is_some() {
                     "no_such_project"
                 } else {
                     "spawn_failed"
@@ -447,8 +455,142 @@ impl MuxlaneServer {
         Ok(Response::method_not_found(request_id, method))
     }
 
+    async fn handle_pair_begin(&self, req: Request) -> anyhow::Result<Response> {
+        let params = match serde_json::from_value::<PairBeginParams>(req.params) {
+            Ok(params) => params,
+            Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+        };
+        let device = params
+            .device
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("phone");
+        if !device
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        {
+            return Ok(Response::err(req.id, "bad_params", "invalid device id"));
+        }
+        tracing::debug!(
+            device,
+            has_code = params.code.is_some(),
+            has_token = params.token.is_some(),
+            "pair.begin"
+        );
+        let issued_subject = if let Some(token) = params
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            match self.auth.verify_mobile(token) {
+                Some(existing) => existing,
+                None => {
+                    return Ok(Response::err(
+                        req.id,
+                        "unauthorized",
+                        "invalid or expired pairing",
+                    ))
+                }
+            }
+        } else if let Some(code) = params
+            .code
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !self.relay.consume_code(code).await {
+                return Ok(Response::err(
+                    req.id,
+                    "unauthorized",
+                    "invalid or expired pairing",
+                ));
+            }
+            format!("mobile:{device}")
+        } else {
+            return Ok(Response::err(
+                req.id,
+                "unauthorized",
+                "invalid or expired pairing",
+            ));
+        };
+        let token = self.auth.token(&issued_subject, 180 * 24 * 60 * 60);
+        tracing::debug!(%issued_subject, "pair.begin authorized");
+        let machine = self.state.read().await.machine.clone();
+        Ok(Response::ok(
+            req.id,
+            serde_json::to_value(muxlane_core::protocol::PairBeginResult { token, machine })?,
+        ))
+    }
+
+    async fn handle_preset_list(&self, req: Request) -> anyhow::Result<Response> {
+        let params =
+            match serde_json::from_value::<muxlane_core::protocol::PresetListParams>(req.params) {
+                Ok(params) => params,
+                Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+            };
+        match self.list_presets(&params.project).await {
+            Ok(presets) => Ok(Response::ok(req.id, serde_json::to_value(presets)?)),
+            Err(error) => Ok(Response::err(req.id, "no_such_project", error.to_string())),
+        }
+    }
+
+    pub fn relay_handle(&self) -> RelayHandle {
+        self.relay.clone()
+    }
+
+    pub(crate) fn relay(&self) -> &RelayHandle {
+        &self.relay
+    }
+
+    pub fn machine_id(&self) -> String {
+        match self.state.try_read() {
+            Ok(state) => state.machine.machine_id.clone(),
+            Err(_) => self.state.blocking_read().machine.machine_id.clone(),
+        }
+    }
+
+    pub fn start_relay(self: &Arc<Self>, url: String) {
+        let url = url.trim().trim_end_matches('/').to_string();
+        let server = Arc::clone(self);
+        self.runtime.spawn({
+            let url = url.clone();
+            async move {
+                server
+                    .relay()
+                    .set_url((!url.is_empty()).then_some(url))
+                    .await;
+            }
+        });
+        if !self.relay.mark_started() {
+            return;
+        }
+        let server = Arc::clone(self);
+        self.runtime.spawn(async move {
+            if let Err(error) = crate::relay::run(server, url).await {
+                tracing::warn!(%error, "relay client stopped");
+            }
+        });
+    }
+
+    pub async fn begin_pair_offer(self: &Arc<Self>) -> anyhow::Result<PairOffer> {
+        self.relay.offer_code().await
+    }
+
     async fn handle_conn(self: Arc<Self>, stream: UnixStream) -> anyhow::Result<()> {
-        let (read_half, mut write_half) = stream.into_split();
+        self.handle_rpc(stream, false).await
+    }
+
+    pub(crate) async fn handle_rpc<S>(
+        self: Arc<Self>,
+        stream: S,
+        require_pair: bool,
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let (read_half, mut write_half) = tokio::io::split(stream);
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(read_half);
@@ -466,6 +608,7 @@ impl MuxlaneServer {
         let mut dirty_rx = self.dirty.subscribe();
         let mut dirty_seen = *dirty_rx.borrow_and_update();
         let mut connection_subs = Vec::new();
+        let mut paired = !require_pair;
 
         loop {
             tokio::select! {
@@ -478,7 +621,16 @@ impl MuxlaneServer {
                                 continue;
                             }
                         };
-                        let response = match req.method.as_str() {
+                        if require_pair && !paired && req.method != methods::PAIR_BEGIN {
+                            write_frame(
+                                &mut write_half,
+                                &Response::err(req.id, "unauthorized", "pair.begin required"),
+                            )
+                            .await?;
+                            break;
+                        }
+                        let method = req.method.clone();
+                        let response = match method.as_str() {
                             methods::SYSTEM_HELLO => self.handle_system_hello(req).await?,
                             methods::STATE_LIST => self.handle_state_list(req).await?,
                             methods::EVENTS_SUBSCRIBE => self.handle_events_subscribe(req, &mut status_rx, &ev_tx).await?,
@@ -492,9 +644,20 @@ impl MuxlaneServer {
                             methods::PROJECT_ADD => self.handle_project_add(req).await?,
                             methods::PROJECT_DELETE => self.handle_project_delete(req).await?,
                             methods::AGENT_REPORT => self.handle_agent_report(req).await?,
+                            methods::PAIR_BEGIN => self.handle_pair_begin(req).await?,
+                            methods::PRESET_LIST => self.handle_preset_list(req).await?,
                             other => self.handle_unknown_method(req.id, other).await?,
                         };
+                        let pair_failed = require_pair
+                            && method == methods::PAIR_BEGIN
+                            && response.error.is_some();
+                        if method == methods::PAIR_BEGIN && response.error.is_none() {
+                            paired = true;
+                        }
                         write_frame(&mut write_half, &response).await?;
+                        if pair_failed {
+                            break;
+                        }
                     }
                     Some(Err(muxlane_core::Error::Eof)) | None => break,
                     Some(Err(error)) => return Err(error.into()),
@@ -510,7 +673,13 @@ impl MuxlaneServer {
                     }
                 } => match status {
                     Ok(message) => write_frame(&mut write_half, &message).await?,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    // 漏了边沿通知：补一次全量同步信号，让对端重拉快照。
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = ev_tx.try_send(EventMsg::new(
+                            muxlane_core::protocol::events::STATE_CHANGED,
+                            serde_json::json!({}),
+                        ));
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
                 Ok(()) = dirty_rx.changed() => {

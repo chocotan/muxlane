@@ -169,6 +169,7 @@ pub struct MuxlaneApp {
     pub(crate) settings_terminal_preset_menu: bool,
     pub(crate) settings_scale_menu: bool,
     pub(crate) settings_scale_input: Entity<TextField>,
+    pub(crate) settings_relay_input: Entity<TextField>,
     pub(crate) settings_scale_error: bool,
     pub(crate) shortcut_bindings: muxlane_store::PersistedShortcutBindings,
     pub(crate) shortcut_capture: Option<ShortcutAction>,
@@ -207,6 +208,11 @@ pub struct MuxlaneApp {
     pub(crate) remote_project_input: Entity<TextField>,
     pub(crate) project_input: Entity<TextField>,
     pub(crate) dialog_error: Option<String>,
+    pub(crate) pair_dialog: bool,
+    pub(crate) pair_code: Option<String>,
+    pub(crate) pair_error: Option<String>,
+    pub(crate) pair_busy: bool,
+    pub(crate) relay_url: Option<String>,
 
     // 菜单/确认框
     pub(crate) session_menu: Option<SessionMenu>,
@@ -605,6 +611,15 @@ impl MuxlaneApp {
             field.set_text(crate::ui_scale::percent().to_string(), cx);
             field
         });
+        let settings_relay_input = cx.new(|cx| {
+            let mut field =
+                TextField::new(i18n::text(language, "placeholder.relay_url"), window, cx);
+            field.set_theme_mode(theme_mode, cx);
+            if let Some(url) = persisted.relay_url.as_deref() {
+                field.set_text(url, cx);
+            }
+            field
+        });
 
         let mut app = MuxlaneApp {
             focus: cx.focus_handle(),
@@ -634,6 +649,7 @@ impl MuxlaneApp {
             settings_terminal_preset_menu: false,
             settings_scale_menu: false,
             settings_scale_input,
+            settings_relay_input,
             settings_scale_error: false,
             shortcut_bindings: crate::shortcuts::recover_defaults(&persisted.shortcut_bindings),
             shortcut_capture: None,
@@ -666,6 +682,11 @@ impl MuxlaneApp {
             remote_project_input,
             project_input,
             dialog_error: None,
+            pair_dialog: false,
+            pair_code: None,
+            pair_error: None,
+            pair_busy: false,
+            relay_url: persisted.relay_url.clone(),
             quit_confirm_open: false,
             quit_confirmed: false,
             quit_cancel_focus: cx.focus_handle(),
@@ -774,6 +795,9 @@ impl MuxlaneApp {
                 app.open_agent(&id, window, cx);
             }
         }
+        if let Some(url) = app.relay_url.clone() {
+            app.server.start_relay(url);
+        }
         app.persist();
         app
     }
@@ -827,6 +851,9 @@ impl MuxlaneApp {
                         host.clone()
                     }
                     muxlane_client::Target::Ssh { host, socket } => format!("{host}:{socket}"),
+                    muxlane_client::Target::Relay { url, host_id } => {
+                        format!("{url}/{host_id}")
+                    }
                 };
                 let auth = host.cfg.auth.clone().into();
                 muxlane_store::PersistedRemote {
@@ -857,6 +884,7 @@ impl MuxlaneApp {
         app.osc52_clipboard_enabled = Some(self.osc52_clipboard_enabled);
         app.language = Some(self.language.id().into());
         app.default_terminal_preset = self.default_terminal_preset.clone();
+        app.relay_url = self.relay_url.clone();
         self.persistence.submit_app(app);
     }
 
@@ -1303,6 +1331,9 @@ impl Render for MuxlaneApp {
         }
         if self.connect_dialog {
             root = root.child(self.render_connect_dialog(cx));
+        }
+        if self.pair_dialog {
+            root = root.child(self.render_pair_dialog(cx));
         }
         if self.project_dialog {
             root = root.child(self.render_project_dialog(cx));

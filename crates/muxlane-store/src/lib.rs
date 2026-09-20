@@ -45,6 +45,26 @@ fn cleanup_temporary_files(path: &Path) {
 pub const STORE_VERSION: u32 = 3;
 const SECRETS_VERSION: u32 = 1;
 
+/// state.json.lock 独占锁：串行化 load/save，挡住并发 tmp 清理与写竞争。
+/// 所有写路径都经过 save() 持锁，因此锁内扫删 tmp.* 只会清掉崩溃残留。
+fn lock_state(path: &Path) -> anyhow::Result<std::fs::File> {
+    use fs2::FileExt;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state.json");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false) // 纯锁文件，从不写入
+        .open(path.with_file_name(format!("{name}.lock")))?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
 fn default_sidebar_visible() -> bool {
     true
 }
@@ -240,6 +260,9 @@ pub struct PersistedApp {
     /// 侧栏项目自定义排序：machine_id -> 按显示顺序排列的 project_id。
     #[serde(default)]
     pub project_order: std::collections::BTreeMap<String, Vec<String>>,
+    /// Self-hosted muxlane-relay WebSocket URL for mobile pairing.
+    #[serde(default)]
+    pub relay_url: Option<String>,
 }
 
 impl PersistedApp {
@@ -328,6 +351,7 @@ impl PersistedApp {
         self.shortcut_bindings = previous.shortcut_bindings.clone();
         self.shortcut_bindings.migrate_legacy_defaults();
         self.project_order = previous.project_order.clone();
+        self.relay_url = previous.relay_url.clone();
         self
     }
 }
@@ -362,6 +386,7 @@ impl Default for PersistedApp {
             ui_scale: default_ui_scale(),
             shortcut_bindings: PersistedShortcutBindings::default(),
             project_order: Default::default(),
+            relay_url: None,
         }
     }
 }
@@ -397,6 +422,11 @@ pub enum PersistedRemoteAuth {
         #[serde(default)]
         password: Option<String>,
     },
+    /// Desktop-to-desktop relay connection token (`mobile:*` HMAC token).
+    RelayToken {
+        #[serde(default)]
+        token: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -427,6 +457,7 @@ pub struct WindowGeometry {
 }
 
 pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
+    let _guard = lock_state(path)?;
     let result = (|| {
         if !path.exists() {
             return Ok(PersistedApp::default());
@@ -439,13 +470,24 @@ pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
         let mut secrets = load_secrets(&secrets_path)?;
         let mut migrated_passwords = false;
         for remote in &mut app.remote_configs {
-            if let PersistedRemoteAuth::Password { password, .. } = &mut remote.auth {
-                if let Some(inline) = password.take() {
-                    secrets
-                        .remote_passwords
-                        .insert(remote.target.clone(), inline);
-                    migrated_passwords = true;
+            match &mut remote.auth {
+                PersistedRemoteAuth::Password { password, .. } => {
+                    if let Some(inline) = password.take() {
+                        secrets
+                            .remote_passwords
+                            .insert(remote.target.clone(), inline);
+                        migrated_passwords = true;
+                    }
                 }
+                PersistedRemoteAuth::RelayToken { token } => {
+                    if let Some(inline) = token.take() {
+                        secrets
+                            .remote_passwords
+                            .insert(remote.target.clone(), inline);
+                        migrated_passwords = true;
+                    }
+                }
+                _ => {}
             }
         }
         if migrated_passwords {
@@ -460,6 +502,7 @@ pub fn load(path: &Path) -> anyhow::Result<PersistedApp> {
 }
 
 pub fn save(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
+    let _guard = lock_state(path)?;
     let mut state = app.clone();
     for workspace in &mut state.floating_workspaces {
         workspace.layout.normalize();
@@ -469,12 +512,22 @@ pub fn save(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
         ..Default::default()
     };
     for remote in &mut state.remote_configs {
-        if let PersistedRemoteAuth::Password { password, .. } = &mut remote.auth {
-            if let Some(password) = password.take() {
-                secrets
-                    .remote_passwords
-                    .insert(remote.target.clone(), password);
+        match &mut remote.auth {
+            PersistedRemoteAuth::Password { password, .. } => {
+                if let Some(password) = password.take() {
+                    secrets
+                        .remote_passwords
+                        .insert(remote.target.clone(), password);
+                }
             }
+            PersistedRemoteAuth::RelayToken { token } => {
+                if let Some(token) = token.take() {
+                    secrets
+                        .remote_passwords
+                        .insert(remote.target.clone(), token);
+                }
+            }
+            _ => {}
         }
     }
     write_secrets(&secrets_path(path), &secrets)?;
@@ -505,8 +558,14 @@ fn load_secrets(path: &Path) -> anyhow::Result<PersistedSecrets> {
 
 fn restore_passwords(app: &mut PersistedApp, secrets: &PersistedSecrets) {
     for remote in &mut app.remote_configs {
-        if let PersistedRemoteAuth::Password { password, .. } = &mut remote.auth {
-            *password = secrets.remote_passwords.get(&remote.target).cloned();
+        match &mut remote.auth {
+            PersistedRemoteAuth::Password { password, .. } => {
+                *password = secrets.remote_passwords.get(&remote.target).cloned();
+            }
+            PersistedRemoteAuth::RelayToken { token } => {
+                *token = secrets.remote_passwords.get(&remote.target).cloned();
+            }
+            _ => {}
         }
     }
 }
@@ -916,6 +975,26 @@ mod tests {
     }
 
     #[test]
+    fn relay_token_is_stored_in_secrets_and_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut app = PersistedApp::default();
+        app.remote_configs.push(PersistedRemote {
+            target: "wss://relay.example/machine_01ABC".into(),
+            auth: PersistedRemoteAuth::RelayToken {
+                token: Some("v1:999:abc".into()),
+            },
+            machine_id: Some("machine_01ABC".into()),
+        });
+
+        save(&path, &app).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("v1:999:abc"));
+        assert_eq!(load(&path).unwrap(), app);
+    }
+
+    #[test]
     fn inline_password_is_migrated_once() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
@@ -1152,6 +1231,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = load(&dir.path().join("missing.json")).unwrap();
         assert_eq!(app.version, STORE_VERSION);
+    }
+
+    #[test]
+    fn relay_url_survives_load_and_ui_preference_merge() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let previous = PersistedApp {
+            relay_url: Some("ws://127.0.0.1:9843".into()),
+            ..Default::default()
+        };
+        save(&path, &previous).unwrap();
+        let restored = load(&path).unwrap();
+        let merged =
+            PersistedApp::from_snapshot(&Snapshot::default()).with_ui_prefs_from(&restored);
+        assert_eq!(merged.relay_url.as_deref(), Some("ws://127.0.0.1:9843"));
     }
 
     #[test]

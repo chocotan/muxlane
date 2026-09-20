@@ -1,0 +1,21 @@
+[package]
+name = "muxlane-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "muxlane-relay"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio.workspace = true
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = "0.26"

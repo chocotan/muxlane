@@ -157,6 +157,10 @@ impl MuxlaneApp {
         self.settings_scale_input.update(cx, |input, cx| {
             input.set_text(crate::ui_scale::percent().to_string(), cx);
         });
+        let relay = self.relay_url.clone().unwrap_or_default();
+        self.settings_relay_input.update(cx, |input, cx| {
+            input.set_text(relay, cx);
+        });
         self.settings_scale_error = false;
         self.palette_open = false;
         cx.notify();
@@ -188,6 +192,8 @@ impl MuxlaneApp {
             center.set_appearance(mode, self.language, cx)
         });
         self.settings_scale_input
+            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
+        self.settings_relay_input
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.palette_input
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
@@ -291,6 +297,7 @@ impl MuxlaneApp {
             (&self.connect_username, "placeholder.username"),
             (&self.connect_password, "placeholder.password"),
             (&self.connect_key_path, "placeholder.private_key"),
+            (&self.settings_relay_input, "placeholder.relay_url"),
         ] {
             input.update(cx, |input, cx| {
                 input.set_placeholder(i18n::text(language, key), cx)
@@ -434,6 +441,31 @@ impl MuxlaneApp {
                 theme,
             ))
             .child(setting_row(
+                "settings-row-relay-url",
+                i18n::text(self.language, "settings.relay_url"),
+                Some(i18n::text(self.language, "settings.relay_url_help")),
+                self.render_relay_url_field(cx),
+                theme,
+            ))
+            .child(setting_row(
+                "settings-row-pair-phone",
+                i18n::text(self.language, "settings.pair_phone"),
+                Some(i18n::text(self.language, "settings.pair_phone_help")),
+                semantic_button(
+                    "settings-pair-phone",
+                    i18n::text(self.language, "settings.pair_phone"),
+                    theme,
+                )
+                .px_3()
+                .py_1()
+                .text_size(ui_px(12.))
+                .track_focus(&self.settings_focus.control("settings-pair-phone", cx))
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    this.open_pair_dialog(window, cx);
+                })),
+                theme,
+            ))
+            .child(setting_row(
                 "settings-row-project-workspaces",
                 i18n::text(self.language, "settings.project_workspaces"),
                 Some(i18n::text(
@@ -494,6 +526,50 @@ impl MuxlaneApp {
                 theme,
             ))
             .into_any_element()
+    }
+
+    fn render_relay_url_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = Theme::for_mode(self.theme_mode);
+        let apply_label = i18n::text(self.language, "settings.relay_url_apply");
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("settings-relay-input")
+                    .w(ui_px(240.))
+                    .h(ui_px(28.))
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .bg(rgba(theme.bg0))
+                    .child(self.settings_relay_input.clone()),
+            )
+            .child(
+                semantic_button("settings-relay-apply", apply_label, theme)
+                    .px_3()
+                    .h(ui_px(28.))
+                    .text_size(ui_px(12.))
+                    .track_focus(&self.settings_focus.control("settings-relay-apply", cx))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.apply_relay_url(cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn apply_relay_url(&mut self, cx: &mut Context<Self>) {
+        let url = self
+            .settings_relay_input
+            .read(cx)
+            .text()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        self.relay_url = (!url.is_empty()).then_some(url.clone());
+        self.server.start_relay(url);
+        self.persist();
+        cx.notify();
     }
 
     fn render_terminal_preset_select(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {

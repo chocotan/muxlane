@@ -1,4 +1,6 @@
-//! HMAC-SHA256 token（hook / 配对后的 RPC）。格式：v1:<expiry_unix>:<base64url(mac)>。
+//! HMAC-SHA256 token（hook / 配对后的 RPC）。
+//! Hook：`v1:<expiry_unix>:<base64url(mac)>`。
+//! 手机配对：`v1:<expiry_unix>:<base64url(subject)>:<base64url(mac)>`。
 use crate::Result;
 use base64::Engine;
 use hmac::{Hmac, Mac};
@@ -53,37 +55,89 @@ impl AuthSecret {
     }
 
     pub fn token_at(&self, subject: &str, expiry: u64) -> String {
+        let sig = self.sign(subject, expiry);
+        if subject.starts_with("mobile:") {
+            let subject_b64 =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(subject.as_bytes());
+            format!("v1:{expiry}:{subject_b64}:{sig}")
+        } else {
+            format!("v1:{expiry}:{sig}")
+        }
+    }
+
+    fn sign(&self, subject: &str, expiry: u64) -> String {
         let msg = format!("{subject}\n{expiry}");
         let mut mac = HmacSha256::new_from_slice(&self.0).expect("HMAC accepts any key");
         mac.update(msg.as_bytes());
-        let sig =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-        format!("v1:{expiry}:{sig}")
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     }
 
     pub fn verify(&self, subject: &str, token: &str) -> bool {
-        let mut parts = token.split(':');
-        if parts.next() != Some("v1") {
+        match parse_token(token) {
+            Some(parsed) if parsed.subject.as_deref().unwrap_or(subject) == subject => {
+                self.verify_parsed(subject, &parsed)
+            }
+            _ => false,
+        }
+    }
+
+    /// Verify a mobile pairing token (`v1:expiry:subject:mac`) and return its subject.
+    pub fn verify_mobile(&self, token: &str) -> Option<String> {
+        let parsed = parse_token(token)?;
+        let subject = parsed.subject.clone()?;
+        if !subject.starts_with("mobile:") {
+            return None;
+        }
+        self.verify_parsed(&subject, &parsed).then_some(subject)
+    }
+
+    fn verify_parsed(&self, subject: &str, parsed: &ParsedToken) -> bool {
+        if parsed.expiry < crate::model::now_secs() {
             return false;
         }
-        let Some(expiry) = parts.next().and_then(|v| v.parse::<u64>().ok()) else {
+        let Ok(sig) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&parsed.sig) else {
             return false;
         };
-        let Some(sig) = parts.next() else {
-            return false;
-        };
-        if parts.next().is_some() || expiry < crate::model::now_secs() {
-            return false;
-        }
-        let Ok(sig) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig) else {
-            return false;
-        };
-        let msg = format!("{subject}\n{expiry}");
+        let msg = format!("{subject}\n{}", parsed.expiry);
         let Ok(mut mac) = HmacSha256::new_from_slice(&self.0) else {
             return false;
         };
         mac.update(msg.as_bytes());
-        mac.verify_slice(&sig).is_ok() // constant-time verify
+        mac.verify_slice(&sig).is_ok()
+    }
+}
+
+struct ParsedToken {
+    expiry: u64,
+    subject: Option<String>,
+    sig: String,
+}
+
+fn parse_token(token: &str) -> Option<ParsedToken> {
+    let mut parts = token.split(':');
+    if parts.next() != Some("v1") {
+        return None;
+    }
+    let expiry = parts.next().and_then(|v| v.parse::<u64>().ok())?;
+    let second = parts.next()?.to_string();
+    match parts.next() {
+        Some(sig) if parts.next().is_none() => {
+            let subject = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(second.as_bytes())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            Some(ParsedToken {
+                expiry,
+                subject,
+                sig: sig.to_string(),
+            })
+        }
+        None => Some(ParsedToken {
+            expiry,
+            subject: None,
+            sig: second,
+        }),
+        Some(_) => None,
     }
 }
 
@@ -108,6 +162,14 @@ mod tests {
         assert!(!s.verify("agent_2", &t));
         let tampered = format!("{}x", t);
         assert!(!s.verify("agent_1", &tampered));
+    }
+    #[test]
+    fn mobile_token_embeds_subject() {
+        let s = AuthSecret(vec![7; 32]);
+        let t = s.token("mobile:phone-a", 60);
+        assert_eq!(s.verify_mobile(&t).as_deref(), Some("mobile:phone-a"));
+        assert!(s.verify("mobile:phone-a", &t));
+        assert!(s.verify_mobile("v1:1:abc").is_none());
     }
     #[test]
     fn expired_rejected() {

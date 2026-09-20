@@ -2,7 +2,7 @@
 
 **原生多 Agent 终端工作台。** 将本地与 SSH 远端的项目、终端和 AI Coding Agent 会话集中在一个界面里，让多个任务并排运行，随时查看进度、切换上下文和处理通知。
 
-Muxlane 使用 Rust + GPUI 构建，面向 Linux 与 macOS。
+Muxlane 使用 Rust + GPUI 构建，面向 Linux 与 macOS。Android 查看器通过自建中继连接已有 Host，不在手机上跑 Agent。
 
 ![Muxlane 工作台：按项目组织会话，在四个终端窗格中同时运行 Pi、Shell 和 Codex](docs/images/screenshot.jpg)
 
@@ -76,6 +76,50 @@ Muxlane 提供会话管理和终端界面。各 Agent CLI 及其登录配置需�
 - **直接连接**：每条连接读取目标实例的项目与会话，不递归发现它连接的其他机器。
 
 自动部署要求二进制与远端的操作系统、CPU 架构和动态库兼容；Headless 仍需满足运行依赖。macOS 默认缺少密码认证和自动部署路径所需的部分工具，建议使用 SSH config / 密钥并预先准备远端服务。
+
+## 手机查看器（自建中继）
+
+手机不跑 Agent。电脑上的 Muxlane（桌面或 `--headless`）主动连你自己部署的 `muxlane-relay`，手机再连同一个中继。官方不托管中继。
+
+1. 在 VPS 或本机启动中继：
+
+```bash
+cargo run -p muxlane-relay -- 0.0.0.0:9843
+```
+
+公网请用 Caddy/nginx 终止 TLS，把 `wss://your.example/host/`、`/pair/`、`/phone/` 反代到该端口。局域网可直接用 `ws://192.168.x.x:9843`。
+
+2. 桌面：设置 → 填写中继 URL → 应用 → 配对手机。弹窗显示 8 位码，5 分钟有效。
+
+   Headless：
+
+```bash
+muxlane --headless --relay ws://127.0.0.1:9843
+```
+
+日志里会打出配对码。
+
+3. 手机 App（`android/`）填同一中继 URL 和配对码。之后用保存的 token 重连，不必再输入码。
+
+能做的事：看会话树、打开终端、输入、系统通知（Blocked/Done/Failed）、新建/删除会话。不做分屏、远端部署、在手机上跑 Agent。
+
+### 桌面之间走中继
+
+「连接远程机器」对话框的认证方式里有 **中继**：
+
+1. 目标机器（被连的一端）：设置里填中继 URL 并应用，然后点「配对手机」拿到 8 位码（headless 用 `--relay` 启后日志里也有）。
+2. 本机：打开连接对话框 → 认证方式选「中继」→ 目标栏填 `wss://中继地址`（不需要带机器 id）→ 配对码栏填 8 位码 → 连接。
+3. 配对成功后会保存 token（与 SSH 密码一样单独存在 `secrets.json`），重启后自动重连，不再要码。
+
+适合不想配 SSH 的场景（家里 ↔ 公司、临时机器）。中继不解析 RPC，TLS 由部署方终止。SSH 方式仍然可用，两条路并存。
+
+Android 协议与终端模拟在 `android/core`，无 SDK 也可：
+
+```bash
+cd android && gradle :core:test
+```
+
+有 Android SDK 时再编 `:app`（minSdk 26）。
 
 ## 原生终端与输入体验
 

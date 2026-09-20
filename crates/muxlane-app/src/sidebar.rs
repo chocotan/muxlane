@@ -980,6 +980,9 @@ impl MuxlaneApp {
                                             muxlane_client::Target::Ssh { host, socket } => {
                                                 format!("{host}:{socket}")
                                             }
+                                            muxlane_client::Target::Relay { url, host_id } => {
+                                                format!("{url}/{host_id}")
+                                            }
                                         };
                                         this.connect_input.update(cx, |input, cx| {
                                             input.set_text(&target_str, cx);
@@ -1020,6 +1023,14 @@ impl MuxlaneApp {
                                                     );
                                                 }
                                                 this.connect_key_path
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                            }
+                                            muxlane_client::SshAuth::RelayToken { .. } => {
+                                                this.connect_auth_mode = ConnectAuthMode::Relay;
+                                                this.connect_password
+                                                    .update(cx, |input, cx| input.reset(cx));
+                                                this.connect_password
                                                     .focus_handle(cx)
                                                     .focus(window, cx);
                                             }

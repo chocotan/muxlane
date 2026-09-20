@@ -1,0 +1,345 @@
+package muxlane.term
+
+data class Cell(
+    val ch: Char = ' ',
+    val fg: Int = DEFAULT_FG,
+    val bg: Int = DEFAULT_BG,
+    val bold: Boolean = false,
+    val underline: Boolean = false,
+    val inverse: Boolean = false,
+)
+
+data class Cursor(var col: Int = 0, var row: Int = 0)
+
+const val DEFAULT_FG: Int = 0xFFE6E9EF.toInt()
+const val DEFAULT_BG: Int = 0xFF12141A.toInt()
+
+private val ANSI16 = intArrayOf(
+    0xFF000000.toInt(), 0xFFE06C75.toInt(), 0xFF98C379.toInt(), 0xFFE5C07B.toInt(),
+    0xFF61AFEF.toInt(), 0xFFC678DD.toInt(), 0xFF56B6C2.toInt(), 0xFFABB2BF.toInt(),
+    0xFF5C6370.toInt(), 0xFFE06C75.toInt(), 0xFF98C379.toInt(), 0xFFE5C07B.toInt(),
+    0xFF61AFEF.toInt(), 0xFFC678DD.toInt(), 0xFF56B6C2.toInt(), 0xFFFFFFFF.toInt(),
+)
+
+class VirtualTerminal(
+    var cols: Int = 80,
+    var rows: Int = 24,
+) {
+    var cursor = Cursor()
+        private set
+    var scrollback = ArrayDeque<List<Cell>>()
+        private set
+    private var grid = Array(rows) { Array(cols) { Cell() } }
+    private var fg = DEFAULT_FG
+    private var bg = DEFAULT_BG
+    private var bold = false
+    private var underline = false
+    private var inverse = false
+    private var parser = AnsiParser()
+    val maxScrollback: Int = 1000
+
+    fun screen(): Array<Array<Cell>> = Array(rows) { r -> grid[r].copyOf() }
+
+    fun visibleLine(row: Int): String = grid[row].joinToString("") { it.ch.toString() }.trimEnd()
+
+    fun resize(newCols: Int, newRows: Int) {
+        val next = Array(newRows) { r ->
+            Array(newCols) { c ->
+                if (r < rows && c < cols) grid[r][c] else Cell()
+            }
+        }
+        cols = newCols
+        rows = newRows
+        grid = next
+        cursor.col = cursor.col.coerceIn(0, cols - 1)
+        cursor.row = cursor.row.coerceIn(0, rows - 1)
+    }
+
+    fun reset() {
+        grid = Array(rows) { Array(cols) { Cell() } }
+        cursor = Cursor()
+        fg = DEFAULT_FG
+        bg = DEFAULT_BG
+        bold = false
+        underline = false
+        inverse = false
+        parser = AnsiParser()
+        scrollback.clear()
+    }
+
+    fun write(bytes: ByteArray) {
+        parser.feed(bytes) { action ->
+            when (action) {
+                is Action.Print -> printChar(action.ch)
+                is Action.Execute -> execute(action.b)
+                is Action.Csi -> csi(action)
+                is Action.Osc -> {}
+                is Action.Esc -> {}
+            }
+        }
+    }
+
+    private fun printChar(ch: Char) {
+        if (ch == '\u0000') return
+        val width = if (isWide(ch)) 2 else 1
+        if (cursor.col + width > cols) newline()
+        put(ch)
+        if (width == 2 && cursor.col < cols) {
+            put(' ')
+        }
+    }
+
+    private fun put(ch: Char) {
+        if (cursor.row !in 0 until rows || cursor.col !in 0 until cols) return
+        grid[cursor.row][cursor.col] = Cell(ch, fg, bg, bold, underline, inverse)
+        cursor.col += 1
+        if (cursor.col >= cols) newline()
+    }
+
+    private fun newline() {
+        cursor.col = 0
+        if (cursor.row < rows - 1) {
+            cursor.row += 1
+        } else {
+            scrollUp()
+        }
+    }
+
+    private fun scrollUp() {
+        scrollback.addLast(grid[0].toList())
+        if (scrollback.size > maxScrollback) scrollback.removeFirst()
+        for (r in 0 until rows - 1) {
+            grid[r] = grid[r + 1]
+        }
+        grid[rows - 1] = Array(cols) { Cell() }
+    }
+
+    private fun execute(b: Int) {
+        when (b) {
+            0x08 -> cursor.col = (cursor.col - 1).coerceAtLeast(0)
+            0x09 -> cursor.col = ((cursor.col / 8 + 1) * 8).coerceAtMost(cols - 1)
+            0x0A, 0x0B, 0x0C -> newline()
+            0x0D -> cursor.col = 0
+        }
+    }
+
+    private fun csi(action: Action.Csi) {
+        val p = action.params
+        fun n(i: Int, default: Int = 1) = p.getOrNull(i)?.takeIf { it > 0 } ?: default
+        when (action.final) {
+            'A' -> cursor.row = (cursor.row - n(0)).coerceAtLeast(0)
+            'B' -> cursor.row = (cursor.row + n(0)).coerceAtMost(rows - 1)
+            'C' -> cursor.col = (cursor.col + n(0)).coerceAtMost(cols - 1)
+            'D' -> cursor.col = (cursor.col - n(0)).coerceAtLeast(0)
+            'H', 'f' -> {
+                cursor.row = (n(0) - 1).coerceIn(0, rows - 1)
+                cursor.col = (n(1, 1) - 1).coerceIn(0, cols - 1)
+            }
+            'J' -> eraseDisplay(p.getOrNull(0) ?: 0)
+            'K' -> eraseLine(p.getOrNull(0) ?: 0)
+            'm' -> sgr(p)
+        }
+    }
+
+    private fun eraseDisplay(mode: Int) {
+        when (mode) {
+            2, 3 -> {
+                grid = Array(rows) { Array(cols) { Cell() } }
+                cursor = Cursor()
+            }
+            0 -> {
+                eraseLine(0)
+                for (r in cursor.row + 1 until rows) grid[r] = Array(cols) { Cell() }
+            }
+            1 -> {
+                for (r in 0 until cursor.row) grid[r] = Array(cols) { Cell() }
+                eraseLine(1)
+            }
+        }
+    }
+
+    private fun eraseLine(mode: Int) {
+        val row = grid[cursor.row]
+        val range = when (mode) {
+            1 -> 0..cursor.col
+            2 -> 0 until cols
+            else -> cursor.col until cols
+        }
+        for (c in range) row[c] = Cell()
+    }
+
+    private fun sgr(params: List<Int>) {
+        if (params.isEmpty()) {
+            resetAttrs()
+            return
+        }
+        var i = 0
+        while (i < params.size) {
+            when (val p = params[i]) {
+                0 -> resetAttrs()
+                1 -> bold = true
+                4 -> underline = true
+                7 -> inverse = true
+                22 -> bold = false
+                24 -> underline = false
+                27 -> inverse = false
+                in 30..37 -> fg = ANSI16[p - 30]
+                39 -> fg = DEFAULT_FG
+                in 40..47 -> bg = ANSI16[p - 40]
+                49 -> bg = DEFAULT_BG
+                in 90..97 -> fg = ANSI16[p - 90 + 8]
+                in 100..107 -> bg = ANSI16[p - 100 + 8]
+                38, 48 -> {
+                    val targetFg = p == 38
+                    val mode = params.getOrNull(i + 1)
+                    if (mode == 5) {
+                        val idx = params.getOrNull(i + 2) ?: 0
+                        val color = indexedColor(idx)
+                        if (targetFg) fg = color else bg = color
+                        i += 2
+                    } else if (mode == 2) {
+                        val r = params.getOrNull(i + 2) ?: 0
+                        val g = params.getOrNull(i + 3) ?: 0
+                        val b = params.getOrNull(i + 4) ?: 0
+                        val color = rgb(r, g, b)
+                        if (targetFg) fg = color else bg = color
+                        i += 4
+                    }
+                }
+            }
+            i += 1
+        }
+    }
+
+    private fun resetAttrs() {
+        fg = DEFAULT_FG
+        bg = DEFAULT_BG
+        bold = false
+        underline = false
+        inverse = false
+    }
+}
+
+private fun rgb(r: Int, g: Int, b: Int): Int =
+    (0xFF shl 24) or ((r and 0xFF) shl 16) or ((g and 0xFF) shl 8) or (b and 0xFF)
+
+private fun indexedColor(index: Int): Int {
+    if (index in 0..15) return ANSI16[index]
+    if (index in 16..231) {
+        val n = index - 16
+        fun level(v: Int) = if (v == 0) 0 else 55 + v * 40
+        return rgb(level(n / 36), level((n / 6) % 6), level(n % 6))
+    }
+    if (index in 232..255) {
+        val v = 8 + (index - 232) * 10
+        return rgb(v, v, v)
+    }
+    return DEFAULT_FG
+}
+
+private fun isWide(ch: Char): Boolean {
+    val code = ch.code
+    return code in 0x1100..0x115F ||
+        code in 0x2E80..0xA4CF ||
+        code in 0xAC00..0xD7A3 ||
+        code in 0xF900..0xFAFF ||
+        code in 0xFE10..0xFE19 ||
+        code in 0xFE30..0xFE6F ||
+        code in 0xFF00..0xFF60 ||
+        code in 0xFFE0..0xFFE6
+}
+
+private sealed class Action {
+    data class Print(val ch: Char) : Action()
+    data class Execute(val b: Int) : Action()
+    data class Csi(val params: List<Int>, val final: Char) : Action()
+    data class Osc(val payload: String) : Action()
+    data class Esc(val ch: Char) : Action()
+}
+
+private class AnsiParser {
+    private enum class State { GROUND, ESC, CSI, OSC, OSC_ESC }
+    private var state = State.GROUND
+    private val params = StringBuilder()
+    private val osc = StringBuilder()
+    private val utf8 = ByteArray(4)
+    private var utf8Need = 0
+    private var utf8Got = 0
+
+    fun feed(bytes: ByteArray, emit: (Action) -> Unit) {
+        for (b in bytes) {
+            val v = b.toInt() and 0xFF
+            when (state) {
+                State.GROUND -> when {
+                    v == 0x1B -> state = State.ESC
+                    v < 0x20 -> emit(Action.Execute(v))
+                    v < 0x80 -> emit(Action.Print(v.toChar()))
+                    else -> utf8Byte(v, emit)
+                }
+                State.ESC -> when (v.toChar()) {
+                    '[' -> {
+                        params.clear()
+                        state = State.CSI
+                    }
+                    ']' -> {
+                        osc.clear()
+                        state = State.OSC
+                    }
+                    else -> {
+                        emit(Action.Esc(v.toChar()))
+                        state = State.GROUND
+                    }
+                }
+                State.CSI -> {
+                    if (v in 0x40..0x7E) {
+                        emit(Action.Csi(parseParams(params.toString()), v.toChar()))
+                        state = State.GROUND
+                    } else {
+                        params.append(v.toChar())
+                    }
+                }
+                State.OSC -> when (v) {
+                    0x07 -> {
+                        emit(Action.Osc(osc.toString()))
+                        state = State.GROUND
+                    }
+                    0x1B -> state = State.OSC_ESC
+                    else -> osc.append(v.toChar())
+                }
+                State.OSC_ESC -> {
+                    if (v == 0x5C) emit(Action.Osc(osc.toString()))
+                    state = State.GROUND
+                }
+            }
+        }
+    }
+
+    private fun utf8Byte(v: Int, emit: (Action) -> Unit) {
+        if (utf8Need == 0) {
+            utf8Need = when {
+                v and 0xE0 == 0xC0 -> 2
+                v and 0xF0 == 0xE0 -> 3
+                v and 0xF8 == 0xF0 -> 4
+                else -> {
+                    emit(Action.Print('?'))
+                    return
+                }
+            }
+            utf8Got = 0
+        }
+        utf8[utf8Got++] = v.toByte()
+        if (utf8Got == utf8Need) {
+            val text = String(utf8, 0, utf8Got, Charsets.UTF_8)
+            if (text.isNotEmpty()) emit(Action.Print(text[0]))
+            utf8Need = 0
+            utf8Got = 0
+        }
+    }
+}
+
+private fun parseParams(raw: String): List<Int> {
+    if (raw.isEmpty()) return emptyList()
+    return raw.split(';').map { part ->
+        part.filter { it.isDigit() }.toIntOrNull() ?: 0
+    }
+}

@@ -1,11 +1,14 @@
-//! muxlane-client：连接远端 muxlane 实例（本地 socket 直连或 SSH 隧道）
+//! muxlane-client：连接远端 muxlane 实例（本地 socket 直连、SSH 隧道或自建中继）
 mod host;
 mod tunnel;
+mod ws;
 
 pub use host::{
     parse_target, BootstrapPhase, BootstrapProgress, ClientEvent, HostCfg, MissingPassword,
     RemoteHost, RemoteStage, RemoteState, SshAuth, Target, UploadProgress,
 };
+pub use tunnel::TunnelError;
+pub use ws::{connect_relay, pair_relay};
 
 pub async fn release_remote_tunnel(host: &str) {
     tunnel::release_tunnel(host).await;
@@ -26,9 +29,12 @@ use muxlane_core::protocol::{
     b64_decode, b64_encode, read_frame, write_frame, EventMsg, Request, Response,
     TermSubscribeParams, TermSubscribeResult,
 };
-use tokio::io::{BufReader, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+
+type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
+type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
 
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -54,18 +60,21 @@ pub struct RpcCallError {
 
 /// 到单个对端的连接抽象（newline-JSON RPC）
 pub struct Connection {
-    reader: BufReader<ReadHalf<UnixStream>>,
-    writer: WriteHalf<UnixStream>,
+    reader: BufReader<BoxRead>,
+    writer: BoxWrite,
     next_id: u64,
     events: Option<mpsc::UnboundedSender<EventMsg>>,
 }
 
 impl Connection {
-    pub fn new(stream: UnixStream) -> Self {
+    pub fn new<S>(stream: S) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
         let (reader, writer) = tokio::io::split(stream);
         Connection {
-            reader: BufReader::new(reader),
-            writer,
+            reader: BufReader::new(Box::new(reader) as BoxRead),
+            writer: Box::new(writer) as BoxWrite,
             next_id: 1,
             events: None,
         }
@@ -154,7 +163,7 @@ impl Connection {
 }
 
 pub struct RequestWriter {
-    writer: WriteHalf<UnixStream>,
+    writer: BoxWrite,
     next_id: u64,
 }
 
@@ -176,7 +185,7 @@ impl RequestWriter {
 }
 
 pub struct ResponseReader {
-    reader: BufReader<ReadHalf<UnixStream>>,
+    reader: BufReader<BoxRead>,
 }
 
 impl ResponseReader {

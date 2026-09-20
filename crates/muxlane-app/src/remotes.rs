@@ -76,6 +76,7 @@ impl MuxlaneApp {
                     path.rsplit('/').next().unwrap_or(path).to_string()
                 }
                 muxlane_client::Target::Ssh { host, .. } => host.clone(),
+                muxlane_client::Target::Relay { host_id, .. } => host_id.clone(),
             };
             let auth = match muxlane_client::SshAuth::try_from(saved.auth.clone()) {
                 Ok(auth) => auth,
@@ -104,6 +105,7 @@ impl MuxlaneApp {
                     path.rsplit('/').next().unwrap_or(path).to_string()
                 }
                 muxlane_client::Target::Ssh { host, .. } => host.clone(),
+                muxlane_client::Target::Relay { host_id, .. } => host_id.clone(),
             };
             let cfg = muxlane_client::HostCfg {
                 name,
@@ -131,12 +133,17 @@ impl MuxlaneApp {
             cx.notify();
             return;
         }
+        if self.connect_auth_mode == ConnectAuthMode::Relay {
+            self.add_relay_remote(target, cx);
+            return;
+        }
         let parsed = muxlane_client::parse_target(&target);
         let name = match &parsed {
             muxlane_client::Target::Socket(path) => {
                 path.rsplit('/').next().unwrap_or(path).to_string()
             }
             muxlane_client::Target::Ssh { host, .. } => host.clone(),
+            muxlane_client::Target::Relay { host_id, .. } => host_id.clone(),
         };
         let username = self.connect_username.read(cx).text();
         let auth = match self.connect_auth_mode {
@@ -162,11 +169,72 @@ impl MuxlaneApp {
                     password,
                 }
             }
+            ConnectAuthMode::Relay => unreachable!("relay handled above"),
         };
+        self.insert_remote_host(name, parsed, auth, None, cx);
+    }
+
+    /// 中继模式：目标栏填 relay URL（可带 /host_id），配对码在密码栏。
+    /// 首次配对先 pair_relay 拿 token 和 host_id，再按 Target::Relay 建连接。
+    fn add_relay_remote(&mut self, target: String, cx: &mut Context<Self>) {
+        let code = self.connect_password.read(cx).text().trim().to_string();
+        if !(target.starts_with("ws://") || target.starts_with("wss://")) {
+            self.dialog_error = Some(i18n::text(self.language, "error.relay_url_required").into());
+            cx.notify();
+            return;
+        }
+        if code.len() != 8 || !code.chars().all(|ch| ch.is_ascii_digit()) {
+            self.dialog_error = Some(i18n::text(self.language, "error.pair_code_required").into());
+            cx.notify();
+            return;
+        }
+        self.dialog_error = None;
+        let task = self.spawn_remote_operation(async move {
+            muxlane_client::pair_relay(&target, &code, "muxlane-desktop").await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok((token, machine)) => {
+                    let target = muxlane_client::Target::Relay {
+                        url: this
+                            .connect_input
+                            .read(cx)
+                            .text()
+                            .trim()
+                            .trim_end_matches('/')
+                            .to_string(),
+                        host_id: machine.machine_id.clone(),
+                    };
+                    this.insert_remote_host(
+                        machine.name,
+                        target,
+                        muxlane_client::SshAuth::RelayToken { token: Some(token) },
+                        Some(machine.machine_id),
+                        cx,
+                    );
+                }
+                Err(error) => {
+                    this.dialog_error = Some(error.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn insert_remote_host(
+        &mut self,
+        name: String,
+        parsed: muxlane_client::Target,
+        auth: muxlane_client::SshAuth,
+        known_machine_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         // Validate all credentials before mutating an existing connection.
         let inherited_machine_id =
             if let Some(index) = self.remotes.iter().position(|host| host.cfg.name == name) {
-                let machine_id = self.remotes[index].machine_id();
+                let machine_id = known_machine_id.or_else(|| self.remotes[index].machine_id());
                 self.remotes[index].stop();
                 let release_name = name.clone();
                 self.server.rt_spawn(async move {
@@ -177,7 +245,7 @@ impl MuxlaneApp {
                 self.remote_states.remove(&name);
                 machine_id
             } else {
-                None
+                known_machine_id
             };
         let host = muxlane_client::RemoteHost::new(
             muxlane_client::HostCfg {
@@ -517,12 +585,16 @@ impl MuxlaneApp {
                         cx.notify();
                     }
                     Err(error) => {
-                        let error = error.to_string();
-                        if error.contains("已取消") {
+                        let cancelled = error
+                            .downcast_ref::<muxlane_client::TunnelError>()
+                            .is_some_and(|error| {
+                                matches!(error, muxlane_client::TunnelError::Cancelled)
+                            });
+                        if cancelled {
                             this.bootstrap_confirm = None;
                             this.bootstrap_error = None;
                         } else {
-                            this.bootstrap_error = Some(error);
+                            this.bootstrap_error = Some(error.to_string());
                         }
                         cx.notify();
                     }

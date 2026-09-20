@@ -10,8 +10,8 @@ use tokio::sync::{mpsc, Mutex, Notify};
 fn ssh_target(cfg: &HostCfg) -> Result<&str, crate::tunnel::TunnelError> {
     match &cfg.target {
         Target::Ssh { host, .. } => Ok(host),
-        Target::Socket(_) => Err(crate::tunnel::TunnelError::Other(
-            "direct socket target cannot be installed".into(),
+        Target::Socket(_) | Target::Relay { .. } => Err(crate::tunnel::TunnelError::Other(
+            "non-SSH target cannot be installed".into(),
         )),
     }
 }
@@ -27,6 +27,10 @@ pub enum SshAuth {
     Password {
         username: String,
         password: String,
+    },
+    /// Desktop-to-desktop relay token（pair.begin 签发的 mobile token）
+    RelayToken {
+        token: Option<String>,
     },
 }
 
@@ -45,6 +49,7 @@ impl From<SshAuth> for muxlane_store::PersistedRemoteAuth {
                 username,
                 password: (!password.is_empty()).then_some(password),
             },
+            SshAuth::RelayToken { token } => Self::RelayToken { token },
         }
     }
 }
@@ -72,6 +77,9 @@ impl TryFrom<muxlane_store::PersistedRemoteAuth> for SshAuth {
                     password: password.ok_or(MissingPassword)?,
                 })
             }
+            muxlane_store::PersistedRemoteAuth::RelayToken { token } => {
+                Ok(Self::RelayToken { token })
+            }
         }
     }
 }
@@ -93,6 +101,7 @@ impl std::fmt::Debug for SshAuth {
                 .field("username", username)
                 .field("password", &"[redacted]")
                 .finish(),
+            SshAuth::RelayToken { .. } => f.write_str("RelayToken([redacted])"),
         }
     }
 }
@@ -133,15 +142,33 @@ pub enum Target {
     Socket(String),
     /// SSH：host + 远端 socket 路径（远端和本地路径通常一致）
     Ssh { host: String, socket: String },
+    /// 自建中继：relay base url + host machine_id
+    Relay { url: String, host_id: String },
 }
 
 /// 用户输入 → 连接目标：
 /// - `/path/muxlane.sock`：本地/已转发 Unix socket
 /// - `user@host:/path/muxlane.sock`：SSH StreamLocalForward
+/// - `ws(s)://relay[:port]/<host_id>`：自建中继
 pub fn parse_target(input: &str) -> Target {
     let input = input.trim();
     if input.starts_with('/') {
         return Target::Socket(input.into());
+    }
+    if input.starts_with("ws://") || input.starts_with("wss://") {
+        let trimmed = input.trim_end_matches('/');
+        if let Some((url, host_id)) = trimmed.rsplit_once('/') {
+            if !host_id.is_empty()
+                && host_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            {
+                return Target::Relay {
+                    url: url.to_string(),
+                    host_id: host_id.to_string(),
+                };
+            }
+        }
     }
     if let Some((host, socket)) = input.split_once(':') {
         if !host.is_empty() && socket.starts_with('/') {
@@ -207,7 +234,37 @@ mod target_tests {
                 assert_eq!(host, "choco@192.168.1.20");
                 assert!(socket.is_empty());
             }
-            Target::Socket(_) => panic!("expected SSH target"),
+            Target::Socket(_) | Target::Relay { .. } => panic!("expected SSH target"),
+        }
+    }
+
+    #[test]
+    fn relay_urls_parse_as_relay_targets() {
+        match parse_target("wss://relay.example:9843/machine_01ABC") {
+            Target::Relay { url, host_id } => {
+                assert_eq!(url, "wss://relay.example:9843");
+                assert_eq!(host_id, "machine_01ABC");
+            }
+            _ => panic!("expected relay target"),
+        }
+        match parse_target("ws://192.168.1.5:9843/machine_01ABC/") {
+            Target::Relay { url, host_id } => {
+                assert_eq!(url, "ws://192.168.1.5:9843");
+                assert_eq!(host_id, "machine_01ABC");
+            }
+            _ => panic!("expected relay target"),
+        }
+    }
+
+    #[test]
+    fn relay_token_persistence_roundtrips() {
+        let persisted: muxlane_store::PersistedRemoteAuth = SshAuth::RelayToken {
+            token: Some("v1:1:x".into()),
+        }
+        .into();
+        match SshAuth::try_from(persisted).unwrap() {
+            SshAuth::RelayToken { token } => assert_eq!(token.as_deref(), Some("v1:1:x")),
+            _ => panic!("expected relay token"),
         }
     }
 
@@ -461,6 +518,11 @@ impl RemoteHost {
             Target::Ssh { host, socket } => {
                 crate::tunnel::ensure_tunnel(host, socket, &self.cfg.auth).await?
             }
+            Target::Relay { url, .. } => {
+                return Err(crate::tunnel::TunnelError::Other(format!(
+                    "relay target {url} has no local socket"
+                )))
+            }
         };
         if let Ok(mut slot) = self.endpoint.write() {
             *slot = Some(endpoint.clone());
@@ -472,11 +534,28 @@ impl RemoteHost {
         self.endpoint.read().ok().and_then(|v| v.clone())
     }
 
+    /// 按 target 类型打开一条 RPC 连接（socket / SSH 隧道 / 中继）。
+    async fn open_connection(&self) -> anyhow::Result<crate::Connection> {
+        if let Target::Relay { url, host_id } = &self.cfg.target {
+            let token = match &self.cfg.auth {
+                SshAuth::RelayToken { token } => token
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("relay token missing"))?,
+                _ => anyhow::bail!("relay target requires a relay token"),
+            };
+            if let Ok(mut slot) = self.endpoint.write() {
+                *slot = Some(url.clone());
+            }
+            return crate::connect_relay(url, host_id, &token).await;
+        }
+        let socket = self.local_socket().await?;
+        crate::open(&socket).await
+    }
+
     async fn rpc(&self) -> anyhow::Result<tokio::sync::MutexGuard<'_, Option<crate::Connection>>> {
         let mut rpc = self.rpc.lock().await;
         if rpc.is_none() {
-            let socket = self.local_socket().await?;
-            *rpc = Some(crate::open(&socket).await?);
+            *rpc = Some(self.open_connection().await?);
         }
         Ok(rpc)
     }
@@ -530,8 +609,7 @@ impl RemoteHost {
     ) -> anyhow::Result<()> {
         let mut input = self.input.lock().await;
         if input.is_none() {
-            let socket = self.local_socket().await?;
-            let connection = crate::open(&socket).await?;
+            let connection = self.open_connection().await?;
             let (writer, mut reader) = connection.into_split();
             // 后台排空响应/事件帧，防止对端 socket 缓冲堆积。
             tokio::spawn(async move { while reader.next().await.is_ok() {} });
@@ -696,7 +774,7 @@ impl RemoteHost {
         }
         if self.bootstrap_cancel.load(Ordering::Relaxed) {
             self.clear_progress();
-            return Err(crate::tunnel::TunnelError::Other("已取消上传".into()));
+            return Err(crate::tunnel::TunnelError::Cancelled);
         }
         self.emit_progress(BootstrapPhase::Restart, Some(0));
         let result =
@@ -738,7 +816,7 @@ impl RemoteHost {
         }
         if self.bootstrap_cancel.load(Ordering::Relaxed) {
             self.clear_progress();
-            return Err(crate::tunnel::TunnelError::Other("已取消上传".into()));
+            return Err(crate::tunnel::TunnelError::Cancelled);
         }
         self.emit_progress(BootstrapPhase::Restart, Some(0));
         let result =
@@ -791,51 +869,73 @@ impl RemoteHost {
                 &this.events_tx,
             )
             .await;
-            let socket = match this.local_socket().await {
-                Ok(socket) => socket,
-                Err(crate::tunnel::TunnelError::NeedsInstall { remote_socket }) => {
-                    this.set_state(RemoteState::NeedsInstall { remote_socket }, &this.events_tx)
-                        .await;
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
-                        _ = this.retry.notified() => {},
+            let relay_open = if matches!(this.cfg.target, Target::Relay { .. }) {
+                Some(match this.open_connection().await {
+                    Ok(conn) => conn,
+                    Err(error) => {
+                        this.set_state(RemoteState::Offline(error.to_string()), &this.events_tx)
+                            .await;
+                        this.wait_retry(std::time::Duration::from_millis(backoff))
+                            .await;
+                        backoff = (backoff * 2).min(30_000);
+                        continue;
                     }
-                    continue;
-                }
-                Err(crate::tunnel::TunnelError::NeedsStart {
-                    remote_socket,
-                    binary,
-                }) => {
-                    this.set_state(
-                        RemoteState::NeedsStart {
-                            remote_socket,
-                            binary,
-                        },
-                        &this.events_tx,
-                    )
-                    .await;
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
-                        _ = this.retry.notified() => {},
+                })
+            } else {
+                None
+            };
+            let socket = if relay_open.is_some() {
+                this.endpoint_now().unwrap_or_default()
+            } else {
+                match this.local_socket().await {
+                    Ok(socket) => socket,
+                    Err(crate::tunnel::TunnelError::NeedsInstall { remote_socket }) => {
+                        this.set_state(
+                            RemoteState::NeedsInstall { remote_socket },
+                            &this.events_tx,
+                        )
+                        .await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
+                            _ = this.retry.notified() => {},
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                Err(crate::tunnel::TunnelError::Authentication(error)) => {
-                    this.set_state(RemoteState::AuthenticationFailed(error), &this.events_tx)
+                    Err(crate::tunnel::TunnelError::NeedsStart {
+                        remote_socket,
+                        binary,
+                    }) => {
+                        this.set_state(
+                            RemoteState::NeedsStart {
+                                remote_socket,
+                                binary,
+                            },
+                            &this.events_tx,
+                        )
                         .await;
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
-                        _ = this.retry.notified() => {},
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
+                            _ = this.retry.notified() => {},
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                Err(error) => {
-                    this.set_state(RemoteState::Offline(error.to_string()), &this.events_tx)
-                        .await;
-                    this.wait_retry(std::time::Duration::from_millis(backoff))
-                        .await;
-                    backoff = (backoff * 2).min(30_000);
-                    continue;
+                    Err(crate::tunnel::TunnelError::Authentication(error)) => {
+                        this.set_state(RemoteState::AuthenticationFailed(error), &this.events_tx)
+                            .await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
+                            _ = this.retry.notified() => {},
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        this.set_state(RemoteState::Offline(error.to_string()), &this.events_tx)
+                            .await;
+                        this.wait_retry(std::time::Duration::from_millis(backoff))
+                            .await;
+                        backoff = (backoff * 2).min(30_000);
+                        continue;
+                    }
                 }
             };
             this.set_state(
@@ -843,7 +943,11 @@ impl RemoteHost {
                 &this.events_tx,
             )
             .await;
-            match crate::open(&socket).await {
+            let opened = match relay_open {
+                Some(conn) => Ok(conn),
+                None => crate::open(&socket).await,
+            };
+            match opened {
                 Ok(mut conn) => {
                     let started = std::time::Instant::now();
                     let hello = conn

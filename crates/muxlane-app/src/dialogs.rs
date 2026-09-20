@@ -21,6 +21,7 @@ pub(crate) enum ConnectAuthMode {
     SshConfig,
     PublicKey,
     Password,
+    Relay,
 }
 
 impl MuxlaneApp {
@@ -251,6 +252,7 @@ impl MuxlaneApp {
                                 .hover(|item| item.bg(rgba(theme.bg2)))
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.connect_auth_mode = ConnectAuthMode::SshConfig;
+                                    this.set_password_placeholder_for_mode(cx);
                                     cx.notify();
                                 }))
                                 .child(i18n::text(self.language, "dialog.auth_ssh_config")),
@@ -272,6 +274,7 @@ impl MuxlaneApp {
                                 .hover(|item| item.bg(rgba(theme.bg2)))
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.connect_auth_mode = ConnectAuthMode::PublicKey;
+                                    this.set_password_placeholder_for_mode(cx);
                                     cx.notify();
                                 }))
                                 .child(i18n::text(self.language, "dialog.auth_public_key")),
@@ -293,9 +296,32 @@ impl MuxlaneApp {
                                 .hover(|item| item.bg(rgba(theme.bg2)))
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.connect_auth_mode = ConnectAuthMode::Password;
+                                    this.set_password_placeholder_for_mode(cx);
                                     cx.notify();
                                 }))
                                 .child(i18n::text(self.language, "dialog.auth_password")),
+                            )
+                            .child(
+                                semantic_button(
+                                    "auth-relay",
+                                    i18n::text(self.language, "dialog.auth_relay"),
+                                    theme,
+                                )
+                                .flex_1()
+                                .px_2()
+                                .py_1()
+                                .text_size(ui_px(11.))
+                                .text_color(rgba(theme.fg1))
+                                .when(auth_mode == ConnectAuthMode::Relay, |item| {
+                                    item.bg(rgba(theme.selection())).text_color(rgba(theme.fg0))
+                                })
+                                .hover(|item| item.bg(rgba(theme.bg2)))
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.connect_auth_mode = ConnectAuthMode::Relay;
+                                    this.set_password_placeholder_for_mode(cx);
+                                    cx.notify();
+                                }))
+                                .child(i18n::text(self.language, "dialog.auth_relay")),
                             ),
                     )
                     .when(auth_mode == ConnectAuthMode::PublicKey, |dialog| {
@@ -305,8 +331,11 @@ impl MuxlaneApp {
                     })
                     .when(auth_mode == ConnectAuthMode::Password, |dialog| {
                         dialog
-                            .child(div().mx_4().mt_2().child(username))
-                            .child(div().mx_4().mt_2().child(password))
+                            .child(div().mx_4().mt_2().child(username.clone()))
+                            .child(div().mx_4().mt_2().child(password.clone()))
+                    })
+                    .when(auth_mode == ConnectAuthMode::Relay, |dialog| {
+                        dialog.child(div().mx_4().mt_2().child(password))
                     })
                     .when_some(error, |dialog, error| {
                         dialog.child(
@@ -854,6 +883,178 @@ impl MuxlaneApp {
                     ),
             )
             .into_any_element()
+    }
+
+    pub(crate) fn open_pair_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pair_dialog = true;
+        self.pair_error = None;
+        self.pair_busy = true;
+        self.pair_code = None;
+        let url = self
+            .settings_relay_input
+            .read(cx)
+            .text()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        if url.is_empty() && self.relay_url.is_none() {
+            self.pair_busy = false;
+            self.pair_error = Some(i18n::text(self.language, "dialog.pair_missing_relay").into());
+            cx.notify();
+            return;
+        }
+        if !url.is_empty() {
+            self.relay_url = Some(url.clone());
+            self.server.start_relay(url);
+            self.persist();
+        }
+        let server = Arc::clone(&self.server);
+        cx.spawn(async move |this, cx| {
+            let result = server.begin_pair_offer().await;
+            this.update(cx, |this, cx| {
+                this.pair_busy = false;
+                match result {
+                    Ok(offer) => {
+                        this.pair_code = Some(offer.code);
+                        this.relay_url = Some(offer.relay_url);
+                        this.pair_error = None;
+                    }
+                    Err(error) => {
+                        this.pair_error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+        let _ = window;
+    }
+
+    pub(crate) fn render_pair_dialog(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = Theme::for_mode(self.theme_mode);
+        let code = self.pair_code.clone().unwrap_or_else(|| {
+            if self.pair_busy {
+                i18n::text(self.language, "dialog.pair_generating").into()
+            } else {
+                "--------".into()
+            }
+        });
+        let url = self
+            .relay_url
+            .clone()
+            .unwrap_or_else(|| i18n::text(self.language, "dialog.pair_missing_relay").into());
+        let error = self.pair_error.clone();
+        div()
+            .id("pair-dialog-backdrop")
+            .absolute()
+            .size_full()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(ui_px(90.))
+            .bg(rgba(theme.overlay()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.pair_dialog = false;
+                    this.pair_busy = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .occlude()
+                    .w(ui_px(420.))
+                    .max_w(relative(0.92))
+                    .bg(rgba(theme.bg1))
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgba(theme.line))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(theme.fg0))
+                            .child(i18n::text(self.language, "dialog.pair_phone")),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_3()
+                            .text_size(ui_px(11.))
+                            .text_color(rgba(theme.fg1))
+                            .child(i18n::text(self.language, "dialog.pair_phone_help")),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_3()
+                            .text_size(ui_px(11.))
+                            .text_color(rgba(theme.fg2))
+                            .child(url),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_3()
+                            .pb_1()
+                            .font_family("monospace")
+                            .text_size(ui_px(28.))
+                            .text_color(rgba(theme.fg0))
+                            .child(code),
+                    )
+                    .when_some(error, |dialog, error| {
+                        dialog.child(
+                            div()
+                                .px_4()
+                                .pt_2()
+                                .text_size(ui_px(11.))
+                                .text_color(rgba(theme.red))
+                                .child(error),
+                        )
+                    })
+                    .child(
+                        div().px_4().py_3().flex().justify_end().child(
+                            semantic_button(
+                                "pair-close",
+                                i18n::text(self.language, "common.cancel"),
+                                theme,
+                            )
+                            .px_3()
+                            .py_1()
+                            .on_click(cx.listener(
+                                |this, _event, _window, cx| {
+                                    this.pair_dialog = false;
+                                    this.pair_busy = false;
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn set_password_placeholder_for_mode(&mut self, cx: &mut Context<Self>) {
+        let key = if self.connect_auth_mode == ConnectAuthMode::Relay {
+            "placeholder.pair_code"
+        } else {
+            "placeholder.password"
+        };
+        let language = self.language;
+        self.connect_password.update(cx, |input, cx| {
+            input.set_placeholder(i18n::text(language, key), cx)
+        });
     }
 
     pub(crate) fn open_connect_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {

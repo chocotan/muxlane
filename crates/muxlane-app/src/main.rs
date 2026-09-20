@@ -53,12 +53,16 @@ fn main() {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "muxlane {version}\n\nUSAGE:\n  muxlane [--headless] [--connect TARGET[,TARGET...]]\n\nOPTIONS:\n  --headless          Run Unix socket server without a window\n  --connect TARGET    Connect to /path/muxlane.sock or user@host:/path/muxlane.sock\n  -V, --version       Print version\n  -h, --help          Print help\n\nENV:\n  MUXLANE_SHELL=/path    Override default shell\n  MUXLANE_HOOKS=off      Disable agent hook injection",
+            "muxlane {version}\n\nUSAGE:\n  muxlane [--headless] [--connect TARGET[,TARGET...]] [--relay URL]\n\nOPTIONS:\n  --headless          Run Unix socket server without a window\n  --connect TARGET    Connect to /path/muxlane.sock or user@host:/path/muxlane.sock\n  --relay URL         Connect this host to a self-hosted muxlane-relay\n  -V, --version       Print version\n  -h, --help          Print help\n\nENV:\n  MUXLANE_SHELL=/path    Override default shell\n  MUXLANE_HOOKS=off      Disable agent hook injection",
             version = env!("CARGO_PKG_VERSION")
         );
         return;
     }
     let headless = args.iter().any(|a| a == "--headless");
+    let relay_flag = args
+        .iter()
+        .position(|a| a == "--relay")
+        .and_then(|i| args.get(i + 1).cloned());
     let mut connect_to: Vec<String> = args
         .iter()
         .position(|a| a == "--connect")
@@ -111,16 +115,13 @@ fn main() {
             id
         });
 
-    let mut initial_state = ServerState::new(MachineInfo {
+    let initial_state = ServerState::new(MachineInfo {
         machine_id,
         name: hostname(),
         os: std::env::consts::OS.into(),
         version: env!("CARGO_PKG_VERSION").into(),
-    });
-    initial_state.projects = persisted.projects.clone();
-    for project in &mut initial_state.projects {
-        project.agents.clear();
-    }
+    })
+    .with_projects(persisted.projects.clone());
     let state = Arc::new(RwLock::new(initial_state));
     let dirty = DirtyFlag::new();
     let auth = muxlane_core::AuthSecret::load_or_create(&dir.join("secret"))
@@ -141,11 +142,27 @@ fn main() {
 
     bootstrap::install(&dir);
 
+    let relay_url = relay_flag.or(persisted.relay_url.clone());
+    if let Some(url) = relay_url.clone() {
+        persisted.relay_url = Some(url.clone());
+        server.start_relay(url);
+    }
+
     if headless {
         rt.block_on(server.restore_sessions(&persisted));
         // Headless state changes persist synchronously through MuxlaneServer.
         server.set_persistence_path(store_path);
         tracing::info!("muxlane headless server running");
+        if persisted.relay_url.is_some() {
+            match rt.block_on(server.begin_pair_offer()) {
+                Ok(offer) => tracing::info!(
+                    code = %offer.code,
+                    relay = %offer.relay_url,
+                    "phone pairing code ready"
+                ),
+                Err(error) => tracing::warn!(%error, "could not create phone pairing code"),
+            }
+        }
         rt.block_on(std::future::pending::<()>());
         return;
     }

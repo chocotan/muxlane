@@ -160,6 +160,18 @@ fn resolve_project_path(
     Ok(canonical)
 }
 
+/// spawn 目标项目不存在；RPC 层映射为 no_such_project，调用方可 downcast 判断。
+#[derive(Debug)]
+pub struct NoSuchProject(pub muxlane_core::model::ProjectId);
+
+impl std::fmt::Display for NoSuchProject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such project: {}", self.0)
+    }
+}
+
+impl std::error::Error for NoSuchProject {}
+
 impl MuxlaneServer {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
@@ -215,7 +227,7 @@ impl MuxlaneServer {
             .iter()
             .find(|project| project.id == params.project)
             .cloned()
-            .with_context(|| format!("no such project: {}", params.project))?;
+            .ok_or_else(|| NoSuchProject(params.project.clone()))?;
         let agent_type = params
             .agent_type
             .unwrap_or(muxlane_core::model::AgentType::Shell);
@@ -392,6 +404,31 @@ impl MuxlaneServer {
             destroyed_agents,
             failed_agents,
         })
+    }
+
+    pub async fn list_presets(
+        &self,
+        project: &muxlane_core::model::ProjectId,
+    ) -> anyhow::Result<Vec<muxlane_core::AgentPreset>> {
+        let path = self
+            .state
+            .read()
+            .await
+            .projects
+            .iter()
+            .find(|item| &item.id == project)
+            .map(|item| item.path.clone())
+            .ok_or_else(|| anyhow::anyhow!("no such project: {project}"))?;
+        let cwd = path.clone();
+        self.runtime
+            .spawn_blocking(move || {
+                muxlane_core::builtin_presets(muxlane_term::default_shell_program())
+                    .into_iter()
+                    .filter(|preset| !preset.require_installed || preset.installed_in(&cwd))
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .context("list presets")
     }
 
     pub async fn mark_seen(&self, agent: &AgentId) {

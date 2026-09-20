@@ -873,13 +873,17 @@ fn settings_tab_and_f6_cycle_locally_and_restore_focus() {
             .unwrap();
         assert_ne!(first, previous);
         for keys in ["tab", "shift-tab", "f6", "shift-f6"] {
-            let mut seen = Vec::new();
-            for _ in 0..8 {
+            // 设置页焦点控件会增减，按回到首个控件为一圈，不假定数量。
+            let mut seen = vec![first.clone()];
+            for _ in 0..64 {
                 cx.simulate_keystrokes(window, keys);
                 draw(cx, window);
                 let focused = cx
                     .update_window(window, |_, window, cx| window.focused(cx).unwrap())
                     .unwrap();
+                if focused == first {
+                    break;
+                }
                 assert_ne!(focused, previous);
                 assert!(!seen.contains(&focused));
                 seen.push(focused);
@@ -887,6 +891,7 @@ fn settings_tab_and_f6_cycle_locally_and_restore_focus() {
             assert!(cx
                 .update_window(window, |_, window, _| first.is_focused(window))
                 .unwrap());
+            assert!(seen.len() >= 4);
         }
         cx.simulate_keystrokes(window, "shift-tab");
         cx.update(|cx| {

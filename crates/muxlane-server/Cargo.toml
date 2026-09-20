@@ -7,6 +7,7 @@ edition.workspace = true
 muxlane-core = { path = "../muxlane-core" }
 muxlane-term = { path = "../muxlane-term" }
 muxlane-store = { path = "../muxlane-store" }
+serde.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
@@ -15,6 +16,9 @@ ulid.workspace = true
 tracing.workspace = true
 bytes = "1"
 fs2.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rand.workspace = true
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
 [dev-dependencies]
 tempfile.workspace = true

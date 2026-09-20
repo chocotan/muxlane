@@ -179,7 +179,7 @@ async fn project_add_api_creates_validates_and_deduplicates_paths() {
     );
     assert!(error.to_string().contains("No such file or directory"));
     assert!(!missing.exists());
-    assert_eq!(state.read().await.projects.len(), 1);
+    assert_eq!(state.read().await.snapshot().projects.len(), 1);
 
     let nested = dir.path().join("new/parent/project");
     let created = server
@@ -236,6 +236,7 @@ async fn project_add_api_creates_validates_and_deduplicates_paths() {
         state
             .read()
             .await
+            .snapshot()
             .projects
             .iter()
             .filter(|project| project.path == canonical.canonicalize().unwrap())
@@ -360,7 +361,7 @@ async fn project_add_rpc_advertises_and_enforces_create_capability() {
         muxlane_core::protocol::error_codes::PATH_NOT_FOUND
     );
     assert!(!missing.exists());
-    assert!(state.read().await.projects.is_empty());
+    assert!(state.read().await.snapshot().projects.is_empty());
 
     let nested = dir.path().join("rpc/new/nested");
     let response = rpc_call(
@@ -394,7 +395,54 @@ async fn project_add_rpc_advertises_and_enforces_create_capability() {
     .await;
     let duplicate: Project = serde_json::from_value(duplicate.result.unwrap()).unwrap();
     assert_eq!(project.id, duplicate.id);
-    assert_eq!(state.read().await.projects.len(), 1);
+    assert_eq!(state.read().await.snapshot().projects.len(), 1);
+}
+
+#[tokio::test]
+async fn unix_socket_skips_pair_and_lists_installed_presets() {
+    let (_server, sock, _state, _dirty, dir) = spawn_server().await;
+    let project_dir = dir.path().join("listed");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let added = rpc_call(
+        &sock,
+        methods::PROJECT_ADD,
+        serde_json::json!({"path": project_dir, "create_if_missing": false}),
+    )
+    .await;
+    let project: Project = serde_json::from_value(added.result.unwrap()).unwrap();
+
+    let hello = rpc_call(&sock, methods::SYSTEM_HELLO, serde_json::json!({})).await;
+    let hello: muxlane_core::protocol::HelloResult =
+        serde_json::from_value(hello.result.unwrap()).unwrap();
+    assert!(hello
+        .features
+        .iter()
+        .any(|feature| feature == muxlane_core::protocol::features::PAIR));
+    assert!(hello
+        .features
+        .iter()
+        .any(|feature| feature == muxlane_core::protocol::features::PRESET_LIST));
+
+    let listed = rpc_call(
+        &sock,
+        methods::PRESET_LIST,
+        serde_json::json!({"project": project.id}),
+    )
+    .await;
+    let presets: Vec<muxlane_core::AgentPreset> =
+        serde_json::from_value(listed.result.unwrap()).unwrap();
+    assert!(presets.iter().any(|preset| preset.id == "shell"));
+
+    let unpaired = rpc_call(
+        &sock,
+        methods::PAIR_BEGIN,
+        serde_json::json!({"code": "00000000", "device": "phone"}),
+    )
+    .await;
+    assert_eq!(unpaired.error.unwrap().code, "unauthorized");
+
+    let still_works = rpc_call(&sock, methods::STATE_LIST, serde_json::json!(null)).await;
+    assert!(still_works.error.is_none());
 }
 
 #[tokio::test]
@@ -446,6 +494,7 @@ async fn remote_term_input_reaches_pty_and_project_add_validates_path() {
     assert!(state
         .read()
         .await
+        .snapshot()
         .projects
         .iter()
         .any(|item| item.id == project.id));
@@ -470,8 +519,8 @@ async fn project_delete_destroys_scoped_sessions_and_state() {
     let result: muxlane_core::protocol::DeleteScopeResult =
         serde_json::from_value(response.result.unwrap()).unwrap();
     assert_eq!(result.destroyed_agents, vec![agent]);
-    assert!(state.read().await.projects.is_empty());
-    assert!(state.read().await.agents.is_empty());
+    assert!(state.read().await.snapshot().projects.is_empty());
+    assert!(state.read().await.snapshot().agents.is_empty());
     assert_eq!(server.session_count().await, 0);
 }
 
@@ -708,7 +757,7 @@ async fn node_hook_script_reports_with_env_identity() {
         .unwrap();
     assert!(status.success());
     for _ in 0..20 {
-        if state.read().await.agents[0].status == AgentStatus::Done {
+        if state.read().await.snapshot().agents[0].status == AgentStatus::Done {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -854,8 +903,16 @@ async fn agent_delete_kills_and_cleans_state() {
     let resp: Response = serde_json::from_value(read_frame(&mut rpc).await.unwrap()).unwrap();
     assert!(resp.result.is_some());
     assert!(srv.session(&agent).await.is_none());
-    assert!(!state.read().await.agents.iter().any(|a| a.id == agent));
-    assert!(!state.read().await.projects[0].agents.contains(&agent));
+    assert!(!state
+        .read()
+        .await
+        .snapshot()
+        .agents
+        .iter()
+        .any(|a| a.id == agent));
+    assert!(!state.read().await.snapshot().projects[0]
+        .agents
+        .contains(&agent));
     let ev = tokio::time::timeout(std::time::Duration::from_secs(1), read_frame(&mut events))
         .await
         .unwrap()
@@ -988,7 +1045,13 @@ fn spawn_and_delete_agent_from_non_tokio_thread() {
 
     rt.block_on(async {
         assert!(server.session(&agent).await.is_none());
-        assert!(!state.read().await.agents.iter().any(|a| a.id == agent));
+        assert!(!state
+            .read()
+            .await
+            .snapshot()
+            .agents
+            .iter()
+            .any(|a| a.id == agent));
     });
     assert!(!tmux_session_exists(&tmux_name));
 }

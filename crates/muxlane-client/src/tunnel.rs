@@ -20,6 +20,9 @@ pub enum TunnelError {
     },
     #[error("SSH/tunnel failed: {0}")]
     Other(String),
+    /// 用户取消了 bootstrap 上传；调用方据此静默收尾，不弹错误。
+    #[error("已取消上传")]
+    Cancelled,
 }
 
 fn askpass_script() -> PathBuf {
@@ -51,12 +54,21 @@ fn ssh_command(auth: &SshAuth) -> Command {
                 "ssh-secret-{}",
                 muxlane_core::model::new_id("password")
             ));
-            let _ = std::fs::write(&secret_file, password);
+            // 0600 一次建成：消除先写后 chmod 的明文窗口；失败也删，不留明文。
+            let mut options = std::fs::OpenOptions::new();
+            options.create_new(true).write(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    std::fs::set_permissions(&secret_file, std::fs::Permissions::from_mode(0o600));
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let written = options.open(&secret_file).and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(password.as_bytes())?;
+                file.sync_all()
+            });
+            if written.is_err() {
+                let _ = std::fs::remove_file(&secret_file);
             }
             let mut command = Command::new("setsid");
             command
@@ -114,6 +126,7 @@ fn ssh_command(auth: &SshAuth) -> Command {
                     .arg(identity);
             }
         }
+        SshAuth::RelayToken { .. } => {}
         SshAuth::Password { .. } => {
             command.args([
                 "-o",
@@ -297,14 +310,14 @@ pub async fn upload_bytes(
 ) -> Result<(), TunnelError> {
     let host = match &cfg.target {
         Target::Ssh { host, .. } => host.clone(),
-        Target::Socket(_) => {
+        Target::Socket(_) | Target::Relay { .. } => {
             return Err(TunnelError::Other(
-                "direct socket target cannot receive uploads".into(),
+                "non-SSH target cannot receive uploads".into(),
             ))
         }
     };
     let destination = cfg.auth.destination(&host);
-    let script = format!("cat > {}", sh_quote(remote_path));
+    let script = format!("umask 077; cat > {}", sh_quote(remote_path));
     let mut child = ssh_command(&cfg.auth)
         .args(shared_master_args(&destination))
         .arg(&destination)
@@ -360,7 +373,7 @@ async fn upload_binary(
         .map_err(|error| TunnelError::Other(error.to_string()))?;
 
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        return Err(TunnelError::Other("已取消上传".into()));
+        return Err(TunnelError::Cancelled);
     }
 
     // 如果二进制大于 50MB (例如未 strip 的 debug 产物)，尝试就地 strip 去掉调试符号
@@ -430,7 +443,7 @@ mv "$tmp" "$data/bin/muxlane""#;
     for chunk in compressed_bytes.chunks(CHUNK) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = child.kill().await;
-            return Err(TunnelError::Other("已取消上传".into()));
+            return Err(TunnelError::Cancelled);
         }
         stdin
             .write_all(chunk)
@@ -463,7 +476,7 @@ mv "$tmp" "$data/bin/muxlane""#;
         .map_err(|error| TunnelError::Other(error.to_string()))?;
     if !output.status.success() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(TunnelError::Other("已取消上传".into()));
+            return Err(TunnelError::Cancelled);
         }
         return Err(classify_failure(&output.stderr));
     }

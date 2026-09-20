@@ -207,6 +207,8 @@ pub mod features {
     pub const AGENT_MARK_SEEN: &str = "agent.mark_seen";
     /// Client asks the server to stream large terminal replays as bounded events.
     pub const TERM_REPLAY_CHUNKS: &str = "term.replay_chunks";
+    pub const PAIR: &str = "pair.begin";
+    pub const PRESET_LIST: &str = "preset.list";
 }
 /// 方法名常量
 pub mod methods {
@@ -224,6 +226,7 @@ pub mod methods {
     pub const PROJECT_ADD: &str = "project.add";
     pub const PROJECT_DELETE: &str = "project.delete";
     pub const PAIR_BEGIN: &str = "pair.begin";
+    pub const PRESET_LIST: &str = "preset.list";
 }
 
 // ── 方法参数/结果 ─────────────────────────────
@@ -359,6 +362,27 @@ pub struct TermExitEvent {
     pub agent: AgentId,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairBeginParams {
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairBeginResult {
+    pub token: String,
+    pub machine: crate::model::MachineInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresetListParams {
+    pub project: ProjectId,
+}
+
 // ── newline-JSON 帧编解码 ─────────────────────
 
 /// 从 AsyncBufRead 读一行 JSON 帧。
@@ -434,6 +458,18 @@ mod tests {
         let params: ProjectAddParams =
             serde_json::from_value(serde_json::json!({"path": "/tmp/project"})).unwrap();
         assert!(!params.create_if_missing);
+    }
+
+    #[test]
+    fn pair_begin_accepts_code_or_token() {
+        let by_code: PairBeginParams =
+            serde_json::from_value(serde_json::json!({"code": "12345678", "device": "d1"}))
+                .unwrap();
+        assert_eq!(by_code.code.as_deref(), Some("12345678"));
+        assert!(by_code.token.is_none());
+        let by_token: PairBeginParams =
+            serde_json::from_value(serde_json::json!({"token": "v1:1:x", "device": "d1"})).unwrap();
+        assert_eq!(by_token.token.as_deref(), Some("v1:1:x"));
     }
 
     #[test]

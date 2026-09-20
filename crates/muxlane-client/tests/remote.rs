@@ -111,10 +111,16 @@ async fn remote_host_connects_and_receives_events() {
         tmux_session: None,
     };
     let second_id = second.id.clone();
-    state.write().await.agents.push(second);
-    state.write().await.projects[0]
-        .agents
-        .push(second_id.clone());
+    state.write().await.fixture_push(
+        muxlane_core::model::Project {
+            id: "p1".into(),
+            name: "p1".into(),
+            path: "/tmp/p1".into(),
+            branch: None,
+            agents: vec![],
+        },
+        second,
+    );
     server
         .add_project(muxlane_core::protocol::ProjectAddParams {
             path: dir.path().display().to_string(),
@@ -244,5 +250,6 @@ fn cfg_target(cfg: &HostCfg) -> String {
     match &cfg.target {
         muxlane_client::Target::Ssh { host, .. } => host.clone(),
         muxlane_client::Target::Socket(path) => path.clone(),
+        muxlane_client::Target::Relay { url, .. } => url.clone(),
     }
 }

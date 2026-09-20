@@ -61,6 +61,48 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("common.on", "开启", "On"),
     ("common.send", "发送", "Send"),
     ("common.settings", "设置", "Settings"),
+    ("placeholder.relay_url", "ws://127.0.0.1:9843", "ws://127.0.0.1:9843"),
+    (
+        "settings.relay_url",
+        "手机中继 URL",
+        "Phone Relay URL",
+    ),
+    (
+        "settings.relay_url_help",
+        "自建 muxlane-relay 的 WebSocket 地址。同一 Wi-Fi 可填本机局域网地址。",
+        "WebSocket URL of your self-hosted muxlane-relay. On LAN, use this machine's address.",
+    ),
+    ("settings.relay_url_apply", "应用", "Apply"),
+    ("settings.pair_phone", "配对手机", "Pair Phone"),
+    (
+        "settings.pair_phone_help",
+        "生成 8 位配对码，手机在 5 分钟内输入即可连接",
+        "Generate an 8-digit code. Enter it on the phone within 5 minutes.",
+    ),
+    ("dialog.pair_phone", "配对手机", "Pair Phone"),
+    (
+        "dialog.pair_phone_help",
+        "在手机 App 填入中继地址和下面的配对码",
+        "Enter this relay URL and pairing code in the phone app",
+    ),
+    ("dialog.pair_generating", "生成中…", "Generating…"),
+    (
+        "dialog.pair_missing_relay",
+        "请先填写中继 URL",
+        "Set a relay URL first",
+    ),
+    ("dialog.auth_relay", "中继", "Relay"),
+    ("placeholder.pair_code", "8 位配对码", "8-digit pairing code"),
+    (
+        "error.relay_url_required",
+        "请输入 ws:// 或 wss:// 的中继地址",
+        "Enter a ws:// or wss:// relay URL",
+    ),
+    (
+        "error.pair_code_required",
+        "请输入目标机器上的 8 位配对码",
+        "Enter the 8-digit code from the target machine",
+    ),
     ("dialog.add_local_project", "添加本地项目", "Add Local Project"),
     (
         "dialog.add_local_project_help",
