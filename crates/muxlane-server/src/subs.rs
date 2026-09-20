@@ -32,6 +32,7 @@ impl SubRegistry {
         self.me = Some(Arc::downgrade(me));
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
         sub_id: &str,

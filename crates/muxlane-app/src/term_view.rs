@@ -1493,9 +1493,7 @@ impl Render for TermView {
                                     Some(cached) => cached.clone(),
                                     None => {
                                         // 图片数据可能还没传完（分片中）或者根本没发；先不画，等下一帧。
-                                        let Some(stored) = kitty_vterm.kitty_image(image_id) else {
-                                            return None;
-                                        };
+                                        let stored = kitty_vterm.kitty_image(image_id)?;
                                         // 解码放后台：几十 MB 的图在主线程同步解码会冻结整个 UI。
                                         // in-flight 去重；首帧先不画，解码完成后 notify 重绘。
                                         if kitty_decode_inflight.lock().ok()?.insert(image_id) {

@@ -110,7 +110,7 @@ async fn remote_host_connects_and_receives_events() {
         seen: true,
         tmux_session: None,
     };
-    let second_id = second.id.clone();
+    let _second_id = second.id.clone();
     state.write().await.fixture_push(
         muxlane_core::model::Project {
             id: "p1".into(),
@@ -226,7 +226,7 @@ async fn upload_bytes_lands_file_on_remote_host() {
         .await
         .unwrap();
     let output = std::process::Command::new("ssh")
-        .args(["-o", "BatchMode=yes", &format!("{}", cfg_target(&cfg))])
+        .args(["-o", "BatchMode=yes", &cfg_target(&cfg)])
         .arg("sha256sum")
         .arg(&path)
         .output()

@@ -135,6 +135,7 @@ impl Relay {
         }
     }
 
+    #[allow(clippy::result_large_err)] // tungstenite 握手回调签名固定
     async fn handle_stream(&self, stream: TcpStream) -> anyhow::Result<()> {
         let mut uri = None;
         let ws = tokio_tungstenite::accept_hdr_async(
