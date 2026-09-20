@@ -21,6 +21,9 @@ use std::os::unix::fs::OpenOptionsExt;
 const FONT_SIZE: f32 = 13.0;
 const TERM_PADDING_X: f32 = 12.0;
 const TERM_PADDING_Y: f32 = 8.0;
+/// PTY/远端 resize 防抖窗口：拖拽期间每帧都发 resize 会让 tmux/TUI 每帧全屏重绘，
+/// 输出洪泛又触发 lag→resync（全量 replay 重传）。合并成最后一帧。
+const PTY_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 const FALLBACK_CELL_W: f32 = 8.2;
 const FALLBACK_CELL_H: f32 = 17.0;
 const SCROLLBAR_WIDTH: f32 = 10.0;
@@ -41,6 +44,17 @@ fn invalidate_cached_geometry(dims: &mut (u16, u16), bounds: &mut Option<Bounds<
 
 fn refresh_snapshot_after_resize(vterm: &VTerm, snapshot: &mut Arc<RenderSnapshot>) {
     *snapshot = vterm.render_snapshot();
+}
+
+/// 取出待应用的 PTY resize（必须先清 scheduled 再 take：窗口期内新到的尺寸
+/// 会重新调度定时器，不会被本次吞掉）。
+type PendingResize = (u16, u16, u16, u16);
+fn take_pending_resize(
+    pending: &std::sync::Mutex<Option<PendingResize>>,
+    scheduled: &AtomicBool,
+) -> Option<PendingResize> {
+    scheduled.store(false, Ordering::SeqCst);
+    pending.lock().ok().and_then(|mut slot| slot.take())
 }
 
 /// 解码尺寸上限：超过 8192×8192 的图不再解码（几十 MB 的巨图解码
@@ -510,6 +524,9 @@ pub struct TermView {
     /// 正在后台解码的 image id，防止同帧重复 spawn 解码任务。
     kitty_decode_inflight: Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
     pending_selection: Option<(i32, usize, bool)>,
+    /// 防抖：待应用的 PTY/远端 resize（拖拽期间只留最终帧）。
+    pty_resize_pending: Arc<std::sync::Mutex<Option<PendingResize>>>,
+    pty_resize_scheduled: Arc<AtomicBool>,
     #[cfg(test)]
     renders: std::cell::Cell<usize>,
     selection_flush_scheduled: bool,
@@ -765,6 +782,8 @@ impl TermView {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             pending_selection: None,
+            pty_resize_pending: Arc::new(std::sync::Mutex::new(None)),
+            pty_resize_scheduled: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             renders: std::cell::Cell::new(0),
             selection_flush_scheduled: false,
@@ -818,6 +837,8 @@ impl TermView {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             pending_selection: None,
+            pty_resize_pending: Arc::new(std::sync::Mutex::new(None)),
+            pty_resize_scheduled: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             renders: std::cell::Cell::new(0),
             selection_flush_scheduled: false,
@@ -1335,6 +1356,8 @@ impl Render for TermView {
         let vt_resize = self.vterm.clone();
         let writer_resize = self.writer.clone();
         let remote_resize = self.remote_input.clone();
+        let pty_resize_pending = Arc::clone(&self.pty_resize_pending);
+        let pty_resize_scheduled = Arc::clone(&self.pty_resize_scheduled);
         let input_sink = self.input_sink();
         let input_focus = self.focus.clone();
         let input_marked = Arc::clone(&self.marked_text);
@@ -1460,13 +1483,35 @@ impl Render for TermView {
                                     f32::from(measured_cell) as u16,
                                     f32::from(line_height) as u16,
                                 );
-                                if let Some(writer) = &writer_resize {
-                                    // pixel_width/height 不填就只有 rows/cols，Kitty 图形协议的
-                                    // 客户端（如 kitten icat）会因为拿不到像素尺寸直接拒绝发图。
-                                    let _ = writer.resize(cols, rows, px_w, px_h);
+                                // PTY/远端 resize 防抖：拖拽期间每帧只更新本地网格（即时预览），
+                                // 真正的 PTY resize 和远端 RPC 合并到停止拖拽 150ms 后执行，
+                                // 避免 tmux/TUI 每帧全屏重绘造成输出洪泛（lag→resync 全量重传）。
+                                if let Ok(mut slot) = pty_resize_pending.lock() {
+                                    *slot = Some((cols, rows, px_w, px_h));
                                 }
-                                if let Some(remote) = &remote_resize {
-                                    let _ = remote.send(RemoteTermCommand::Resize(cols, rows));
+                                if !pty_resize_scheduled.swap(true, Ordering::SeqCst) {
+                                    let pending = Arc::clone(&pty_resize_pending);
+                                    let scheduled = Arc::clone(&pty_resize_scheduled);
+                                    let writer = writer_resize.clone();
+                                    let remote = remote_resize.clone();
+                                    let executor = cx.background_executor().clone();
+                                    let timer = executor.clone();
+                                    executor.spawn(async move {
+                                        timer.timer(PTY_RESIZE_DEBOUNCE).await;
+                                        let Some((cols, rows, px_w, px_h)) =
+                                            take_pending_resize(&pending, &scheduled)
+                                        else {
+                                            return;
+                                        };
+                                        if let Some(writer) = &writer {
+                                            // pixel_width/height 不填就只有 rows/cols，Kitty 图形协议的
+                                            // 客户端（如 kitten icat）会因为拿不到像素尺寸直接拒绝发图。
+                                            let _ = writer.resize(cols, rows, px_w, px_h);
+                                        }
+                                        if let Some(remote) = &remote {
+                                            let _ = remote.send(RemoteTermCommand::Resize(cols, rows));
+                                        }
+                                    }).detach();
                                 }
                                 refresh_snapshot_after_resize(&vt_resize, &mut snapshot);
                                 let term = term.clone();

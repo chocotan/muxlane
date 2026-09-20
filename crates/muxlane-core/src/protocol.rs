@@ -244,6 +244,31 @@ pub struct TermSubscribeParams {
     /// New clients opt in; old clients keep the single-frame response behavior.
     #[serde(default)]
     pub accept_replay_chunks: bool,
+    /// Replay/resync payloads (chunks and legacy replay_b64) are gzip-compressed.
+    /// Old servers ignore this and send plain bytes; clients must handle both.
+    #[serde(default)]
+    pub accept_replay_gzip: bool,
+}
+
+/// gzip 压缩 replay 字节（flate2 已在 workspace 依赖里；TUI 输出典型压缩比 5-10×）。
+pub fn gzip_encode(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let _ = encoder.write_all(data);
+    encoder.finish().unwrap_or_else(|_| Vec::new())
+}
+
+/// 解压 replay 字节；输入不是 gzip 时原样返回（老服务端回退路径）。
+pub fn gzip_decode(data: &[u8]) -> Vec<u8> {
+    if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+        use std::io::Read;
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut out = Vec::new();
+        if decoder.read_to_end(&mut out).is_ok() {
+            return out;
+        }
+    }
+    data.to_vec()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

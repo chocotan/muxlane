@@ -42,6 +42,7 @@ impl SubRegistry {
         session: Arc<muxlane_term::PtySession>,
         replay: Bytes,
         replay_chunks: bool,
+        replay_gzip: bool,
     ) {
         let ending = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(Notify::new());
@@ -53,6 +54,7 @@ impl SubRegistry {
             rx,
             replay,
             replay_chunks,
+            replay_gzip,
             Arc::clone(&ending),
             Arc::clone(&wake),
             self.me.clone(),
@@ -112,13 +114,16 @@ async fn forward(
     mut rx: broadcast::Receiver<Bytes>,
     replay: Bytes,
     replay_chunks: bool,
+    replay_gzip: bool,
     ending: Arc<AtomicBool>,
     wake: Arc<Notify>,
     registry: Option<Weak<Mutex<SubRegistry>>>,
 ) {
     let mut last_resync: Option<Instant> = None;
     let mut replay_id = 0u64;
-    if replay_chunks && !send_replay_chunks(&sink, &agent, &sub_id, replay_id, &replay).await {
+    if replay_chunks
+        && !send_replay_chunks(&sink, &agent, &sub_id, replay_id, &replay, replay_gzip).await
+    {
         cleanup(&sub_id, registry).await;
         return;
     }
@@ -170,13 +175,26 @@ async fn forward(
                     rx = new_rx;
                     replay_id = replay_id.wrapping_add(1);
                     let sent = if replay_chunks {
-                        send_replay_chunks(&sink, &agent, &sub_id, replay_id, &snapshot).await
+                        send_replay_chunks(
+                            &sink,
+                            &agent,
+                            &sub_id,
+                            replay_id,
+                            &snapshot,
+                            replay_gzip,
+                        )
+                        .await
                     } else {
+                        let payload = if replay_gzip {
+                            muxlane_core::protocol::gzip_encode(&snapshot)
+                        } else {
+                            snapshot.to_vec()
+                        };
                         let msg = EventMsg::new(
                             muxlane_core::protocol::events::TERM_RESYNC,
                             serde_json::to_value(TermResyncEvent {
                                 agent: agent.clone(),
-                                replay_b64: muxlane_core::protocol::b64_encode(&snapshot),
+                                replay_b64: muxlane_core::protocol::b64_encode(&payload),
                             })
                             .unwrap_or_default(),
                         );
@@ -200,16 +218,19 @@ async fn send_replay_chunks(
     sub_id: &str,
     replay_id: u64,
     replay: &[u8],
+    replay_gzip: bool,
 ) -> bool {
     // An empty replay still gets a start marker so the client resets stale output.
     if replay.is_empty() {
-        return send_replay_chunk(sink, agent, sub_id, replay_id, 0, &[]).await;
+        return send_replay_chunk(sink, agent, sub_id, replay_id, 0, &[], replay_gzip).await;
     }
     for (chunk_index, chunk) in replay
         .chunks(muxlane_core::protocol::TERM_REPLAY_CHUNK_SIZE)
         .enumerate()
     {
-        if !send_replay_chunk(sink, agent, sub_id, replay_id, chunk_index as u32, chunk).await {
+        if !send_replay_chunk(sink, agent, sub_id, replay_id, chunk_index as u32, chunk, replay_gzip)
+            .await
+        {
             return false;
         }
     }
@@ -223,7 +244,13 @@ async fn send_replay_chunk(
     replay_id: u64,
     chunk_index: u32,
     chunk: &[u8],
+    replay_gzip: bool,
 ) -> bool {
+    let payload = if replay_gzip {
+        muxlane_core::protocol::gzip_encode(chunk)
+    } else {
+        chunk.to_vec()
+    };
     let msg = EventMsg::new(
         muxlane_core::protocol::events::TERM_REPLAY_CHUNK,
         serde_json::to_value(TermReplayChunkEvent {
@@ -231,7 +258,7 @@ async fn send_replay_chunk(
             sub_id: sub_id.to_string(),
             replay_id,
             chunk_index,
-            data_b64: muxlane_core::protocol::b64_encode(chunk),
+            data_b64: muxlane_core::protocol::b64_encode(&payload),
         })
         .unwrap_or_default(),
     );
@@ -283,7 +310,7 @@ mod tests {
         ]);
         let (sink, mut sink_rx) = mpsc::channel(16);
         assert!(
-            send_replay_chunks(&sink, &"chunked".into(), "sub1", 7, &replay).await,
+            send_replay_chunks(&sink, &"chunked".into(), "sub1", 7, &replay, false).await,
             "chunk delivery"
         );
 
@@ -303,6 +330,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gzip_chunked_replay_round_trips_and_shrinks() {
+        // TUI 式重复文本：gzip 必须显著小于原始字节，且解压后逐字节一致。
+        let line = b"claude> thinking step 12345 ... token usage report\r\n";
+        let mut replay = Vec::new();
+        for i in 0..20_000 {
+            replay.extend_from_slice(line);
+            replay.extend_from_slice(format!("row {i}\r\n").as_bytes());
+        }
+        let (sink, mut sink_rx) = mpsc::channel(64);
+        assert!(
+            send_replay_chunks(&sink, &"gzip".into(), "sub1", 0, &replay, true).await,
+            "chunk delivery"
+        );
+        let mut received = Vec::new();
+        let mut compressed = 0usize;
+        while let Ok(message) = sink_rx.try_recv() {
+            let event: TermReplayChunkEvent = serde_json::from_value(message.params).unwrap();
+            let payload = muxlane_core::protocol::b64_decode(&event.data_b64).unwrap();
+            compressed += payload.len();
+            received
+                .extend(muxlane_core::protocol::gzip_decode(&payload));
+        }
+        assert_eq!(received, replay, "gzip replay round-trips byte-exact");
+        assert!(
+            compressed * 4 < replay.len(),
+            "repetitive TUI output compresses >4x: {} -> {}",
+            replay.len(),
+            compressed
+        );
+    }
+
+    #[test]
+    fn gzip_decode_passes_through_plain_bytes() {
+        // 老服务端不发 gzip：非 gzip 输入必须原样返回。
+        let plain = b"hello terminal".to_vec();
+        assert_eq!(muxlane_core::protocol::gzip_decode(&plain), plain);
+        let round = muxlane_core::protocol::gzip_encode(&plain);
+        assert_eq!(muxlane_core::protocol::gzip_decode(&round), plain);
+        assert!(round.len() < plain.len() + 64);
+    }
+
+    #[tokio::test]
     async fn forwarder_delivers_all_frames_in_order() {
         let agent = "shell_burst".to_string();
         let session = spawn_session(&agent, "sleep 2");
@@ -316,6 +385,7 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
             false,
         );
 
@@ -354,6 +424,7 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
             false,
         );
 
@@ -409,6 +480,7 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
             false,
         );
 
@@ -471,6 +543,7 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
             false,
         );
 

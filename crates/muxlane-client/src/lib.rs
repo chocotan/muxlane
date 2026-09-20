@@ -26,7 +26,7 @@ pub async fn upload_bytes_to_remote(
 use anyhow::Result;
 use muxlane_core::model::Snapshot;
 use muxlane_core::protocol::{
-    b64_decode, b64_encode, read_frame, write_frame, EventMsg, Request, Response,
+    b64_decode, b64_encode, gzip_decode, read_frame, write_frame, EventMsg, Request, Response,
     TermSubscribeParams, TermSubscribeResult,
 };
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
@@ -232,13 +232,15 @@ pub async fn stream_term(
             serde_json::to_value(TermSubscribeParams {
                 agent: agent.clone(),
                 accept_replay_chunks: true,
+                accept_replay_gzip: true,
             })?,
         )
         .await?,
     )?;
-    // Old servers ignore accept_replay_chunks and return the legacy single frame.
+    // Old servers ignore accept_replay_chunks/gzip and return the legacy single frame.
     if !result.replay_b64.is_empty() {
-        on_update(TermUpdate::Resync(b64_decode(&result.replay_b64)?));
+        let bytes = b64_decode(&result.replay_b64)?;
+        on_update(TermUpdate::Resync(gzip_decode(&bytes)));
     }
     let sub_id = result.sub_id;
     let (mut writer, mut reader) = conn.into_split();
@@ -257,6 +259,8 @@ pub async fn stream_term(
                     serde_json::from_value(ev.params)?;
                 if d.agent == *agent && d.sub_id == sub_id {
                     let bytes = b64_decode(&d.data_b64)?;
+                    // 服务端 gzip 可选：老服务端发的是明文，gzip_decode 自动透传。
+                    let bytes = gzip_decode(&bytes);
                     if active_replay_id != Some(d.replay_id) {
                         if d.chunk_index != 0 {
                             break Err(anyhow::anyhow!(
@@ -283,7 +287,8 @@ pub async fn stream_term(
             Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_RESYNC => {
                 let d: muxlane_core::protocol::TermResyncEvent = serde_json::from_value(ev.params)?;
                 if d.agent == *agent {
-                    on_update(TermUpdate::Resync(b64_decode(&d.replay_b64)?));
+                    let bytes = b64_decode(&d.replay_b64)?;
+                    on_update(TermUpdate::Resync(gzip_decode(&bytes)));
                 }
             }
             Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_EXIT => {

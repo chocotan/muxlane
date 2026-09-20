@@ -3396,6 +3396,7 @@ name = "muxlane-core"
 version = "0.0.16"
 dependencies = [
  "base64",
+ "flate2",
  "hmac",
  "rand 0.9.5",
  "regex",

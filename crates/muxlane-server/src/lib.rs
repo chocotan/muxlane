@@ -273,8 +273,14 @@ impl MuxlaneServer {
             session,
             snapshot.clone(),
             params.accept_replay_chunks,
+            params.accept_replay_gzip,
         );
         connection_subs.push(sub_id.clone());
+        let replay_payload = if params.accept_replay_gzip {
+            muxlane_core::protocol::gzip_encode(&snapshot)
+        } else {
+            snapshot.to_vec()
+        };
         Ok(Response::ok(
             req.id,
             serde_json::to_value(TermSubscribeResult {
@@ -282,7 +288,7 @@ impl MuxlaneServer {
                 replay_b64: if params.accept_replay_chunks {
                     String::new()
                 } else {
-                    muxlane_core::protocol::b64_encode(&snapshot)
+                    muxlane_core::protocol::b64_encode(&replay_payload)
                 },
             })?,
         ))
