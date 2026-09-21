@@ -7,7 +7,7 @@ mod subs;
 mod supervisor;
 
 pub use api::ProjectAddError;
-pub use relay::{PairOffer, RelayHandle};
+pub use relay::{validate_relay_credentials, PairOffer, RelayHandle};
 pub use state::ServerState;
 pub use subs::SubRegistry;
 

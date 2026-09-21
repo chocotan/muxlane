@@ -212,6 +212,7 @@ pub struct MuxlaneApp {
     pub(crate) dialog_error: Option<String>,
     pub(crate) relay_url: Option<String>,
     pub(crate) relay_token: Option<String>,
+    pub(crate) relay_error: Option<String>,
 
     // 菜单/确认框
     pub(crate) session_menu: Option<SessionMenu>,
@@ -698,6 +699,7 @@ impl MuxlaneApp {
             dialog_error: None,
             relay_url: persisted.relay_url.clone(),
             relay_token,
+            relay_error: None,
             quit_confirm_open: false,
             quit_confirmed: false,
             quit_cancel_focus: cx.focus_handle(),

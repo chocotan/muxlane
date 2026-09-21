@@ -614,15 +614,52 @@ impl MuxlaneApp {
         if self.relay_url == relay_url && self.relay_token == relay_token {
             return;
         }
-        self.relay_url = relay_url;
-        self.relay_token = relay_token;
-        self.server.start_relay(url, self.relay_token.clone());
-        let _ = muxlane_store::save_relay_token(
-            &self.store_path,
-            self.relay_token.as_deref(),
-        );
-        self.persist();
+        if relay_url.is_some() && relay_token.is_none() {
+            self.relay_error = Some("请输入中继密钥后再应用".into());
+            cx.notify();
+            return;
+        }
+        if relay_url.is_none() {
+            self.relay_url = None;
+            self.relay_token = relay_token;
+            self.relay_error = None;
+            self.server.start_relay(String::new(), self.relay_token.clone());
+            let _ = muxlane_store::save_relay_token(
+                &self.store_path,
+                self.relay_token.as_deref(),
+            );
+            self.persist();
+            cx.notify();
+            return;
+        }
+
+        let relay_url = relay_url.expect("relay URL checked above");
+        let relay_token = relay_token.expect("relay token checked above");
+        self.relay_error = Some("正在验证中继密钥…".into());
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = muxlane_server::validate_relay_credentials(&relay_url, &relay_token).await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.relay_url = Some(relay_url.clone());
+                        this.relay_token = Some(relay_token.clone());
+                        this.relay_error = None;
+                        this.server.start_relay(relay_url, Some(relay_token.clone()));
+                        let _ = muxlane_store::save_relay_token(
+                            &this.store_path,
+                            Some(&relay_token),
+                        );
+                        this.persist();
+                    }
+                    Err(error) => {
+                        this.relay_error = Some(format!("中继密钥验证失败：{error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn render_machine_id_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1366,12 +1403,22 @@ impl MuxlaneApp {
                 theme,
             ))
             .child(setting_row(
-                "settings-row-language",
-                i18n::text(self.language, "settings.language"),
-                Some(i18n::text(self.language, "settings.language_help")),
-                language_select,
+                "settings-row-relay-token",
+                i18n::text(self.language, "settings.relay_token"),
+                Some(i18n::text(self.language, "settings.relay_token_help")),
+                self.render_relay_token_field(cx),
                 theme,
             ))
+            .when_some(self.relay_error.clone(), |page, error| {
+                page.child(
+                    div()
+                        .px_6()
+                        .pb_3()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.red))
+                        .child(error),
+                )
+            })
             .into_any_element()
     }
 

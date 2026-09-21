@@ -153,6 +153,7 @@ impl Relay {
     async fn handle_stream(&self, stream: TcpStream) -> anyhow::Result<()> {
         let mut uri = None;
         let mut auth = None;
+        let expected_token = self.auth_token.clone();
         let ws = tokio_tungstenite::accept_hdr_async(
             stream,
             |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
@@ -163,6 +164,19 @@ impl Relay {
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| value.strip_prefix("Bearer "))
                     .map(str::to_owned);
+                let path_kind = parse_path(request.uri().path()).map(|path| path.kind);
+                if matches!(path_kind, Some(PathKind::Host | PathKind::Chan))
+                    && expected_token.as_deref().is_some_and(|expected| {
+                        auth.as_deref() != Some(expected)
+                    })
+                {
+                    return Err(
+                        tokio_tungstenite::tungstenite::http::Response::builder()
+                            .status(401)
+                            .body(Some("unauthorized".into()))
+                            .expect("valid relay auth response"),
+                    );
+                }
                 Ok(response)
             },
         )

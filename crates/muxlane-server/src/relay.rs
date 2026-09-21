@@ -267,6 +267,21 @@ fn websocket_request(
     Ok(request)
 }
 
+/// Validate a relay token without taking over the real host registration.
+pub async fn validate_relay_credentials(
+    relay_url: &str,
+    token: &str,
+) -> anyhow::Result<()> {
+    let probe = join_url(
+        relay_url.trim().trim_end_matches('/'),
+        "host/muxlane-auth-probe",
+    );
+    let request = websocket_request(&probe, Some(token))?;
+    let (ws, _) = tokio_tungstenite::connect_async(request).await?;
+    drop(ws);
+    Ok(())
+}
+
 async fn wait_ack<S>(
     stream: &mut futures_util::stream::SplitStream<S>,
     sink: &mut futures_util::stream::SplitSink<S, Message>,
