@@ -10,7 +10,7 @@ class VtTest {
         val vt = VirtualTerminal(20, 4)
         vt.write("\u001b[31mred\u001b[0m plain".toByteArray())
         assertEquals("red plain", vt.visibleLine(0))
-        assertEquals(0xFFE06C75.toInt(), vt.screen()[0][0].fg)
+        assertEquals(0xFFA3333F.toInt(), vt.screen()[0][0].fg)
     }
 
     @Test
@@ -36,5 +36,38 @@ class VtTest {
         vt.reset()
         assertEquals("", vt.visibleLine(0))
         assertEquals(0, vt.cursor.col)
+    }
+
+    @Test
+    fun viewportCanReadScrollback() {
+        val vt = VirtualTerminal(4, 2)
+        vt.write("one\ntwo\nthree".toByteArray())
+        assertTrue(vt.maxScrollRows > 0)
+        val oldest = vt.viewport(vt.maxScrollRows).first().joinToString("") { it.ch }
+        assertTrue(oldest.contains("one"))
+    }
+
+    @Test
+    fun iso2022CharsetDoesNotPrintB() {
+        val vt = VirtualTerminal(20, 2)
+        vt.write("ok\u001b(Btext".toByteArray())
+        assertEquals("oktext", vt.visibleLine(0))
+    }
+
+    @Test
+    fun kittyApcAndPlaceholderAreIgnored() {
+        val vt = VirtualTerminal(20, 2)
+        vt.write("A\u001b_Ga=T,f=100,i=1;xxxx\u001b\\B".toByteArray())
+        assertEquals("AB", vt.visibleLine(0))
+        vt.reset()
+        vt.write(byteArrayOf(0x41, 0xF4.toByte(), 0x8E.toByte(), 0xBB.toByte(), 0xAE.toByte(), 0x42))
+        assertEquals("AB", vt.visibleLine(0))
+    }
+
+    @Test
+    fun supplementaryUnicodeGlyphsArePreserved() {
+        val vt = VirtualTerminal(20, 2)
+        vt.write("📁⚡".toByteArray())
+        assertEquals("📁 ⚡", vt.visibleLine(0))
     }
 }

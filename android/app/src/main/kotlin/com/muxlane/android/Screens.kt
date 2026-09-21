@@ -1,66 +1,133 @@
 package com.muxlane.android
 
-import android.content.Intent
+import android.Manifest
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.StringRes
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.outlined.KeyboardReturn
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.KeyboardHide
+import androidx.compose.material.icons.outlined.LinkOff
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import muxlane.protocol.AgentInstance
 import muxlane.protocol.AgentStatus
+import muxlane.protocol.Project
 import muxlane.term.VirtualTerminal
 import kotlin.math.floor
 
@@ -68,518 +135,843 @@ import kotlin.math.floor
 fun MuxlaneRoot(model: MuxlaneViewModel) {
     val state by model.state.collectAsState()
     val context = LocalContext.current
+    val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(state.pairing) {
-        if (state.pairing != null) {
-            context.startForegroundService(Intent(context, RelayService::class.java))
-        }
+        if (state.pairing != null &&
+            Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
-    Box(Modifier.fillMaxSize().background(MuxBg0)) {
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         when {
             state.selectedAgent != null -> TerminalScreen(model)
-            state.pairing != null -> SessionTree(model)
-            else -> PairScreen(model)
+            state.pairing != null -> WorkspaceScreen(model)
+            state.addingMachine || state.pairings.isEmpty() -> PairScreen(model)
+            else -> MachineScreen(model)
         }
-        state.confirmDelete?.let { DeleteConfirm(model, it) }
-        state.spawnProject?.let { SpawnSheet(model) }
     }
+    state.confirmDelete?.let { DeleteConfirm(model, it) }
+    state.confirmRemoveHost?.let { RemoveMachineConfirm(model, it) }
+    state.spawnProject?.let { SpawnSheet(model) }
 }
 
 @Composable
 private fun PairScreen(model: MuxlaneViewModel) {
     val state by model.state.collectAsState()
-    var showRelay by remember { mutableStateOf(true) }
-    val codeFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { codeFocus.requestFocus() }
+    val context = LocalContext.current
+    val canPair = state.relayUrl.isNotBlank() && state.hostId.isNotBlank() && !state.connecting
+    BackHandler(state.pairings.isNotEmpty()) { model.cancelAddMachine() }
     Column(
         Modifier
             .fillMaxSize()
-            .safeDrawingPadding()
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .imePadding()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("把手机接到电脑", color = MuxFg0, fontSize = 22.sp, fontWeight = FontWeight.Medium, lineHeight = 28.sp)
-        Text(
-            "在桌面打开「配对手机」，把 8 位码打在这里。",
-            color = MuxFg2,
-            fontSize = 15.sp,
-            lineHeight = 24.sp,
-        )
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("配对码", color = MuxFg2, fontSize = 13.sp, lineHeight = 20.sp)
-            BasicTextField(
-                value = state.pairCode,
-                onValueChange = { model.setCode(it) },
-                textStyle = TextStyle(
-                    color = MuxFg0,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.Medium,
-                    letterSpacing = 4.sp,
-                ),
-                cursorBrush = SolidColor(MuxAccent),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = { model.pair() }),
-                singleLine = true,
-                modifier = Modifier
-                    .focusRequester(codeFocus)
-                    .fillMaxWidth()
-                    .heightIn(min = 72.dp)
-                    .border(1.dp, MuxLine, Square)
-                    .background(MuxBg1, Square)
-                    .padding(horizontal = 16.dp, vertical = 18.dp),
-                decorationBox = { inner ->
-                    Box(contentAlignment = Alignment.CenterStart) {
-                        if (state.pairCode.isEmpty()) {
-                            Text(
-                                "00000000",
-                                color = MuxFg2.copy(alpha = 0.45f),
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 32.sp,
-                                fontWeight = FontWeight.Medium,
-                                letterSpacing = 4.sp,
-                            )
-                        }
-                        inner()
-                    }
-                },
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (state.pairings.isNotEmpty()) {
+                IconButton(onClick = model::cancelAddMachine) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back))
+                }
+                Spacer(Modifier.width(4.dp))
+            }
+            Surface(shape = Square, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(44.dp)) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.Terminal, null, tint = MaterialTheme.colorScheme.surface)
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge)
+                Text(
+                    stringResource(R.string.app_subtitle),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontFamily = MonoFamily,
+                )
+            }
+        }
+        Spacer(Modifier.weight(0.7f))
+        Column(Modifier.fillMaxWidth().widthIn(max = 560.dp).align(Alignment.CenterHorizontally)) {
+            Text(stringResource(R.string.connect_workspace), style = MaterialTheme.typography.headlineSmall)
+            Text(
+                stringResource(R.string.pair_body),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp, bottom = 22.dp),
             )
+            OutlinedTextField(
+                value = state.relayUrl,
+                onValueChange = model::setRelay,
+                label = { Text(stringResource(R.string.relay_label)) },
+                placeholder = { Text(stringResource(R.string.relay_placeholder)) },
+                leadingIcon = { Icon(Icons.Outlined.Dns, null) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                singleLine = true,
+                shape = Square,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.relay_tls_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                    applyPairText(model, text)
+                }, shape = Square) { Text(stringResource(R.string.paste_pairing)) }
+            }
+            OutlinedTextField(
+                value = state.hostId,
+                onValueChange = model::setHostId,
+                label = { Text(stringResource(R.string.pair_code)) },
+                leadingIcon = { Icon(Icons.Outlined.Security, null) },
+                textStyle = TextStyle(fontFamily = MonoFamily, fontSize = 16.sp),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (canPair) model.pair() }),
+                singleLine = true,
+                shape = Square,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            ErrorPanel(state.error)
+            Button(
+                onClick = model::pair,
+                enabled = canPair,
+                shape = Square,
+                modifier = Modifier.fillMaxWidth().height(52.dp).padding(top = 4.dp),
+            ) {
+                if (state.connecting) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Color.White)
+                else Text(stringResource(R.string.pair_secure))
+            }
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = Square,
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+            ) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Security, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        stringResource(R.string.pair_security_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
-        Text(
-            if (showRelay) "收起中继地址" else "中继不是本机时，改地址",
-            color = MuxFg1,
-            fontSize = 15.sp,
-            lineHeight = 24.sp,
-            modifier = Modifier.touchText { showRelay = !showRelay }.padding(0.dp),
-        )
-        if (showRelay) {
-            Field("中继地址", state.relayUrl, KeyboardType.Uri) { model.setRelay(it) }
-        }
-        SquareButton(
-            if (state.connecting) "正在配对…" else "配对",
-            enabled = !state.connecting,
-            filled = true,
-            wide = true,
-        ) { model.pair() }
-        state.error?.let { Text(it, color = MuxRed, fontSize = 15.sp, lineHeight = 24.sp) }
+        Spacer(Modifier.weight(1f))
     }
 }
 
 @Composable
-private fun SessionTree(model: MuxlaneViewModel) {
+private fun MachineScreen(model: MuxlaneViewModel) {
+    val state by model.state.collectAsState()
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            Surface(color = MaterialTheme.colorScheme.surface, contentColor = MaterialTheme.colorScheme.onSurface) {
+                Column(Modifier.statusBarsPadding()) {
+                    Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.padding(start = 16.dp).size(32.dp).background(MaterialTheme.colorScheme.onSurface, Square),
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(Icons.Outlined.Terminal, null, tint = MaterialTheme.colorScheme.surface, modifier = Modifier.size(18.dp)) }
+                        Spacer(Modifier.width(12.dp))
+                        Text(stringResource(R.string.machines_title), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { model.beginAddMachine() }) { Icon(Icons.Outlined.Add, stringResource(R.string.add_machine)) }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+            }
+        },
+    ) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
+            LazyColumn(
+                Modifier.fillMaxHeight().fillMaxWidth().widthIn(max = 760.dp),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(state.pairings, key = { it.hostId }) { pairing ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 76.dp).clickable { model.selectMachine(pairing.hostId) },
+                        shape = Square,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    ) {
+                        Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(40.dp).background(MaterialTheme.colorScheme.primaryContainer, Square),
+                                contentAlignment = Alignment.Center,
+                            ) { Icon(Icons.Outlined.Terminal, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp)) }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(pairing.machineName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(3.dp))
+                                Text(
+                                    stringResource(R.string.machine_relay, relayHost(pairing.relayUrl)),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontFamily = MonoFamily,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            IconButton(onClick = { model.requestRemoveMachine(pairing.hostId) }) {
+                                Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Icon(Icons.Outlined.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceScreen(model: MuxlaneViewModel) {
     val state by model.state.collectAsState()
     val snapshot = state.snapshot
-    Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-        Row(
-            Modifier.fillMaxWidth().background(MuxBg1).padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                snapshot?.machine?.name ?: state.pairing?.machineName ?: "Muxlane",
-                color = MuxFg0,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Medium,
+    BackHandler { model.backToMachines() }
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            WorkspaceTopBar(
+                title = stringResource(R.string.workspace_title),
+                detail = snapshot?.machine?.name ?: state.pairing?.machineName.orEmpty(),
+                connected = state.connected,
+                loading = state.connecting,
+                onBack = model::backToMachines,
+                onRefresh = model::reconnect,
+                onUnpair = model::unpair,
             )
-            Text("解除配对", color = MuxFg1, modifier = Modifier.touchText { model.unpair() })
-        }
-        if (snapshot == null) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (state.error != null) {
-                    Text("连不上那台机器", color = MuxFg0, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                    Text(
-                        "检查中继是否在线、桌面端是否运行。凭证过期就解除配对，再打一次码。",
-                        color = MuxFg2,
-                        fontSize = 15.sp,
-                        lineHeight = 24.sp,
-                    )
-                    SquareButton("重试", filled = true, wide = true) { model.reconnect() }
-                    QuietButton("解除配对", wide = true) { model.unpair() }
-                } else {
-                    Text("正在接到那台机器…", color = MuxFg2, fontSize = 15.sp, lineHeight = 24.sp)
-                }
-            }
-            return
-        }
-        val blocked = snapshot.agents.count { it.status == AgentStatus.BLOCKED }
-        if (blocked > 0) {
-            Text(
-                if (blocked == 1) "1 个会话等你确认" else "$blocked 个会话等你确认",
-                color = MuxYellow,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.fillMaxWidth().background(MuxBg2).padding(horizontal = 16.dp, vertical = 12.dp),
-            )
-        }
-        if (snapshot.projects.isEmpty()) {
-            Text(
-                "电脑上还没有项目。打开一个工程后会出现在这里。",
-                color = MuxFg2,
-                fontSize = 15.sp,
-                lineHeight = 24.sp,
-                modifier = Modifier.padding(20.dp),
-            )
-            return
-        }
-        LazyColumn(Modifier.fillMaxSize()) {
-            items(snapshot.projects, key = { it.id }) { project ->
-                val projectAgents = snapshot.agents.filter { it.project == project.id }
-                Row(
-                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 18.dp, bottom = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        project.displayName(),
-                        color = MuxFg2,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
-                    Text("新建", color = MuxFg1, modifier = Modifier.touchText { model.loadPresets(project.id) })
-                }
-                if (projectAgents.isEmpty()) {
-                    Text(
-                        "这个项目还没有会话",
-                        color = MuxFg2,
-                        fontSize = 13.sp,
-                        lineHeight = 20.sp,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
-                    )
-                }
-                projectAgents.sortedBy { statusPriority(it.status) }.forEach { agent ->
-                    AgentRow(agent, onOpen = { model.openAgent(agent.id) }, onDelete = { model.requestDelete(agent.id) })
+        },
+    ) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
+            when {
+                snapshot == null && state.connecting -> LoadingState(stringResource(R.string.connecting_machine))
+                snapshot == null -> ConnectionErrorState(state.error, model::reconnect, model::unpair)
+                snapshot.projects.isEmpty() -> EmptyState(
+                    Icons.Outlined.Folder,
+                    stringResource(R.string.no_projects),
+                    stringResource(R.string.connection_failed_body),
+                )
+                else -> {
+                    val blocked = snapshot.agents.count { it.status == AgentStatus.BLOCKED }
+                    LazyColumn(
+                        Modifier.fillMaxHeight().fillMaxWidth().widthIn(max = 760.dp),
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (blocked > 0) item {
+                            StatusBanner(pluralStringResource(R.plurals.blocked_sessions, blocked, blocked), MuxYellow)
+                        }
+                        state.error?.let { error -> item { ErrorPanel(error) } }
+                        snapshot.projects.forEach { project ->
+                            val agents = snapshot.agents
+                                .filter { it.project == project.id }
+                                .sortedBy { statusPriority(it.status) }
+                            item(key = "project:${project.id}") {
+                                ProjectHeader(project, onAdd = { model.loadPresets(project.id) })
+                            }
+                            if (agents.isEmpty()) item(key = "empty:${project.id}") {
+                                Text(
+                                    stringResource(R.string.no_project_sessions),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                                )
+                            }
+                            items(agents, key = { it.id }) { agent ->
+                                AgentRow(agent, onOpen = { model.openAgent(agent.id) }, onDelete = { model.requestDelete(agent.id) })
+                            }
+                        }
+                    }
                 }
             }
         }
-        state.error?.let {
-            Text(it, color = MuxRed, fontSize = 15.sp, lineHeight = 24.sp, modifier = Modifier.padding(16.dp))
+    }
+}
+
+@Composable
+private fun WorkspaceTopBar(
+    title: String,
+    detail: String,
+    connected: Boolean,
+    loading: Boolean,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onUnpair: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.surface, contentColor = MaterialTheme.colorScheme.onSurface) {
+        Column(Modifier.statusBarsPadding()) {
+            Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back)) }
+                CompactHeader(title, detail, Modifier.weight(1f))
+                IconButton(onClick = onRefresh, enabled = !loading) { Icon(Icons.Outlined.Refresh, stringResource(R.string.refresh)) }
+                IconButton(onClick = onUnpair) { Icon(Icons.Outlined.LinkOff, stringResource(R.string.unpair)) }
+                Box(
+                    Modifier.padding(end = 16.dp).size(9.dp).background(
+                        if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        Square,
+                    ),
+                )
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
         }
+    }
+}
+
+@Composable
+private fun ProjectHeader(project: Project, onAdd: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 4.dp, top = 12.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(project.displayName(), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+            project.branch?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = MonoFamily)
+            }
+        }
+        IconButton(onClick = onAdd) { Icon(Icons.Outlined.Add, stringResource(R.string.new_session)) }
     }
 }
 
 @Composable
 private fun AgentRow(agent: AgentInstance, onOpen: () -> Unit, onDelete: () -> Unit) {
-    val waiting = agent.status == AgentStatus.BLOCKED
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(if (waiting) MuxBg2 else Color.Transparent)
-            .clickable(onClick = onOpen)
-            .padding(start = 16.dp, end = 8.dp)
-            .heightIn(min = 56.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    Surface(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 76.dp).clickable(onClick = onOpen).semantics { role = Role.Button },
+        shape = Square,
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Box(Modifier.size(8.dp).background(statusColor(agent.status), Square))
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f).padding(vertical = 10.dp)) {
-            Text(agent.title, color = MuxFg0, fontSize = 16.sp, fontWeight = FontWeight.Medium, lineHeight = 22.sp)
-            Text(
-                statusLabel(agent.status),
-                color = statusColor(agent.status),
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-                lineHeight = 20.sp,
-            )
+        Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            StatusIcon(agent.status)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(agent.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "${agent.agentType.name.lowercase()} · ${stringResource(statusLabelRes(agent.status))}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = statusColor(agent.status),
+                    fontFamily = MonoFamily,
+                    maxLines = 1,
+                )
+            }
+            IconButton(onClick = onDelete) { Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Icon(Icons.Outlined.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
         }
-        Text("删除", color = MuxFg2, modifier = Modifier.touchText(onDelete))
+    }
+}
+
+@Composable
+private fun StatusIcon(status: AgentStatus) {
+    Box(
+        Modifier.size(40.dp).background(
+            if (status == AgentStatus.BLOCKED) Color(0xFFFFE5C0) else MaterialTheme.colorScheme.primaryContainer,
+            Square,
+        ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Outlined.Terminal, null, tint = statusColor(status), modifier = Modifier.size(20.dp))
     }
 }
 
 @Composable
 private fun TerminalScreen(model: MuxlaneViewModel) {
     val state by model.state.collectAsState()
-    var input by remember { mutableStateOf("") }
+    val revision by model.terminalRevision.collectAsState()
     val agent = state.snapshot?.agents?.find { it.id == state.selectedAgent }
-    val waiting = agent?.status == AgentStatus.BLOCKED
-    Column(Modifier.fillMaxSize().background(MuxCanvas).statusBarsPadding()) {
-        Row(
-            Modifier.fillMaxWidth().background(MuxBg1).padding(horizontal = 8.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("返回", color = MuxFg1, modifier = Modifier.touchText { model.closeAgent() })
-            Text(
-                agent?.title ?: "终端",
-                color = MuxFg0,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+    val terminalFocusRequester = remember { FocusRequester() }
+    val localView = LocalView.current
+    DisposableEffect(localView) {
+        val listener = android.view.ViewTreeObserver.OnWindowFocusChangeListener { focused ->
+            if (focused) model.claimTerminalSize()
+        }
+        localView.viewTreeObserver.addOnWindowFocusChangeListener(listener)
+        onDispose { localView.viewTreeObserver.removeOnWindowFocusChangeListener(listener) }
+    }
+    LaunchedEffect(state.selectedAgent) {
+        if (state.selectedAgent != null) {
+            terminalFocusRequester.requestFocus()
+            model.claimTerminalSize()
+        }
+    }
+    var showVirtualKeyboard by remember(state.selectedAgent) { mutableStateOf(true) }
+    var ctrl by remember(state.selectedAgent) { mutableStateOf(false) }
+    var alt by remember(state.selectedAgent) { mutableStateOf(false) }
+    var imeBuffer by remember(state.selectedAgent) { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+    val softwareKeyboard = LocalSoftwareKeyboardController.current
+    BackHandler { model.closeAgent() }
+
+    fun openSystemKeyboard() {
+        focusRequester.requestFocus()
+        softwareKeyboard?.show()
+    }
+
+    Scaffold(
+        modifier = Modifier.imePadding(),
+        containerColor = MuxCanvas,
+        topBar = {
+            TerminalTopBar(
+                title = agent?.title ?: stringResource(R.string.terminal),
+                detail = listOfNotNull(agent?.agentType?.name?.lowercase(), state.snapshot?.projects?.find { it.id == agent?.project }?.displayName())
+                    .joinToString(" · "),
+                connected = state.connected,
+                showVirtualKeyboard = showVirtualKeyboard,
+                onBack = model::closeAgent,
+                onClear = model::clearTerminal,
+                onToggleKeyboard = { showVirtualKeyboard = !showVirtualKeyboard },
             )
-            if (agent != null) {
-                Text(
-                    statusLabel(agent.status),
-                    color = statusColor(agent.status),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                )
+        },
+        bottomBar = {
+            if (showVirtualKeyboard || !state.error.isNullOrBlank()) {
+                Surface(color = TerminalSurface, contentColor = TerminalForeground) {
+                    Column(Modifier.navigationBarsPadding()) {
+                        ErrorPanel(state.error, Modifier.padding(horizontal = 12.dp))
+                        if (showVirtualKeyboard) TerminalVirtualKeyboard(
+                            enabled = state.connected,
+                            ctrl = ctrl,
+                            alt = alt,
+                            onCtrl = { ctrl = !ctrl },
+                            onAlt = { alt = !alt },
+                            send = { model.sendInput(it) },
+                        )
+                    }
+                }
             }
-        }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            TerminalCanvas(
-                model.terminal,
-                Modifier.fillMaxSize(),
-                onResize = { cols, rows -> model.resize(cols, rows) },
-            )
-            if (waiting) {
-                Text(
-                    "等你确认",
-                    color = MuxOnAccent,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(12.dp)
-                        .background(MuxYellow)
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                )
-            }
-        }
-        val send = {
-            if (input.isNotBlank()) {
-                model.sendInput(input + "\n")
-                input = ""
-            }
-        }
+        },
+    ) { padding ->
         Box(
             Modifier
-                .fillMaxWidth()
+                .fillMaxSize()
+                .padding(padding)
                 .background(MuxCanvas)
-                .navigationBarsPadding()
-                .imePadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            BasicTextField(
-                value = input,
-                onValueChange = { input = it },
-                textStyle = TextStyle(
-                    color = MuxFg0,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 16.sp,
+                .focusRequester(terminalFocusRequester)
+                .focusable()
+                .onFocusChanged { if (it.isFocused) model.claimTerminalSize() }
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    onClick = ::openSystemKeyboard,
                 ),
-                cursorBrush = SolidColor(MuxAccent),
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { send() }),
-                decorationBox = { inner ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("› ", color = MuxAccent, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
-                        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                            if (input.isEmpty()) {
-                                Text("回车发送", color = MuxFg2, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
-                            }
-                            inner()
-                        }
+        ) {
+            StableTerminalViewport(model, revision, Modifier.fillMaxSize())
+            BasicTextField(
+                value = imeBuffer,
+                onValueChange = { next ->
+                    terminalInputDelta(imeBuffer, next)?.let { delta ->
+                        model.sendInput(applyTerminalModifiers(delta, ctrl, alt))
                     }
+                    imeBuffer = if (next.length > 256) next.takeLast(64) else next
                 },
+                enabled = state.connected,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, imeAction = ImeAction.None),
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .size(1.dp)
+                    .alpha(0.01f)
+                    .focusRequester(focusRequester)
+                    .semantics { contentDescription = "终端输入" },
+            )
+            if (!state.connected) StatusBanner(
+                stringResource(R.string.terminal_disconnected),
+                MuxRed,
+                Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
             )
         }
+    }
+}
+
+@Composable
+private fun TerminalTopBar(
+    title: String,
+    detail: String,
+    connected: Boolean,
+    showVirtualKeyboard: Boolean,
+    onBack: () -> Unit,
+    onClear: () -> Unit,
+    onToggleKeyboard: () -> Unit,
+) {
+    Surface(color = TerminalSurface, contentColor = TerminalForeground) {
+        Column(Modifier.statusBarsPadding()) {
+            Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back)) }
+                CompactHeader(title, detail, Modifier.weight(1f), detailColor = TerminalAccent)
+                IconButton(onClick = onClear) { Icon(Icons.Outlined.DeleteSweep, stringResource(R.string.terminal_clear)) }
+                IconButton(onClick = onToggleKeyboard) {
+                    Icon(
+                        if (showVirtualKeyboard) Icons.Outlined.KeyboardHide else Icons.Outlined.Keyboard,
+                        stringResource(if (showVirtualKeyboard) R.string.terminal_hide_keyboard else R.string.terminal_show_keyboard),
+                    )
+                }
+                Box(Modifier.padding(end = 16.dp).size(9.dp).background(if (connected) TerminalAccent else TerminalMuted, Square))
+            }
+            HorizontalDivider(color = TerminalDivider)
+        }
+    }
+}
+
+@Composable
+private fun StableTerminalViewport(model: MuxlaneViewModel, revision: Long, modifier: Modifier = Modifier) {
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    var visibleHeight by remember { mutableIntStateOf(0) }
+    var normalHeight by remember { mutableIntStateOf(0) }
+    var scrollRows by remember { mutableIntStateOf(0) }
+    val fontPx = 14f * density.density
+    val cellHeight = fontPx * 1.35f
+    LaunchedEffect(revision) { scrollRows = scrollRows.coerceAtMost(model.terminal.maxScrollRows) }
+    Box(
+        modifier.clipToBounds().onSizeChanged { size ->
+            visibleHeight = size.height
+            if (!imeVisible) normalHeight = size.height
+        },
+    ) {
+        val visibleRows = floor(visibleHeight / cellHeight).toInt().coerceAtLeast(1)
+        val terminalHeight = maxOf(visibleHeight, normalHeight)
+        val offsetRows = if (imeVisible && scrollRows == 0) {
+            (model.terminal.cursor.row - visibleRows + 1).coerceAtLeast(0)
+        } else {
+            0
+        }
+        TerminalCanvas(
+            terminal = model.terminal,
+            revision = revision,
+            scrollRows = scrollRows,
+            startRow = 0,
+            suppressResize = imeVisible,
+            // Match the desktop terminal: a swipe is a mouse-wheel report to tmux,
+            // not a second local scrollback viewport.
+            onScroll = model::scrollTerminal,
+            onResize = model::resize,
+            modifier = Modifier
+                .fillMaxWidth()
+                .requiredHeight(with(density) { terminalHeight.toDp() })
+                .graphicsLayer { translationY = -offsetRows * cellHeight },
+        )
+        if (scrollRows > 0) TextButton(
+            onClick = { scrollRows = 0 },
+            shape = Square,
+            modifier = Modifier.align(Alignment.TopStart).heightIn(min = 48.dp),
+        ) { Text(stringResource(R.string.terminal_history, scrollRows), color = TerminalForeground, fontSize = 12.sp) }
     }
 }
 
 @Composable
 private fun TerminalCanvas(
     terminal: VirtualTerminal,
-    modifier: Modifier,
+    revision: Long,
+    scrollRows: Int,
+    startRow: Int,
+    suppressResize: Boolean,
+    onScroll: (Int) -> Unit,
     onResize: (Int, Int) -> Unit,
+    modifier: Modifier,
 ) {
     val density = LocalDensity.current
     val fontPx = 14f * density.density
     val cellW = fontPx * 0.62f
     val cellH = fontPx * 1.35f
-    Canvas(
-        modifier
-            .background(MuxCanvas)
-            .onSizeChanged { size ->
-                val cols = floor(size.width / cellW).toInt().coerceIn(20, 200)
-                val rows = floor(size.height / cellH).toInt().coerceIn(8, 80)
-                onResize(cols, rows)
-            },
-    ) {
-        val screen = terminal.screen()
-        val paint = android.graphics.Paint().apply {
+    val paint = remember(fontPx) {
+        android.graphics.Paint().apply {
             textSize = fontPx
             typeface = android.graphics.Typeface.MONOSPACE
             isAntiAlias = true
             isSubpixelText = true
         }
-        for (r in 0 until terminal.rows.coerceAtMost(screen.size)) {
-            val line = screen[r]
-            for (c in 0 until terminal.cols.coerceAtMost(line.size)) {
-                val cell = line[c]
-                val fg = Color(if (cell.inverse) cell.bg else cell.fg)
-                val back = Color(if (cell.inverse) cell.fg else cell.bg)
-                if (back != MuxCanvas) {
-                    drawRect(back, Offset(c * cellW, r * cellH), Size(cellW + 0.5f, cellH + 0.5f))
-                }
-                if (cell.ch != ' ') {
-                    drawIntoCanvas { canvas ->
-                        paint.color = fg.toArgb()
-                        canvas.nativeCanvas.drawText(
-                            cell.ch.toString(),
-                            c * cellW,
-                            r * cellH + cellH * 0.78f,
-                            paint,
-                        )
+    }
+    val monoTypeface = remember { android.graphics.Typeface.create("monospace", android.graphics.Typeface.NORMAL) }
+    val symbolTypeface = remember { android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL) }
+    val currentOnScroll by rememberUpdatedState(onScroll)
+    Canvas(
+        modifier
+            .background(MuxCanvas)
+            .pointerInput(Unit) {
+                var remainder = 0f
+                detectVerticalDragGestures(
+                    onDragStart = { remainder = 0f },
+                    onDragEnd = { remainder = 0f },
+                    onDragCancel = { remainder = 0f },
+                ) { _, amount ->
+                    remainder += amount
+                    val rows = (remainder / cellH).toInt()
+                    if (rows != 0) {
+                        currentOnScroll(rows)
+                        remainder -= rows * cellH
                     }
                 }
             }
+            .onSizeChanged { size ->
+                if (!suppressResize) {
+                    onResize(
+                        floor(size.width / cellW).toInt().coerceIn(20, 200),
+                        floor(size.height / cellH).toInt().coerceIn(8, 120),
+                    )
+                }
+            },
+    ) {
+        revision
+        val screen = terminal.viewport(scrollRows)
+        val drawnRows = floor(size.height / cellH).toInt().coerceAtMost(screen.size - startRow)
+        for (drawRow in 0 until drawnRows) {
+            val line = screen[drawRow + startRow]
+            for (column in 0 until terminal.cols.coerceAtMost(line.size)) {
+                val cell = line[column]
+                val fg = Color(if (cell.inverse) cell.bg else cell.fg)
+                val bg = Color(if (cell.inverse) cell.fg else cell.bg)
+                if (bg != MuxCanvas) drawRect(bg, Offset(column * cellW, drawRow * cellH), Size(cellW + 0.5f, cellH + 0.5f))
+                if (cell.ch != " ") drawIntoCanvas { canvas ->
+                    paint.color = fg.toArgb()
+                    val codePoint = cell.ch.codePointAt(0)
+                    paint.typeface = if (codePoint in 0x2600..0x27BF || codePoint >= 0x1F000) {
+                        symbolTypeface
+                    } else {
+                        monoTypeface
+                    }
+                    paint.isFakeBoldText = cell.bold
+                    paint.isUnderlineText = cell.underline
+                    canvas.nativeCanvas.drawText(cell.ch, column * cellW, drawRow * cellH + cellH * 0.78f, paint)
+                }
+            }
         }
-        val cur = terminal.cursor
-        drawRect(
-            MuxAccent.copy(alpha = 0.75f),
-            Offset(cur.col * cellW, cur.row * cellH),
-            Size(2f * density.density, cellH),
-        )
+        if (scrollRows == 0) {
+            val cursor = terminal.cursor
+            val cursorRow = cursor.row - startRow
+            if (cursorRow in 0 until drawnRows) {
+                drawRect(TerminalAccent, Offset(cursor.col * cellW, cursorRow * cellH), Size(2f * density.density, cellH))
+            }
+        }
     }
 }
 
+@Composable
+private fun TerminalVirtualKeyboard(
+    enabled: Boolean,
+    ctrl: Boolean,
+    alt: Boolean,
+    onCtrl: () -> Unit,
+    onAlt: () -> Unit,
+    send: (String) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            TerminalKeycap("Esc", 1f, enabled = enabled) { send("\u001b") }
+            TerminalKeycap("Tab", 1f, enabled = enabled) { send("\t") }
+            TerminalKeycap("Ctrl", 1.15f, active = ctrl, enabled = enabled, onClick = onCtrl)
+            TerminalKeycap("Alt", 1f, active = alt, enabled = enabled, onClick = onAlt)
+            TerminalKeycap("Home", 1.15f, enabled = enabled) { send("\u001b[H") }
+            TerminalKeycap("End", 1f, enabled = enabled) { send("\u001b[F") }
+            TerminalKeycap("Del", 1f, enabled = enabled) { send("\u001b[3~") }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            TerminalKeycap("PgUp", 1.2f, enabled = enabled) { send("\u001b[5~") }
+            TerminalKeycap("PgDn", 1.2f, enabled = enabled) { send("\u001b[6~") }
+            TerminalIconKey(Icons.AutoMirrored.Outlined.KeyboardArrowLeft, "左", 1f, enabled) { send("\u001b[D") }
+            TerminalIconKey(Icons.Outlined.KeyboardArrowDown, "下", 1f, enabled) { send("\u001b[B") }
+            TerminalIconKey(Icons.Outlined.KeyboardArrowUp, "上", 1f, enabled) { send("\u001b[A") }
+            TerminalIconKey(Icons.AutoMirrored.Outlined.KeyboardArrowRight, "右", 1f, enabled) { send("\u001b[C") }
+            TerminalIconKey(Icons.AutoMirrored.Outlined.KeyboardReturn, "回车", 1.35f, enabled) { send("\r") }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.TerminalKeycap(
+    label: String,
+    weight: Float,
+    active: Boolean = false,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.weight(weight).height(48.dp).clickable(enabled = enabled, onClick = onClick),
+        shape = Square,
+        color = if (active) TerminalAccent else TerminalKeycap,
+        border = BorderStroke(1.dp, if (active) TerminalAccent else TerminalBorder),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(label, color = if (active) MuxOnAccent else if (enabled) TerminalForeground else TerminalMuted, fontFamily = MonoFamily, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun RowScope.TerminalIconKey(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    weight: Float,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.weight(weight).height(48.dp).clickable(enabled = enabled, onClick = onClick),
+        shape = Square,
+        color = TerminalKeycap,
+        border = BorderStroke(1.dp, TerminalBorder),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, description, tint = if (enabled) TerminalForeground else TerminalMuted, modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun CompactHeader(title: String, detail: String, modifier: Modifier = Modifier, detailColor: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (detail.isNotBlank()) {
+            Spacer(Modifier.width(8.dp))
+            Text(detail, style = MaterialTheme.typography.labelMedium, color = detailColor, fontFamily = MonoFamily, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun ConnectionErrorState(error: String?, retry: () -> Unit, unpair: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Outlined.LinkOff, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp))
+        Spacer(Modifier.height(14.dp))
+        Text(stringResource(R.string.connection_failed_title), style = MaterialTheme.typography.titleLarge)
+        Text(
+            error ?: stringResource(R.string.connection_failed_body),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(top = 6.dp, bottom = 18.dp),
+        )
+        Button(onClick = retry, shape = Square) { Text(stringResource(R.string.retry)) }
+        TextButton(onClick = unpair, shape = Square) { Text(stringResource(R.string.unpair)) }
+    }
+}
+
+@Composable
+private fun LoadingState(label: String) {
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
+        Spacer(Modifier.height(12.dp))
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun EmptyState(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, detail: String) {
+    Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp))
+        Spacer(Modifier.height(14.dp))
+        Text(title, style = MaterialTheme.typography.titleLarge)
+        Text(detail, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 6.dp))
+    }
+}
+
+@Composable
+private fun ErrorPanel(error: String?, modifier: Modifier = Modifier) {
+    if (error.isNullOrBlank()) return
+    Surface(color = Color(0xFFFFDAD6), shape = Square, modifier = modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Text(error, color = Color(0xFF410002), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
+    }
+}
+
+@Composable
+private fun StatusBanner(text: String, color: Color, modifier: Modifier = Modifier) {
+    Surface(color = color, contentColor = Color.White, shape = Square, modifier = modifier) {
+        Text(text, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SpawnSheet(model: MuxlaneViewModel) {
     val state by model.state.collectAsState()
-    Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { model.closeSpawn() }) {
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(MuxBg1)
-                .border(1.dp, MuxLine, Square)
-                .navigationBarsPadding()
-                .consumeClicks()
-                .padding(20.dp),
-        ) {
-            Text("新建会话", color = MuxFg0, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(12.dp))
-            if (state.presets.isEmpty()) {
-                Text("没有可用的终端预设", color = MuxFg2, fontSize = 15.sp, lineHeight = 24.sp, modifier = Modifier.padding(vertical = 8.dp))
-            }
-            state.presets.forEach { preset ->
-                Text(
-                    preset.label,
-                    color = MuxFg0,
-                    fontSize = 16.sp,
-                    modifier = Modifier.fillMaxWidth().clickable { model.spawn(preset) }.heightIn(min = 48.dp).wrapContentHeight(Alignment.CenterVertically),
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            QuietButton("取消", wide = true) { model.closeSpawn() }
-        }
-    }
-}
-
-@Composable
-private fun DeleteConfirm(model: MuxlaneViewModel, agent: String) {
-    val title = model.state.collectAsState().value.snapshot?.agents?.find { it.id == agent }?.title ?: agent
-    Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { model.cancelDelete() }) {
-        Column(
-            Modifier
-                .align(Alignment.Center)
-                .background(MuxBg1)
-                .border(1.dp, MuxLine, Square)
-                .consumeClicks()
-                .padding(20.dp)
-                .width(280.dp),
-        ) {
-            Text("删除会话？", color = MuxFg0, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-            Text(
-                "将结束 $title。",
-                color = MuxFg2,
-                fontSize = 15.sp,
-                lineHeight = 24.sp,
-                modifier = Modifier.padding(top = 8.dp, bottom = 16.dp),
+    ModalBottomSheet(onDismissRequest = model::closeSpawn, shape = Square, dragHandle = null) {
+        Text(stringResource(R.string.spawn_title), style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp))
+        if (state.presets.isEmpty()) Text(stringResource(R.string.no_presets), color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(20.dp))
+        state.presets.forEach { preset ->
+            ListItem(
+                headlineContent = { Text(preset.label) },
+                supportingContent = { Text(preset.program.ifBlank { "Shell" }, fontFamily = MonoFamily) },
+                leadingContent = { Icon(Icons.Outlined.Terminal, null, tint = MaterialTheme.colorScheme.primary) },
+                trailingContent = { Icon(Icons.Outlined.Add, stringResource(R.string.new_session)) },
+                modifier = Modifier.clickable { model.spawn(preset) },
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                QuietButton("取消") { model.cancelDelete() }
-                SquareButton("删除", filled = true, color = MuxRed, wide = false) { model.confirmDelete() }
-            }
         }
+        Spacer(Modifier.navigationBarsPadding().height(16.dp))
     }
 }
 
 @Composable
-private fun Field(label: String, value: String, type: KeyboardType, onChange: (String) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(label, color = MuxFg2, fontSize = 13.sp, lineHeight = 20.sp)
-        BasicTextField(
-            value = value,
-            onValueChange = onChange,
-            textStyle = TextStyle(color = MuxFg0, fontSize = 16.sp, lineHeight = 24.sp),
-            cursorBrush = SolidColor(MuxAccent),
-            keyboardOptions = KeyboardOptions(keyboardType = type),
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp)
-                .border(1.dp, MuxLine, Square)
-                .padding(horizontal = 12.dp, vertical = 12.dp),
-        )
-    }
+private fun DeleteConfirm(model: MuxlaneViewModel, agentId: String) {
+    val title = model.state.collectAsState().value.snapshot?.agents?.find { it.id == agentId }?.title ?: agentId
+    AlertDialog(
+        onDismissRequest = model::cancelDelete,
+        shape = Square,
+        title = { Text(stringResource(R.string.delete_session_title)) },
+        text = { Text(stringResource(R.string.delete_session_body, title)) },
+        confirmButton = {
+            Button(
+                onClick = model::confirmDelete,
+                shape = Square,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            ) { Text(stringResource(R.string.delete)) }
+        },
+        dismissButton = { TextButton(onClick = model::cancelDelete, shape = Square) { Text(stringResource(R.string.cancel)) } },
+    )
 }
 
 @Composable
-private fun SquareButton(
-    label: String,
-    enabled: Boolean = true,
-    filled: Boolean = false,
-    wide: Boolean = false,
-    color: Color = MuxFg0,
-    onClick: () -> Unit,
-) {
-    val bg = when {
-        !enabled -> MuxBg2
-        filled -> color
-        else -> Color.Transparent
-    }
-    val fg = when {
-        !enabled -> MuxFg2
-        filled -> MuxOnAccent
-        else -> MuxFg0
-    }
-    Box(
-        Modifier
-            .then(if (wide) Modifier.fillMaxWidth() else Modifier)
-            .background(bg, Square)
-            .then(if (filled) Modifier else Modifier.border(1.dp, MuxLine, Square))
-            .clickable(enabled = enabled, onClick = onClick)
-            .heightIn(min = 48.dp)
-            .padding(horizontal = 16.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = fg, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+private fun RemoveMachineConfirm(model: MuxlaneViewModel, hostId: String) {
+    val pairing = model.state.collectAsState().value.pairings.find { it.hostId == hostId }
+    val name = pairing?.machineName ?: hostId
+    AlertDialog(
+        onDismissRequest = model::cancelRemoveMachine,
+        shape = Square,
+        title = { Text(stringResource(R.string.remove_machine_title)) },
+        text = { Text(stringResource(R.string.remove_machine_body, name)) },
+        confirmButton = {
+            Button(
+                onClick = model::confirmRemoveMachine,
+                shape = Square,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            ) { Text(stringResource(R.string.delete)) }
+        },
+        dismissButton = { TextButton(onClick = model::cancelRemoveMachine, shape = Square) { Text(stringResource(R.string.cancel)) } },
+    )
+}
+
+internal fun terminalInputDelta(previous: String, next: String): String? {
+    if (previous == next) return null
+    val prefix = previous.zip(next).indexOfFirst { it.first != it.second }.let { if (it < 0) minOf(previous.length, next.length) else it }
+    return when {
+        next.length < previous.length && prefix == next.length -> "\u007f".repeat(previous.length - next.length)
+        next.length > prefix -> next.substring(prefix).replace("\n", "\r")
+        else -> null
     }
 }
 
-@Composable
-private fun QuietButton(label: String, wide: Boolean = false, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .then(if (wide) Modifier.fillMaxWidth() else Modifier)
-            .clickable(onClick = onClick)
-            .heightIn(min = 48.dp)
-            .padding(horizontal = 12.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = MuxFg2, fontSize = 15.sp)
+internal fun applyTerminalModifiers(value: String, ctrl: Boolean, alt: Boolean): String {
+    val controlled = if (!ctrl) value else buildString {
+        value.forEach { ch -> append(if (ch.code in 64..127) (ch.code and 31).toChar() else ch) }
     }
+    return if (alt && controlled.isNotEmpty()) "\u001b$controlled" else controlled
 }
 
-@Composable
-private fun Modifier.consumeClicks(): Modifier {
-    val source = remember { MutableInteractionSource() }
-    return clickable(indication = null, interactionSource = source) {}
-}
-
-private fun Modifier.touchText(onClick: () -> Unit): Modifier =
-    clickable(onClick = onClick)
-        .heightIn(min = 48.dp)
-        .wrapContentHeight(Alignment.CenterVertically)
-        .padding(horizontal = 12.dp)
-
-private fun statusLabel(status: AgentStatus): String = when (status) {
-    AgentStatus.WORKING -> "进行中"
-    AgentStatus.BLOCKED -> "等待确认"
-    AgentStatus.DONE -> "已完成"
-    AgentStatus.FAILED -> "失败"
-    else -> "空闲"
+@StringRes
+private fun statusLabelRes(status: AgentStatus): Int = when (status) {
+    AgentStatus.WORKING -> R.string.status_working
+    AgentStatus.BLOCKED -> R.string.status_blocked
+    AgentStatus.DONE -> R.string.status_done
+    AgentStatus.FAILED -> R.string.status_failed
+    else -> R.string.status_idle
 }
 
 private fun statusPriority(status: AgentStatus): Int = when (status) {
@@ -591,9 +983,23 @@ private fun statusPriority(status: AgentStatus): Int = when (status) {
 }
 
 private fun statusColor(status: AgentStatus): Color = when (status) {
-    AgentStatus.WORKING -> MuxYellow
+    AgentStatus.WORKING -> MuxAccent
     AgentStatus.BLOCKED -> MuxYellow
     AgentStatus.DONE -> MuxGreen
     AgentStatus.FAILED -> MuxRed
     else -> MuxFg2
 }
+
+private fun applyPairText(model: MuxlaneViewModel, text: String) {
+    val value = text.trim()
+    val uri = runCatching { android.net.Uri.parse(value) }.getOrNull()
+    if (uri?.scheme == "muxlane" && uri.host == "pair") {
+        uri.getQueryParameter("relay")?.let(model::setRelay)
+        uri.getQueryParameter("id")?.orEmpty()?.ifEmpty { uri.getQueryParameter("host").orEmpty() }?.let(model::setHostId)
+        return
+    }
+    Regex("""wss?://\S+""").find(value)?.value?.trimEnd(',', ';')?.let(model::setRelay)
+    Regex("""machine_[A-Za-z0-9]+""").find(value)?.value?.let(model::setHostId)
+}
+
+private fun relayHost(value: String): String = runCatching { java.net.URI(value).authority }.getOrNull() ?: value

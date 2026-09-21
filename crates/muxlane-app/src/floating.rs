@@ -697,6 +697,12 @@ impl MuxlaneApp {
             }
             return;
         }
+        if let Some(term) = self.terms.get(&event.agent).cloned() {
+            term.update(cx, |term, cx| {
+                term.request_resize();
+                cx.notify();
+            });
+        }
         if !self
             .floating
             .windows

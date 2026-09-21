@@ -1,8 +1,10 @@
 package com.muxlane.android
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.withTimeout
 import muxlane.protocol.EventMsg
 import muxlane.protocol.IncomingFrame
 import muxlane.protocol.Request
@@ -23,76 +25,121 @@ class RelayClient(
         .pingInterval(20, TimeUnit.SECONDS)
         .build(),
 ) {
-    private var socket: WebSocket? = null
-    private var opened: CompletableDeferred<Unit>? = null
+    private data class Connection(
+        val opened: CompletableDeferred<Unit> = CompletableDeferred(),
+        val closed: CompletableDeferred<Throwable?> = CompletableDeferred(),
+        var socket: WebSocket? = null,
+    )
+
+    @Volatile
+    private var connection: Connection? = null
     private val nextId = AtomicLong(1)
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<Response>>()
-    private val _events = MutableSharedFlow<EventMsg>(extraBufferCapacity = 64)
-    val events: SharedFlow<EventMsg> = _events
+    // WebSocket callbacks must not drop terminal chunks while the main dispatcher is busy.
+    private val _events = Channel<EventMsg>(Channel.UNLIMITED)
+    val events = _events.receiveAsFlow()
 
     @Volatile
     var lastError: String? = null
         private set
 
-    fun connect(url: String) {
+    suspend fun connect(url: String): CompletableDeferred<Throwable?> {
         close()
-        val ready = CompletableDeferred<Unit>()
-        opened = ready
-        socket = client.newWebSocket(
+        lastError = null
+        val current = Connection()
+        connection = current
+        current.socket = client.newWebSocket(
             HttpRequest.Builder().url(url).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: HttpResponse) {
-                    ready.complete(Unit)
+                    if (connection === current) current.opened.complete(Unit)
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    handleLine(text)
+                    if (connection === current) {
+                        runCatching { handleLine(text) }
+                            .onFailure { finish(current, it) }
+                    }
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                     webSocket.close(code, reason)
                 }
 
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    finish(current, IllegalStateException(reason.ifBlank { "连接已关闭 ($code)" }))
+                }
+
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: HttpResponse?) {
-                    lastError = t.message
-                    ready.completeExceptionally(t)
-                    failAll(t)
+                    finish(current, t)
                 }
             },
         )
+        try {
+            withTimeout(CONNECT_TIMEOUT_MS) { current.opened.await() }
+        } catch (error: Throwable) {
+            if (connection === current) close()
+            throw error
+        }
+        return current.closed
     }
 
     fun close() {
-        socket?.close(1000, "bye")
-        socket = null
-        opened = null
-        failAll(IllegalStateException("disconnected"))
+        val current = connection ?: return
+        connection = null
+        current.socket?.close(1000, "bye")
+        val error = IllegalStateException("连接已断开")
+        current.opened.completeExceptionally(error)
+        current.closed.complete(null)
+        failAll(error)
     }
 
     suspend fun call(method: String, params: kotlinx.serialization.json.JsonElement): Response {
-        val ready = opened ?: error("not connected")
-        ready.await()
+        val current = connection ?: error("尚未连接")
+        withTimeout(CONNECT_TIMEOUT_MS) { current.opened.await() }
         val id = nextId.getAndIncrement()
         val deferred = CompletableDeferred<Response>()
         pending[id] = deferred
-        val sent = socket?.send(encodeFrame(Request(id, method, params))) == true
+        val sent = current.socket?.send(encodeFrame(Request(id, method, params))) == true
         if (!sent) {
             pending.remove(id)
-            error("not connected")
+            error("尚未连接")
         }
-        return deferred.await()
+        return try {
+            withTimeout(CALL_TIMEOUT_MS) { deferred.await() }
+        } catch (timeout: TimeoutCancellationException) {
+            finish(current, timeout)
+            throw timeout
+        } finally {
+            pending.remove(id)
+        }
     }
 
     private fun handleLine(text: String) {
         when (val frame = decodeIncoming(text)) {
             is IncomingFrame.Response -> pending.remove(frame.value.id)?.complete(frame.value)
-            is IncomingFrame.Event -> _events.tryEmit(frame.value)
+            is IncomingFrame.Event -> _events.trySend(frame.value)
         }
     }
 
     private fun failAll(error: Throwable) {
         pending.values.forEach { it.completeExceptionally(error) }
         pending.clear()
+    }
+
+    private fun finish(current: Connection, error: Throwable) {
+        if (connection !== current) return
+        connection = null
+        current.socket?.cancel()
+        lastError = error.message
+        current.opened.completeExceptionally(error)
+        current.closed.complete(error)
+        failAll(error)
+    }
+
+    private companion object {
+        const val CONNECT_TIMEOUT_MS = 15_000L
+        const val CALL_TIMEOUT_MS = 30_000L
     }
 }
 

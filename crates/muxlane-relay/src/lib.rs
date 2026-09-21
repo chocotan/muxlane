@@ -88,16 +88,30 @@ struct Inner {
 #[derive(Clone)]
 pub struct Relay {
     inner: Arc<Mutex<Inner>>,
+    auth_token: Option<Arc<str>>,
 }
 
 impl Relay {
     pub fn new() -> Self {
+        Self::with_auth_token(None)
+    }
+
+    pub fn from_env() -> anyhow::Result<Self> {
+        let token = std::env::var("MUXLANE_RELAY_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("MUXLANE_RELAY_TOKEN is required"))?;
+        Ok(Self::with_auth_token(Some(token)))
+    }
+
+    pub fn with_auth_token(token: Option<String>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 hosts: HashMap::new(),
                 pairs: HashMap::new(),
                 chans: HashMap::new(),
             })),
+            auth_token: token.map(Arc::<str>::from),
         }
     }
 
@@ -138,16 +152,30 @@ impl Relay {
     #[allow(clippy::result_large_err)] // tungstenite 握手回调签名固定
     async fn handle_stream(&self, stream: TcpStream) -> anyhow::Result<()> {
         let mut uri = None;
+        let mut auth = None;
         let ws = tokio_tungstenite::accept_hdr_async(
             stream,
             |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
                 uri = Some(request.uri().path().to_string());
+                auth = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .map(str::to_owned);
                 Ok(response)
             },
         )
         .await?;
         let path = uri.unwrap_or_else(|| "/".into());
         let parsed = parse_path(&path).ok_or_else(|| anyhow::anyhow!("unknown path {path}"))?;
+        if matches!(parsed.kind, PathKind::Host | PathKind::Chan)
+            && self.auth_token.as_deref().is_some_and(|expected| {
+                auth.as_deref() != Some(expected)
+            })
+        {
+            anyhow::bail!("relay authentication failed");
+        }
         match parsed.kind {
             PathKind::Host => self.handle_host(parsed.id, ws).await,
             PathKind::Pair => self.handle_phone(PhoneKind::Pair(parsed.id), ws).await,
@@ -349,7 +377,6 @@ impl Relay {
             .get(&host_id)
             .is_none_or(|slot| slot.tx.is_closed())
         {
-            inner.pairs.remove(code);
             anyhow::bail!("host {host_id} is offline");
         }
         inner.pairs.remove(code);

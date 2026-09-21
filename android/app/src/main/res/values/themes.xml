@@ -5,6 +5,7 @@
         <item name="android:statusBarColor">@color/mux_bg</item>
         <item name="android:navigationBarColor">@color/mux_bg</item>
         <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowDisablePreview">false</item>
         <item name="android:colorBackground">@color/mux_bg</item>
     </style>
 </resources>

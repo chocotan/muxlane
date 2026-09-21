@@ -5,6 +5,17 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val releaseStorePath = providers.environmentVariable("MUXLANE_KEYSTORE_PATH").orNull
+val releaseStorePassword = providers.environmentVariable("MUXLANE_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("MUXLANE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("MUXLANE_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseStorePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.muxlane.android"
     compileSdk = 34
@@ -19,6 +30,14 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.create("release") {
+                    storeFile = file(releaseStorePath!!)
+                    storePassword = releaseStorePassword
+                    keyAlias = releaseKeyAlias
+                    keyPassword = releaseKeyPassword
+                }
+            }
         }
     }
     compileOptions {
@@ -35,12 +54,11 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.navigation:navigation-compose:2.8.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    testImplementation("org.jetbrains.kotlin:kotlin-test")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

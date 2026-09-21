@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="mux_bg">#FF1B1E24</color>
-    <color name="mux_canvas">#FF12141A</color>
+    <color name="mux_icon_bg">#FF12141A</color>
 </resources>

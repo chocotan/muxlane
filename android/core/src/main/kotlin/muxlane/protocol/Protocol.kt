@@ -67,7 +67,7 @@ data class EventMsg(
 
 @Serializable
 data class PairBeginParams(
-    val code: String? = null,
+    @SerialName("host_id") val hostId: String? = null,
     val token: String? = null,
     val device: String? = null,
 )

@@ -202,17 +202,35 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Build debug APK
+      - name: Prepare Android signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.MUXLANE_ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.MUXLANE_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MUXLANE_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MUXLANE_ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
+          KEYSTORE="$RUNNER_TEMP/muxlane-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          {
+            echo "MUXLANE_KEYSTORE_PATH=$KEYSTORE"
+            echo "MUXLANE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "MUXLANE_KEY_ALIAS=$KEY_ALIAS"
+            echo "MUXLANE_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Build signed release APK
         working-directory: android
-        run: ./gradlew :app:assembleDebug --no-daemon
+        run: ./gradlew :core:test :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease --no-daemon
 
       - name: Package APK
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
           mkdir -p dist
-          APK="muxlane-${VERSION}-android-debug.apk"
-          cp android/app/build/outputs/apk/debug/app-debug.apk "dist/$APK"
+          APK="muxlane-${VERSION}-android.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/$APK"
           (cd dist && sha256sum "$APK" > "$APK.sha256")
 
       - name: Upload Android Artifact to Release

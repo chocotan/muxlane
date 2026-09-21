@@ -585,6 +585,14 @@ fn write_paste_image(image: &gpui::Image) -> Option<std::path::PathBuf> {
 }
 
 impl TermView {
+    /// Make the next layout pass resend this terminal's size after it gains focus.
+    /// The focused terminal is the active PTY-size owner when multiple clients are open.
+    pub fn request_resize(&mut self) {
+        if let Ok(mut dims) = self.last_dims.lock() {
+            *dims = (0, 0);
+        }
+    }
+
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn write_primary(cx: &mut Context<Self>, text: String) {
         cx.write_to_primary(ClipboardItem::new_string(text));
@@ -1494,6 +1502,7 @@ impl Render for TermView {
                                     let scheduled = Arc::clone(&pty_resize_scheduled);
                                     let writer = writer_resize.clone();
                                     let remote = remote_resize.clone();
+                                    let resize_owner = focused;
                                     let executor = cx.background_executor().clone();
                                     let timer = executor.clone();
                                     executor.spawn(async move {
@@ -1503,13 +1512,15 @@ impl Render for TermView {
                                         else {
                                             return;
                                         };
-                                        if let Some(writer) = &writer {
-                                            // pixel_width/height 不填就只有 rows/cols，Kitty 图形协议的
-                                            // 客户端（如 kitten icat）会因为拿不到像素尺寸直接拒绝发图。
-                                            let _ = writer.resize(cols, rows, px_w, px_h);
-                                        }
-                                        if let Some(remote) = &remote {
-                                            let _ = remote.send(RemoteTermCommand::Resize(cols, rows));
+                                        if resize_owner {
+                                            if let Some(writer) = &writer {
+                                                // pixel_width/height 不填就只有 rows/cols，Kitty 图形协议的
+                                                // 客户端（如 kitten icat）会因为拿不到像素尺寸直接拒绝发图。
+                                                let _ = writer.resize(cols, rows, px_w, px_h);
+                                            }
+                                            if let Some(remote) = &remote {
+                                                let _ = remote.send(RemoteTermCommand::Resize(cols, rows));
+                                            }
                                         }
                                     }).detach();
                                 }
@@ -1594,7 +1605,14 @@ impl Render for TermView {
                                             key.text == run.text
                                                 && key.start_col == run.start_col
                                                 && key.cells == run.cells
-                                                && key.fg == run.style.fg
+                                                && key.fg
+                                                    == terminal_run_colors(
+                                                        term_theme,
+                                                        run.style.fg,
+                                                        run.style.bg,
+                                                        run.style.inverse,
+                                                    )
+                                                    .0
                                                 && key.bold == run.style.bold
                                                 && key.italic == run.style.italic
                                                 && key.underline == run.style.underline
@@ -1612,7 +1630,13 @@ impl Render for TermView {
                                         text: run.text.clone(),
                                         start_col: run.start_col,
                                         cells: run.cells,
-                                        fg: run.style.fg,
+                                        fg: terminal_run_colors(
+                                            term_theme,
+                                            run.style.fg,
+                                            run.style.bg,
+                                            run.style.inverse,
+                                        )
+                                        .0,
                                         bold: run.style.bold,
                                         italic: run.style.italic,
                                         underline: run.style.underline,
@@ -1624,16 +1648,12 @@ impl Render for TermView {
                                     .runs
                                     .iter()
                                     .map(|run| {
-                                        let bg = if run.style.bg == muxlane_term::DEFAULT_COLOR {
-                                            term_theme.bg0
-                                        } else {
-                                            run.style.bg
-                                        };
-                                        let fg = if run.style.fg == muxlane_term::DEFAULT_COLOR {
-                                            default_terminal_fg(term_theme, bg)
-                                        } else {
-                                            run.style.fg
-                                        };
+                                        let (fg, _) = terminal_run_colors(
+                                            term_theme,
+                                            run.style.fg,
+                                            run.style.bg,
+                                            run.style.inverse,
+                                        );
                                         let fg = if run.style.dim { dim_u32(fg) } else { fg };
                                         let font = Font {
                                             weight: if run.style.bold {
@@ -1674,6 +1694,12 @@ impl Render for TermView {
                             }
                             let cached = cache.rows[row].as_ref().expect("row shaped above");
                             for (run, shaped) in render_row.runs.iter().zip(cached.shaped.iter()) {
+                                let (_, bg) = terminal_run_colors(
+                                    term_theme,
+                                    run.style.fg,
+                                    run.style.bg,
+                                    run.style.inverse,
+                                );
                                 let image = run.image.and_then(|img| {
                                     let cell_origin = point(
                                         inner.origin.x + measured_cell * run.start_col as f32,
@@ -1686,12 +1712,7 @@ impl Render for TermView {
                                     start_col: run.start_col,
                                     row,
                                     cells: run.cells,
-                                    bg: rgba(if run.style.bg == muxlane_term::DEFAULT_COLOR {
-                                        term_theme.bg0
-                                    } else {
-                                        run.style.bg
-                                    })
-                                    .into(),
+                                    bg: rgba(bg).into(),
                                     selected: run.style.selected,
                                     inverse: run.style.inverse,
                                     image,
@@ -2022,6 +2043,28 @@ impl Render for TermView {
     }
 }
 
+fn terminal_run_colors(theme: Theme, fg: u32, bg: u32, inverse: bool) -> (u32, u32) {
+    let bg = if bg == muxlane_term::DEFAULT_COLOR {
+        if inverse {
+            default_terminal_fg(theme, theme.bg0)
+        } else {
+            theme.bg0
+        }
+    } else {
+        bg
+    };
+    let fg = if fg == muxlane_term::DEFAULT_COLOR {
+        if inverse {
+            theme.bg0
+        } else {
+            default_terminal_fg(theme, bg)
+        }
+    } else {
+        fg
+    };
+    (fg, bg)
+}
+
 fn default_terminal_fg(theme: Theme, background: u32) -> u32 {
     let theme_fg = contrast_ratio(theme.fg0, background);
     let theme_surface = contrast_ratio(theme.bg0, background);
@@ -2076,6 +2119,24 @@ mod tests {
         let theme = Theme::for_mode(crate::theme::ThemeMode::Paper);
         assert_eq!(default_terminal_fg(theme, 0x20312aff), theme.bg0);
         assert_eq!(default_terminal_fg(theme, theme.bg0), theme.fg0);
+    }
+
+    #[test]
+    fn inverse_default_cell_uses_terminal_foreground_as_background() {
+        let theme = Theme::for_mode(crate::theme::ThemeMode::Paper);
+        let vterm = VTerm::new(10, 2);
+        vterm.feed(b"\x1b[7m \x1b[0m");
+        let snapshot = vterm.render_snapshot();
+        let style = &snapshot.rows[0].runs[0].style;
+
+        assert_eq!(
+            terminal_run_colors(theme, style.fg, style.bg, style.inverse),
+            (theme.bg0, default_terminal_fg(theme, theme.bg0))
+        );
+        assert_eq!(
+            terminal_run_colors(theme, muxlane_term::DEFAULT_COLOR, 0x20312aff, false).0,
+            theme.bg0
+        );
     }
 
     #[test]

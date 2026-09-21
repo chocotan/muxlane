@@ -143,26 +143,20 @@ fn main() {
     bootstrap::install(&dir);
 
     let relay_url = relay_flag.or(persisted.relay_url.clone());
+    let relay_token = muxlane_store::load_relay_token(&store_path).ok().flatten();
     if let Some(url) = relay_url.clone() {
         persisted.relay_url = Some(url.clone());
-        server.start_relay(url);
+        server.start_relay(url, relay_token);
     }
 
     if headless {
         rt.block_on(server.restore_sessions(&persisted));
         // Headless state changes persist synchronously through MuxlaneServer.
         server.set_persistence_path(store_path);
-        tracing::info!("muxlane headless server running");
-        if persisted.relay_url.is_some() {
-            match rt.block_on(server.begin_pair_offer()) {
-                Ok(offer) => tracing::info!(
-                    code = %offer.code,
-                    relay = %offer.relay_url,
-                    "phone pairing code ready"
-                ),
-                Err(error) => tracing::warn!(%error, "could not create phone pairing code"),
-            }
-        }
+        tracing::info!(
+            machine_id = %server.machine_id(),
+            "muxlane headless server running"
+        );
         rt.block_on(std::future::pending::<()>());
         return;
     }

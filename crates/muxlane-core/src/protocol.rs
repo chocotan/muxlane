@@ -390,7 +390,7 @@ pub struct TermExitEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairBeginParams {
     #[serde(default)]
-    pub code: Option<String>,
+    pub host_id: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
     #[serde(default)]
@@ -486,12 +486,12 @@ mod tests {
     }
 
     #[test]
-    fn pair_begin_accepts_code_or_token() {
-        let by_code: PairBeginParams =
-            serde_json::from_value(serde_json::json!({"code": "12345678", "device": "d1"}))
+    fn pair_begin_accepts_host_or_token() {
+        let by_host: PairBeginParams =
+            serde_json::from_value(serde_json::json!({"host_id": "machine_a", "device": "d1"}))
                 .unwrap();
-        assert_eq!(by_code.code.as_deref(), Some("12345678"));
-        assert!(by_code.token.is_none());
+        assert_eq!(by_host.host_id.as_deref(), Some("machine_a"));
+        assert!(by_host.token.is_none());
         let by_token: PairBeginParams =
             serde_json::from_value(serde_json::json!({"token": "v1:1:x", "device": "d1"})).unwrap();
         assert_eq!(by_token.token.as_deref(), Some("v1:1:x"));

@@ -73,12 +73,24 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "WebSocket URL of your self-hosted muxlane-relay. On LAN, use this machine's address.",
     ),
     ("settings.relay_url_apply", "应用", "Apply"),
-    ("settings.pair_phone", "配对手机", "Pair Phone"),
     (
-        "settings.pair_phone_help",
-        "生成 8 位配对码，手机在 5 分钟内输入即可连接",
-        "Generate an 8-digit code. Enter it on the phone within 5 minutes.",
+        "settings.relay_token",
+        "中继密钥",
+        "Relay Token",
     ),
+    (
+        "settings.relay_token_help",
+        "只用于电脑注册到自建中继；手机不需要填写。",
+        "Used only for this computer to register with the self-hosted relay; the phone does not need it.",
+    ),
+    ("placeholder.relay_token", "MUXLANE_RELAY_TOKEN", "MUXLANE_RELAY_TOKEN"),
+    ("settings.machine_id", "机器 ID", "Machine ID"),
+    (
+        "settings.machine_id_help",
+        "电脑连上中继后，把这个 ID 填到手机即可添加这台机器",
+        "After this computer joins the relay, enter this ID on the phone to add it.",
+    ),
+    ("settings.machine_id_copy", "复制", "Copy"),
     ("dialog.pair_phone", "配对手机", "Pair Phone"),
     (
         "dialog.pair_phone_help",
@@ -92,7 +104,7 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "Set a relay URL first",
     ),
     ("dialog.auth_relay", "中继", "Relay"),
-    ("placeholder.pair_code", "8 位配对码", "8-digit pairing code"),
+    ("placeholder.pair_code", "机器 ID", "Machine ID"),
     (
         "error.relay_url_required",
         "请输入 ws:// 或 wss:// 的中继地址",
@@ -100,8 +112,8 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "error.pair_code_required",
-        "请输入目标机器上的 8 位配对码",
-        "Enter the 8-digit code from the target machine",
+        "请输入目标机器的机器 ID",
+        "Enter the machine ID from the target computer",
     ),
     ("dialog.add_local_project", "添加本地项目", "Add Local Project"),
     (

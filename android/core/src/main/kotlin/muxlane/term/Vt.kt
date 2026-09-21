@@ -1,7 +1,7 @@
 package muxlane.term
 
 data class Cell(
-    val ch: Char = ' ',
+    val ch: String = " ",
     val fg: Int = DEFAULT_FG,
     val bg: Int = DEFAULT_BG,
     val bold: Boolean = false,
@@ -11,14 +11,14 @@ data class Cell(
 
 data class Cursor(var col: Int = 0, var row: Int = 0)
 
-const val DEFAULT_FG: Int = 0xFFE6E9EF.toInt()
-const val DEFAULT_BG: Int = 0xFF12141A.toInt()
+const val DEFAULT_FG: Int = 0xFF39342C.toInt()
+const val DEFAULT_BG: Int = 0xFFF4EBDD.toInt()
 
 private val ANSI16 = intArrayOf(
-    0xFF000000.toInt(), 0xFFE06C75.toInt(), 0xFF98C379.toInt(), 0xFFE5C07B.toInt(),
-    0xFF61AFEF.toInt(), 0xFFC678DD.toInt(), 0xFF56B6C2.toInt(), 0xFFABB2BF.toInt(),
-    0xFF5C6370.toInt(), 0xFFE06C75.toInt(), 0xFF98C379.toInt(), 0xFFE5C07B.toInt(),
-    0xFF61AFEF.toInt(), 0xFFC678DD.toInt(), 0xFF56B6C2.toInt(), 0xFFFFFFFF.toInt(),
+    0xFF2F2B25.toInt(), 0xFFA3333F.toInt(), 0xFF356A42.toInt(), 0xFF7A5B17.toInt(),
+    0xFF355E8A.toInt(), 0xFF754D73.toInt(), 0xFF2C6868.toInt(), 0xFF5C554B.toInt(),
+    0xFF72695D.toInt(), 0xFFA92F3A.toInt(), 0xFF2F7042.toInt(), 0xFF745711.toInt(),
+    0xFF2F6098.toInt(), 0xFF7B4778.toInt(), 0xFF246A70.toInt(), 0xFF49433A.toInt(),
 )
 
 class VirtualTerminal(
@@ -40,7 +40,19 @@ class VirtualTerminal(
 
     fun screen(): Array<Array<Cell>> = Array(rows) { r -> grid[r].copyOf() }
 
-    fun visibleLine(row: Int): String = grid[row].joinToString("") { it.ch.toString() }.trimEnd()
+    fun viewport(scrollRows: Int = 0): List<List<Cell>> {
+        val offset = scrollRows.coerceIn(0, scrollback.size)
+        val history = scrollback.toList()
+        val all = history + grid.map { it.asList() }
+        val end = (all.size - offset).coerceAtLeast(rows)
+        val start = (end - rows).coerceAtLeast(0)
+        return all.subList(start, end)
+    }
+
+    val maxScrollRows: Int
+        get() = scrollback.size
+
+    fun visibleLine(row: Int): String = grid[row].joinToString("") { it.ch }.trimEnd()
 
     fun resize(newCols: Int, newRows: Int) {
         val next = Array(newRows) { r ->
@@ -79,17 +91,18 @@ class VirtualTerminal(
         }
     }
 
-    private fun printChar(ch: Char) {
-        if (ch == '\u0000') return
+    private fun printChar(ch: Int) {
+        if (ch == 0 || isKittyPlaceholder(ch) || isCombiningMark(ch)) return
         val width = if (isWide(ch)) 2 else 1
+        val glyph = String(Character.toChars(ch))
         if (cursor.col + width > cols) newline()
-        put(ch)
+        put(glyph)
         if (width == 2 && cursor.col < cols) {
-            put(' ')
+            put(" ")
         }
     }
 
-    private fun put(ch: Char) {
+    private fun put(ch: String) {
         if (cursor.row !in 0 until rows || cursor.col !in 0 until cols) return
         grid[cursor.row][cursor.col] = Cell(ch, fg, bg, bold, underline, inverse)
         cursor.col += 1
@@ -237,8 +250,13 @@ private fun indexedColor(index: Int): Int {
     return DEFAULT_FG
 }
 
-private fun isWide(ch: Char): Boolean {
-    val code = ch.code
+private fun isKittyPlaceholder(code: Int): Boolean =
+    code == 0x10EEEE || code in 0xEE00..0xEEFF
+
+private fun isCombiningMark(code: Int): Boolean =
+    code in 0x0300..0x036F || code in 0x1DC0..0x1DFF || code in 0x20D0..0x20FF
+
+private fun isWide(code: Int): Boolean {
     return code in 0x1100..0x115F ||
         code in 0x2E80..0xA4CF ||
         code in 0xAC00..0xD7A3 ||
@@ -246,11 +264,12 @@ private fun isWide(ch: Char): Boolean {
         code in 0xFE10..0xFE19 ||
         code in 0xFE30..0xFE6F ||
         code in 0xFF00..0xFF60 ||
-        code in 0xFFE0..0xFFE6
+        code in 0xFFE0..0xFFE6 ||
+        code in 0x1F300..0x1FAFF
 }
 
 private sealed class Action {
-    data class Print(val ch: Char) : Action()
+    data class Print(val ch: Int) : Action()
     data class Execute(val b: Int) : Action()
     data class Csi(val params: List<Int>, val final: Char) : Action()
     data class Osc(val payload: String) : Action()
@@ -258,7 +277,7 @@ private sealed class Action {
 }
 
 private class AnsiParser {
-    private enum class State { GROUND, ESC, CSI, OSC, OSC_ESC }
+    private enum class State { GROUND, ESC, CSI, OSC, OSC_ESC, APC, APC_ESC, CHARSET }
     private var state = State.GROUND
     private val params = StringBuilder()
     private val osc = StringBuilder()
@@ -273,7 +292,7 @@ private class AnsiParser {
                 State.GROUND -> when {
                     v == 0x1B -> state = State.ESC
                     v < 0x20 -> emit(Action.Execute(v))
-                    v < 0x80 -> emit(Action.Print(v.toChar()))
+                    v < 0x80 -> emit(Action.Print(v))
                     else -> utf8Byte(v, emit)
                 }
                 State.ESC -> when (v.toChar()) {
@@ -285,11 +304,16 @@ private class AnsiParser {
                         osc.clear()
                         state = State.OSC
                     }
+                    '_' -> state = State.APC
+                    '(', ')', '*' , '+' -> state = State.CHARSET
                     else -> {
                         emit(Action.Esc(v.toChar()))
                         state = State.GROUND
                     }
                 }
+                State.CHARSET -> state = State.GROUND
+                State.APC -> if (v == 0x1B) state = State.APC_ESC
+                State.APC_ESC -> state = if (v == 0x5C) State.GROUND else State.APC
                 State.CSI -> {
                     if (v in 0x40..0x7E) {
                         emit(Action.Csi(parseParams(params.toString()), v.toChar()))
@@ -321,7 +345,7 @@ private class AnsiParser {
                 v and 0xF0 == 0xE0 -> 3
                 v and 0xF8 == 0xF0 -> 4
                 else -> {
-                    emit(Action.Print('?'))
+                    emit(Action.Print('?'.code))
                     return
                 }
             }
@@ -330,7 +354,7 @@ private class AnsiParser {
         utf8[utf8Got++] = v.toByte()
         if (utf8Got == utf8Need) {
             val text = String(utf8, 0, utf8Got, Charsets.UTF_8)
-            if (text.isNotEmpty()) emit(Action.Print(text[0]))
+            if (text.isNotEmpty()) emit(Action.Print(text.codePointAt(0)))
             utf8Need = 0
             utf8Got = 0
         }

@@ -563,6 +563,32 @@ fn relay_url_input_keeps_focus_and_accepts_typed_text() {
 }
 
 #[test]
+fn relay_url_is_committed_when_settings_close_and_restored_on_reopen() {
+    with_app(|cx, window, view| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.settings_page = SettingsPage::General;
+                app.open_settings(window, cx);
+                app.settings_relay_input.update(cx, |input, cx| {
+                    input.set_text("ws://relay.example:9843/", cx);
+                });
+                app.close_settings(window, cx);
+                assert_eq!(app.relay_url.as_deref(), Some("ws://relay.example:9843"));
+
+                app.open_settings(window, cx);
+                assert_eq!(
+                    app.settings_relay_input.read(cx).text(),
+                    "ws://relay.example:9843"
+                );
+                let machine_id = app.server.machine_id();
+                assert!(!machine_id.is_empty());
+            });
+        })
+        .unwrap();
+    });
+}
+
+#[test]
 fn settings_capture_rebinds_and_disables_all_default_terminal_actions() {
     with_app(|cx, window, view| {
         cx.update_window(window, |_, window, cx| {

@@ -11,20 +11,20 @@ use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Pair this desktop with a relay host via its 8-digit code.
+/// Pair this desktop with a relay host via its stable machine ID.
 /// Returns the long-lived token and the host's machine identity.
 pub async fn pair_relay(
     url: &str,
-    code: &str,
+    host_id: &str,
     device: &str,
 ) -> anyhow::Result<(String, MachineInfo)> {
-    let url = join(url, &format!("pair/{code}"));
+    let url = join(url, &format!("phone/{host_id}"));
     let mut conn = ws_connection(&url).await?;
     let value = conn
         .call(
             muxlane_core::protocol::methods::PAIR_BEGIN,
             serde_json::to_value(PairBeginParams {
-                code: Some(code.to_string()),
+                host_id: Some(host_id.to_string()),
                 token: None,
                 device: Some(device.to_string()),
             })?,
@@ -41,7 +41,7 @@ pub async fn connect_relay(url: &str, host_id: &str, token: &str) -> anyhow::Res
     conn.call(
         muxlane_core::protocol::methods::PAIR_BEGIN,
         serde_json::to_value(PairBeginParams {
-            code: None,
+            host_id: None,
             token: Some(token.to_string()),
             device: None,
         })?,

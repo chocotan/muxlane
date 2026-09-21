@@ -436,7 +436,7 @@ async fn unix_socket_skips_pair_and_lists_installed_presets() {
     let unpaired = rpc_call(
         &sock,
         methods::PAIR_BEGIN,
-        serde_json::json!({"code": "00000000", "device": "phone"}),
+        serde_json::json!({"host_id": "other-machine", "device": "phone"}),
     )
     .await;
     assert_eq!(unpaired.error.unwrap().code, "unauthorized");

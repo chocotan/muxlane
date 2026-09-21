@@ -174,8 +174,7 @@ impl MuxlaneApp {
         self.insert_remote_host(name, parsed, auth, None, cx);
     }
 
-    /// 中继模式：目标栏填 relay URL（可带 /host_id），配对码在密码栏。
-    /// 首次配对先 pair_relay 拿 token 和 host_id，再按 Target::Relay 建连接。
+    /// 中继模式：目标栏填 relay URL，密码栏填机器 ID。
     fn add_relay_remote(&mut self, target: String, cx: &mut Context<Self>) {
         let code = self.connect_password.read(cx).text().trim().to_string();
         if !(target.starts_with("ws://") || target.starts_with("wss://")) {
@@ -183,7 +182,11 @@ impl MuxlaneApp {
             cx.notify();
             return;
         }
-        if code.len() != 8 || !code.chars().all(|ch| ch.is_ascii_digit()) {
+        if code.is_empty()
+            || !code
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        {
             self.dialog_error = Some(i18n::text(self.language, "error.pair_code_required").into());
             cx.notify();
             return;

@@ -6,16 +6,16 @@ import kotlin.test.assertTrue
 
 class ProtocolTest {
     @Test
-    fun pairParamsEncodeCode() {
+    fun pairParamsEncodeHost() {
         val json = encodeFrame(
             Request(
                 7,
                 Methods.PAIR_BEGIN,
-                encodeParams(PairBeginParams.serializer(), PairBeginParams(code = "12345678")),
+                encodeParams(PairBeginParams.serializer(), PairBeginParams(hostId = "machine_a")),
             ),
         )
         assertTrue(json.contains("\"method\":\"pair.begin\""))
-        assertTrue(json.contains("12345678"))
+        assertTrue(json.contains("machine_a"))
     }
 
     @Test

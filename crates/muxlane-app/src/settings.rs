@@ -298,6 +298,7 @@ impl MuxlaneApp {
             (&self.connect_password, "placeholder.password"),
             (&self.connect_key_path, "placeholder.private_key"),
             (&self.settings_relay_input, "placeholder.relay_url"),
+            (&self.settings_relay_token_input, "placeholder.relay_token"),
         ] {
             input.update(cx, |input, cx| {
                 input.set_placeholder(i18n::text(language, key), cx)
@@ -310,6 +311,8 @@ impl MuxlaneApp {
 
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_shortcut_capture();
+        // 设置页关闭时提交中继地址，避免用户编辑后因为没看到“应用”按钮而丢失输入。
+        self.apply_relay_settings(cx);
         self.settings_open = false;
         self.dismiss_settings_menus();
         if let Some(previous) = self
@@ -448,21 +451,17 @@ impl MuxlaneApp {
                 theme,
             ))
             .child(setting_row(
-                "settings-row-pair-phone",
-                i18n::text(self.language, "settings.pair_phone"),
-                Some(i18n::text(self.language, "settings.pair_phone_help")),
-                semantic_button(
-                    "settings-pair-phone",
-                    i18n::text(self.language, "settings.pair_phone"),
-                    theme,
-                )
-                .px_3()
-                .py_1()
-                .text_size(ui_px(12.))
-                .track_focus(&self.settings_focus.control("settings-pair-phone", cx))
-                .on_click(cx.listener(|this, _event, window, cx| {
-                    this.open_pair_dialog(window, cx);
-                })),
+                "settings-row-relay-token",
+                i18n::text(self.language, "settings.relay_token"),
+                Some(i18n::text(self.language, "settings.relay_token_help")),
+                self.render_relay_token_field(cx),
+                theme,
+            ))
+            .child(setting_row(
+                "settings-row-machine-id",
+                i18n::text(self.language, "settings.machine_id"),
+                Some(i18n::text(self.language, "settings.machine_id_help")),
+                self.render_machine_id_field(cx),
                 theme,
             ))
             .child(setting_row(
@@ -537,33 +536,67 @@ impl MuxlaneApp {
             .order
             .push(self.settings_relay_input.focus_handle(cx));
         div()
+            .w(ui_px(240.))
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1()
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "enter"
+                    && this
+                        .settings_relay_input
+                        .focus_handle(cx)
+                        .is_focused(window)
+                {
+                    this.apply_relay_settings(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
                     .id("settings-relay-input")
-                    .w(ui_px(240.))
-                    .h(ui_px(28.))
-                    .border_1()
-                    .border_color(rgba(theme.line))
-                    .bg(rgba(theme.bg0))
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
                     .child(self.settings_relay_input.clone()),
             )
             .child(
                 semantic_button("settings-relay-apply", apply_label, theme)
-                    .px_3()
-                    .h(ui_px(28.))
+                    .px_2()
+                    .h(ui_px(34.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
                     .text_size(ui_px(12.))
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .bg(rgba(theme.bg0))
+                    .hover(|style| style.bg(rgba(theme.bg2)))
                     .track_focus(&self.settings_focus.control("settings-relay-apply", cx))
                     .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.apply_relay_url(cx);
-                    })),
+                        this.apply_relay_settings(cx);
+                    }))
+                    .child(apply_label),
             )
             .into_any_element()
     }
 
-    fn apply_relay_url(&mut self, cx: &mut Context<Self>) {
+    fn render_relay_token_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.settings_focus
+            .order
+            .push(self.settings_relay_token_input.focus_handle(cx));
+        div()
+            .w(ui_px(240.))
+            .child(
+                div()
+                    .id("settings-relay-token-input")
+                    .w_full()
+                    .overflow_hidden()
+                    .child(self.settings_relay_token_input.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn apply_relay_settings(&mut self, cx: &mut Context<Self>) {
         let url = self
             .settings_relay_input
             .read(cx)
@@ -571,10 +604,72 @@ impl MuxlaneApp {
             .trim()
             .trim_end_matches('/')
             .to_string();
-        self.relay_url = (!url.is_empty()).then_some(url.clone());
-        self.server.start_relay(url);
+        let token = self.settings_relay_token_input.read(cx).text().trim().to_string();
+        let relay_url = (!url.is_empty()).then_some(url.clone());
+        // A secure field may not restore its text during an early settings close;
+        // never erase a configured relay credential unless a new one is entered.
+        let relay_token = (!token.is_empty())
+            .then_some(token)
+            .or_else(|| self.relay_token.clone());
+        if self.relay_url == relay_url && self.relay_token == relay_token {
+            return;
+        }
+        self.relay_url = relay_url;
+        self.relay_token = relay_token;
+        self.server.start_relay(url, self.relay_token.clone());
+        let _ = muxlane_store::save_relay_token(
+            &self.store_path,
+            self.relay_token.as_deref(),
+        );
         self.persist();
         cx.notify();
+    }
+
+    fn render_machine_id_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = Theme::for_mode(self.theme_mode);
+        let machine_id = self.server.machine_id();
+        let copy_label = i18n::text(self.language, "settings.machine_id_copy");
+        div()
+            .w(ui_px(320.))
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .id("settings-machine-id")
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .h(ui_px(34.))
+                    .flex()
+                    .items_center()
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .bg(rgba(theme.bg0))
+                    .font_family("monospace")
+                    .text_size(ui_px(11.))
+                    .text_color(rgba(theme.fg0))
+                    .child(machine_id.clone()),
+            )
+            .child(
+                semantic_button("settings-machine-id-copy", copy_label, theme)
+                    .px_2()
+                    .h(ui_px(34.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .text_size(ui_px(12.))
+                    .border_1()
+                    .border_color(rgba(theme.line))
+                    .bg(rgba(theme.bg0))
+                    .hover(|style| style.bg(rgba(theme.bg2)))
+                    .track_focus(&self.settings_focus.control("settings-machine-id-copy", cx))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(this.server.machine_id()));
+                    }))
+                    .child(copy_label),
+            )
+            .into_any_element()
     }
 
     fn render_terminal_preset_select(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {

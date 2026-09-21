@@ -117,6 +117,7 @@ pub fn launch(
 }
 
 pub struct MuxlaneApp {
+    pub(crate) store_path: PathBuf,
     // 环境/基础设施
     pub(crate) focus: FocusHandle,
     pub(crate) server: Arc<MuxlaneServer>,
@@ -170,6 +171,7 @@ pub struct MuxlaneApp {
     pub(crate) settings_scale_menu: bool,
     pub(crate) settings_scale_input: Entity<TextField>,
     pub(crate) settings_relay_input: Entity<TextField>,
+    pub(crate) settings_relay_token_input: Entity<TextField>,
     pub(crate) settings_scale_error: bool,
     pub(crate) shortcut_bindings: muxlane_store::PersistedShortcutBindings,
     pub(crate) shortcut_capture: Option<ShortcutAction>,
@@ -208,11 +210,8 @@ pub struct MuxlaneApp {
     pub(crate) remote_project_input: Entity<TextField>,
     pub(crate) project_input: Entity<TextField>,
     pub(crate) dialog_error: Option<String>,
-    pub(crate) pair_dialog: bool,
-    pub(crate) pair_code: Option<String>,
-    pub(crate) pair_error: Option<String>,
-    pub(crate) pair_busy: bool,
     pub(crate) relay_url: Option<String>,
+    pub(crate) relay_token: Option<String>,
 
     // 菜单/确认框
     pub(crate) session_menu: Option<SessionMenu>,
@@ -620,8 +619,22 @@ impl MuxlaneApp {
             }
             field
         });
+        let relay_token = muxlane_store::load_relay_token(&store_path).ok().flatten();
+        let settings_relay_token_input = cx.new(|cx| {
+            let mut field = TextField::new_secure(
+                i18n::text(language, "placeholder.relay_token"),
+                window,
+                cx,
+            );
+            field.set_theme_mode(theme_mode, cx);
+            if let Some(token) = relay_token.as_deref() {
+                field.set_text(token, cx);
+            }
+            field
+        });
 
         let mut app = MuxlaneApp {
+            store_path: store_path.clone(),
             focus: cx.focus_handle(),
             server,
             pane_tree: restored_tree,
@@ -650,6 +663,7 @@ impl MuxlaneApp {
             settings_scale_menu: false,
             settings_scale_input,
             settings_relay_input,
+            settings_relay_token_input,
             settings_scale_error: false,
             shortcut_bindings: crate::shortcuts::recover_defaults(&persisted.shortcut_bindings),
             shortcut_capture: None,
@@ -682,11 +696,8 @@ impl MuxlaneApp {
             remote_project_input,
             project_input,
             dialog_error: None,
-            pair_dialog: false,
-            pair_code: None,
-            pair_error: None,
-            pair_busy: false,
             relay_url: persisted.relay_url.clone(),
+            relay_token,
             quit_confirm_open: false,
             quit_confirmed: false,
             quit_cancel_focus: cx.focus_handle(),
@@ -796,7 +807,7 @@ impl MuxlaneApp {
             }
         }
         if let Some(url) = app.relay_url.clone() {
-            app.server.start_relay(url);
+            app.server.start_relay(url, app.relay_token.clone());
         }
         app.persist();
         app
@@ -1331,9 +1342,6 @@ impl Render for MuxlaneApp {
         }
         if self.connect_dialog {
             root = root.child(self.render_connect_dialog(cx));
-        }
-        if self.pair_dialog {
-            root = root.child(self.render_pair_dialog(cx));
         }
         if self.project_dialog {
             root = root.child(self.render_project_dialog(cx));

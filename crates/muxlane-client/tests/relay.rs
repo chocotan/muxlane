@@ -47,7 +47,7 @@ async fn spawn_server_with_relay(
         .relay_handle()
         .set_url(Some(relay_url.to_string()))
         .await;
-    server.start_relay(relay_url.to_string());
+    server.start_relay(relay_url.to_string(), None);
     (server, state)
 }
 

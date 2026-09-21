@@ -480,7 +480,7 @@ impl MuxlaneServer {
         }
         tracing::debug!(
             device,
-            has_code = params.code.is_some(),
+            has_host = params.host_id.is_some(),
             has_token = params.token.is_some(),
             "pair.begin"
         );
@@ -500,17 +500,17 @@ impl MuxlaneServer {
                     ))
                 }
             }
-        } else if let Some(code) = params
-            .code
+        } else if let Some(host_id) = params
+            .host_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if !self.relay.consume_code(code).await {
+            if host_id != self.machine_id() {
                 return Ok(Response::err(
                     req.id,
                     "unauthorized",
-                    "invalid or expired pairing",
+                    "unknown machine",
                 ));
             }
             format!("mobile:{device}")
@@ -557,23 +557,18 @@ impl MuxlaneServer {
         }
     }
 
-    pub fn start_relay(self: &Arc<Self>, url: String) {
+    pub fn start_relay(self: &Arc<Self>, url: String, token: Option<String>) {
         let url = url.trim().trim_end_matches('/').to_string();
-        let server = Arc::clone(self);
-        self.runtime.spawn({
-            let url = url.clone();
-            async move {
-                server
-                    .relay()
-                    .set_url((!url.is_empty()).then_some(url))
-                    .await;
-            }
-        });
         if !self.relay.mark_started() {
             return;
         }
         let server = Arc::clone(self);
         self.runtime.spawn(async move {
+            server
+                .relay()
+                .set_url((!url.is_empty()).then_some(url.clone()))
+                .await;
+            server.relay().set_token(token).await;
             if let Err(error) = crate::relay::run(server, url).await {
                 tracing::warn!(%error, "relay client stopped");
             }

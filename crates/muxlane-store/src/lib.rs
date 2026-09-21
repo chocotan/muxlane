@@ -202,6 +202,8 @@ struct PersistedSecrets {
     version: u32,
     #[serde(default)]
     remote_passwords: BTreeMap<String, String>,
+    #[serde(default)]
+    relay_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -507,10 +509,8 @@ pub fn save(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
     for workspace in &mut state.floating_workspaces {
         workspace.layout.normalize();
     }
-    let mut secrets = PersistedSecrets {
-        version: SECRETS_VERSION,
-        ..Default::default()
-    };
+    let mut secrets = load_secrets(&secrets_path(path))?;
+    secrets.version = SECRETS_VERSION;
     for remote in &mut state.remote_configs {
         match &mut remote.auth {
             PersistedRemoteAuth::Password { password, .. } => {
@@ -532,6 +532,21 @@ pub fn save(path: &Path, app: &PersistedApp) -> anyhow::Result<()> {
     }
     write_secrets(&secrets_path(path), &secrets)?;
     write_state(path, &state)
+}
+
+pub fn load_relay_token(path: &Path) -> anyhow::Result<Option<String>> {
+    Ok(load_secrets(&secrets_path(path))?.relay_token)
+}
+
+pub fn save_relay_token(path: &Path, token: Option<&str>) -> anyhow::Result<()> {
+    let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(())
+    };
+    let _guard = lock_state(path)?;
+    let mut secrets = load_secrets(&secrets_path(path))?;
+    secrets.relay_token = Some(token.to_owned());
+    secrets.version = SECRETS_VERSION;
+    write_secrets(&secrets_path(path), &secrets)
 }
 
 fn secrets_path(state_path: &Path) -> PathBuf {

@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, Mutex};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 const PAIR_TTL: Duration = Duration::from_secs(5 * 60);
 const PAIR_MAX_ATTEMPTS: u32 = 5;
@@ -36,6 +36,7 @@ pub struct RelayHandle {
 
 struct RelayInner {
     url: Option<String>,
+    token: Option<String>,
     pair: Option<PairState>,
     code_tx: Option<mpsc::UnboundedSender<String>>,
 }
@@ -51,6 +52,7 @@ impl RelayHandle {
         Self {
             inner: Arc::new(Mutex::new(RelayInner {
                 url: None,
+                token: None,
                 pair: None,
                 code_tx: None,
             })),
@@ -60,6 +62,14 @@ impl RelayHandle {
 
     pub async fn set_url(&self, url: Option<String>) {
         self.inner.lock().await.url = url.filter(|value| !value.trim().is_empty());
+    }
+
+    pub async fn set_token(&self, token: Option<String>) {
+        self.inner.lock().await.token = token.filter(|value| !value.trim().is_empty());
+    }
+
+    pub async fn token(&self) -> Option<String> {
+        self.inner.lock().await.token.clone()
     }
 
     pub async fn url(&self) -> Option<String> {
@@ -144,7 +154,8 @@ pub async fn run(server: Arc<MuxlaneServer>, url: String) -> anyhow::Result<()> 
         };
         let host_id = server.machine_id();
         let ws_url = join_url(&base, &format!("host/{host_id}"));
-        match connect_once(Arc::clone(&server), &ws_url).await {
+        let token = server.relay().token().await;
+        match connect_once(Arc::clone(&server), &ws_url, token).await {
             Ok(()) => tracing::info!("relay host disconnected, reconnecting"),
             Err(error) => tracing::warn!("relay host failed: {error:?}"),
         }
@@ -160,8 +171,13 @@ fn join_url(base: &str, path: &str) -> String {
     }
 }
 
-async fn connect_once(server: Arc<MuxlaneServer>, ws_url: &str) -> anyhow::Result<()> {
-    let (ws, _) = tokio_tungstenite::connect_async(ws_url)
+async fn connect_once(
+    server: Arc<MuxlaneServer>,
+    ws_url: &str,
+    token: Option<String>,
+) -> anyhow::Result<()> {
+    let request = websocket_request(ws_url, token.as_deref())?;
+    let (ws, _) = tokio_tungstenite::connect_async(request)
         .await
         .with_context(|| format!("connect {ws_url}"))?;
     let (mut sink, mut stream) = ws.split();
@@ -190,7 +206,8 @@ async fn connect_once(server: Arc<MuxlaneServer>, ws_url: &str) -> anyhow::Resul
                         let base = base_url(ws_url);
                         let host = Arc::clone(&server);
                         tokio::spawn(async move {
-                            if let Err(error) = run_channel(host, &base, &chan).await {
+                            let token = host.relay().token().await;
+                            if let Err(error) = run_channel(host, &base, &chan, token).await {
                                 tracing::debug!(%chan, %error, "relay channel closed");
                             }
                         });
@@ -215,9 +232,15 @@ fn base_url(host_ws_url: &str) -> String {
         .unwrap_or_else(|| host_ws_url.to_string())
 }
 
-async fn run_channel(server: Arc<MuxlaneServer>, base: &str, chan: &str) -> anyhow::Result<()> {
+async fn run_channel(
+    server: Arc<MuxlaneServer>,
+    base: &str,
+    chan: &str,
+    token: Option<String>,
+) -> anyhow::Result<()> {
     let url = join_url(base, &format!("chan/{chan}"));
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
+    let request = websocket_request(&url, token.as_deref())?;
+    let (ws, _) = tokio_tungstenite::connect_async(request)
         .await
         .with_context(|| format!("connect {url}"))?;
     let (mut sink, mut stream) = ws.split();
@@ -228,6 +251,20 @@ async fn run_channel(server: Arc<MuxlaneServer>, base: &str, chan: &str) -> anyh
     pump_session(&mut sink, &mut stream, session).await?;
     let _ = task.await;
     Ok(())
+}
+
+fn websocket_request(
+    url: &str,
+    token: Option<&str>,
+) -> anyhow::Result<tokio_tungstenite::tungstenite::http::Request<()>> {
+    let mut request = url.into_client_request()?;
+    if let Some(token) = token {
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {token}").parse()?,
+        );
+    }
+    Ok(request)
 }
 
 async fn wait_ack<S>(

@@ -11,5 +11,5 @@ async fn main() -> anyhow::Result<()> {
     let bind = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:9843".into());
-    Relay::new().serve(&bind).await
+    Relay::from_env()?.serve(&bind).await
 }
