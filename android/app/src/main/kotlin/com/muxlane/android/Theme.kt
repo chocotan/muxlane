@@ -34,6 +34,14 @@ val TerminalForeground = Color(0xFF39342C)
 val TerminalMuted = Color(0xFF6A6257)
 val TerminalAccent = Color(0xFF006D5D)
 
+val MuxErrorBg = Color(0xFFFFF0F0)
+val MuxErrorFg = Color(0xFF991B1B)
+val MuxErrorLine = Color(0xFFFCA5A5)
+
+val MuxWarningBg = Color(0xFFFEF3C7)
+val MuxWarningFg = Color(0xFF92400E)
+val MuxWarningLine = Color(0xFFFCD34D)
+
 private val colors = lightColorScheme(
     primary = MuxAccent,
     onPrimary = Color.White,
@@ -52,14 +60,15 @@ private val colors = lightColorScheme(
 )
 
 private val typography = Typography(
-    headlineSmall = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold),
-    titleLarge = TextStyle(fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
+    headlineSmall = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.02).sp),
+    titleLarge = TextStyle(fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.01).sp),
     titleMedium = TextStyle(fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
     bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 22.sp),
     bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
     bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp),
     labelLarge = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
     labelMedium = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
+    labelSmall = TextStyle(fontSize = 10.sp, lineHeight = 14.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp),
 )
 
 @Composable

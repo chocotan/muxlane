@@ -230,7 +230,14 @@ jobs:
         run: |
           mkdir -p dist
           APK="muxlane-${VERSION}-android.apk"
-          cp android/app/build/outputs/apk/release/app-release.apk "dist/$APK"
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          if [[ ! -f "$APK_PATH" ]]; then
+            echo "Signed release APK was not produced. Expected: $APK_PATH" >&2
+            find android/app/build/outputs/apk/release -maxdepth 1 -type f -print >&2 || true
+            echo "Check the four MUXLANE_ANDROID_KEYSTORE_* repository secrets." >&2
+            exit 1
+          fi
+          cp "$APK_PATH" "dist/$APK"
           (cd dist && sha256sum "$APK" > "$APK.sha256")
 
       - name: Upload Android Artifact to Release

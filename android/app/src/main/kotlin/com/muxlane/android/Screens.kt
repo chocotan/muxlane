@@ -62,6 +62,20 @@ import androidx.compose.material.icons.outlined.KeyboardHide
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Security
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -102,13 +116,16 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.pluralStringResource
@@ -122,7 +139,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import muxlane.protocol.AgentInstance
@@ -130,6 +149,47 @@ import muxlane.protocol.AgentStatus
 import muxlane.protocol.Project
 import muxlane.term.VirtualTerminal
 import kotlin.math.floor
+
+private enum class ScreenTarget {
+    Terminal, Workspace, Pair, Machines
+}
+
+@Composable
+fun SquareStepIndicator(
+    modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.primary,
+    blockSize: Dp = 6.dp,
+    gap: Dp = 3.dp,
+    blockCount: Int = 4,
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "square_step")
+    val activeIndex by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = blockCount.toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 650, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "active_block",
+    )
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(gap),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        repeat(blockCount) { index ->
+            val isActive = index == activeIndex.toInt() % blockCount
+            Box(
+                Modifier
+                    .size(blockSize)
+                    .background(
+                        color = if (isActive) color else color.copy(alpha = 0.25f),
+                        shape = Square,
+                    ),
+            )
+        }
+    }
+}
 
 @Composable
 fun MuxlaneRoot(model: MuxlaneViewModel) {
@@ -142,12 +202,27 @@ fun MuxlaneRoot(model: MuxlaneViewModel) {
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
+    val currentTarget = when {
+        state.selectedAgent != null -> ScreenTarget.Terminal
+        state.pairing != null -> ScreenTarget.Workspace
+        state.addingMachine || state.pairings.isEmpty() -> ScreenTarget.Pair
+        else -> ScreenTarget.Machines
+    }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        when {
-            state.selectedAgent != null -> TerminalScreen(model)
-            state.pairing != null -> WorkspaceScreen(model)
-            state.addingMachine || state.pairings.isEmpty() -> PairScreen(model)
-            else -> MachineScreen(model)
+        AnimatedContent(
+            targetState = currentTarget,
+            transitionSpec = {
+                fadeIn(animationSpec = tween(180, easing = LinearOutSlowInEasing)) togetherWith
+                    fadeOut(animationSpec = tween(120, easing = FastOutLinearInEasing))
+            },
+            label = "screen_transition",
+        ) { screen ->
+            when (screen) {
+                ScreenTarget.Terminal -> TerminalScreen(model)
+                ScreenTarget.Workspace -> WorkspaceScreen(model)
+                ScreenTarget.Pair -> PairScreen(model)
+                ScreenTarget.Machines -> MachineScreen(model)
+            }
         }
     }
     state.confirmDelete?.let { DeleteConfirm(model, it) }
@@ -247,7 +322,7 @@ private fun PairScreen(model: MuxlaneViewModel) {
                 shape = Square,
                 modifier = Modifier.fillMaxWidth().height(52.dp).padding(top = 4.dp),
             ) {
-                if (state.connecting) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Color.White)
+                if (state.connecting) SquareStepIndicator(color = Color.White, blockSize = 6.dp)
                 else Text(stringResource(R.string.pair_secure))
             }
             Surface(
@@ -414,7 +489,7 @@ private fun WorkspaceTopBar(
         Column(Modifier.statusBarsPadding()) {
             Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back)) }
-                CompactHeader(title, detail, Modifier.weight(1f))
+                CockpitHeader(title = title, badge = detail, modifier = Modifier.weight(1f))
                 IconButton(onClick = onRefresh, enabled = !loading) { Icon(Icons.Outlined.Refresh, stringResource(R.string.refresh)) }
                 IconButton(onClick = onUnpair) { Icon(Icons.Outlined.LinkOff, stringResource(R.string.unpair)) }
                 Box(
@@ -425,7 +500,12 @@ private fun WorkspaceTopBar(
                 )
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
+            if (loading) LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().height(2.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.outlineVariant,
+                strokeCap = StrokeCap.Square,
+            )
         }
     }
 }
@@ -455,7 +535,7 @@ private fun AgentRow(agent: AgentInstance, onOpen: () -> Unit, onDelete: () -> U
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            StatusIcon(agent.status)
+            AgentStatusBadge(agent.status)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(agent.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -475,15 +555,53 @@ private fun AgentRow(agent: AgentInstance, onOpen: () -> Unit, onDelete: () -> U
 }
 
 @Composable
-private fun StatusIcon(status: AgentStatus) {
+private fun AgentStatusBadge(status: AgentStatus) {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val alpha by if (status == AgentStatus.WORKING) {
+        infiniteTransition.animateFloat(
+            initialValue = 0.4f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(700, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "working_pulse",
+        )
+    } else {
+        remember { androidx.compose.runtime.mutableFloatStateOf(1f) }
+    }
+
+    val (bg, fg, border) = when (status) {
+        AgentStatus.WORKING -> Triple(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f), MuxAccent, MuxAccent)
+        AgentStatus.BLOCKED -> Triple(Color(0xFFFEF3C7), MuxYellow, Color(0xFFF59E0B))
+        AgentStatus.DONE -> Triple(Color(0xFFE6F4EA), MuxGreen, Color(0xFF34A853))
+        AgentStatus.FAILED -> Triple(Color(0xFFFEE2E2), MuxRed, Color(0xFFEF4444))
+        else -> Triple(MaterialTheme.colorScheme.surfaceVariant, MuxFg2, MaterialTheme.colorScheme.outline)
+    }
+
     Box(
-        Modifier.size(40.dp).background(
-            if (status == AgentStatus.BLOCKED) Color(0xFFFFE5C0) else MaterialTheme.colorScheme.primaryContainer,
-            Square,
-        ),
+        Modifier
+            .size(40.dp)
+            .background(bg, Square)
+            .border(BorderStroke(1.dp, border.copy(alpha = alpha)), Square),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(Icons.Outlined.Terminal, null, tint = statusColor(status), modifier = Modifier.size(20.dp))
+        Icon(Icons.Outlined.Terminal, null, tint = fg, modifier = Modifier.size(20.dp))
+        if (status == AgentStatus.WORKING) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .align(Alignment.TopEnd)
+                    .background(MuxAccent.copy(alpha = alpha), Square),
+            )
+        } else if (status == AgentStatus.BLOCKED) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .align(Alignment.TopEnd)
+                    .background(MuxYellow, Square),
+            )
+        }
     }
 }
 
@@ -608,7 +726,7 @@ private fun TerminalTopBar(
         Column(Modifier.statusBarsPadding()) {
             Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back)) }
-                CompactHeader(title, detail, Modifier.weight(1f), detailColor = TerminalAccent)
+                CockpitHeader(title = title, badge = detail, modifier = Modifier.weight(1f), badgeColor = TerminalAccent)
                 IconButton(onClick = onClear) { Icon(Icons.Outlined.DeleteSweep, stringResource(R.string.terminal_clear)) }
                 IconButton(onClick = onToggleKeyboard) {
                     Icon(
@@ -695,6 +813,22 @@ private fun TerminalCanvas(
     val monoTypeface = remember { android.graphics.Typeface.create("monospace", android.graphics.Typeface.NORMAL) }
     val symbolTypeface = remember { android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL) }
     val currentOnScroll by rememberUpdatedState(onScroll)
+    val infiniteTransition = rememberInfiniteTransition(label = "cursor_blink")
+    val cursorVisible by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = keyframes {
+                durationMillis = 1000
+                1f at 0
+                1f at 500
+                0f at 501
+                0f at 1000
+            },
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "cursor_visible",
+    )
     Canvas(
         modifier
             .background(MuxCanvas)
@@ -746,11 +880,12 @@ private fun TerminalCanvas(
                 }
             }
         }
-        if (scrollRows == 0) {
+        if (scrollRows == 0 && cursorVisible > 0.5f) {
             val cursor = terminal.cursor
             val cursorRow = cursor.row - startRow
             if (cursorRow in 0 until drawnRows) {
-                drawRect(TerminalAccent, Offset(cursor.col * cellW, cursorRow * cellH), Size(2f * density.density, cellH))
+                drawRect(TerminalAccent.copy(alpha = 0.3f), Offset(cursor.col * cellW, cursorRow * cellH), Size(cellW, cellH))
+                drawRect(TerminalAccent, Offset(cursor.col * cellW, cursorRow * cellH), Size(2.5f * density.density, cellH))
             }
         }
     }
@@ -765,50 +900,171 @@ private fun TerminalVirtualKeyboard(
     onAlt: () -> Unit,
     send: (String) -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            TerminalKeycap("Esc", 1f, enabled = enabled) { send("\u001b") }
-            TerminalKeycap("Tab", 1f, enabled = enabled) { send("\t") }
-            TerminalKeycap("Ctrl", 1.15f, active = ctrl, enabled = enabled, onClick = onCtrl)
-            TerminalKeycap("Alt", 1f, active = alt, enabled = enabled, onClick = onAlt)
-            TerminalKeycap("Home", 1.15f, enabled = enabled) { send("\u001b[H") }
-            TerminalKeycap("End", 1f, enabled = enabled) { send("\u001b[F") }
-            TerminalKeycap("Del", 1f, enabled = enabled) { send("\u001b[3~") }
+    val haptic = LocalHapticFeedback.current
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TacticalKeycap(
+                label = "^C",
+                weight = 1.15f,
+                enabled = enabled,
+                isDanger = true,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    send("\u0003")
+                },
+            )
+            TacticalKeycap(
+                label = "Esc",
+                weight = 1f,
+                enabled = enabled,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    send("\u001b")
+                },
+            )
+            TacticalKeycap(
+                label = "Tab",
+                weight = 1f,
+                enabled = enabled,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    send("\t")
+                },
+            )
+            TacticalKeycap(
+                label = "Ctrl",
+                weight = 1.1f,
+                active = ctrl,
+                enabled = enabled,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onCtrl()
+                },
+            )
+            TacticalKeycap(
+                label = "Alt",
+                weight = 1f,
+                active = alt,
+                enabled = enabled,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onAlt()
+                },
+            )
+            TacticalKeycap(
+                label = "Del",
+                weight = 1f,
+                enabled = enabled,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    send("\u001b[3~")
+                },
+            )
+            TacticalKeycap(
+                label = "↵",
+                weight = 1.35f,
+                enabled = enabled,
+                isAccent = true,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    send("\r")
+                },
+            )
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            TerminalKeycap("PgUp", 1.2f, enabled = enabled) { send("\u001b[5~") }
-            TerminalKeycap("PgDn", 1.2f, enabled = enabled) { send("\u001b[6~") }
-            TerminalIconKey(Icons.AutoMirrored.Outlined.KeyboardArrowLeft, "左", 1f, enabled) { send("\u001b[D") }
-            TerminalIconKey(Icons.Outlined.KeyboardArrowDown, "下", 1f, enabled) { send("\u001b[B") }
-            TerminalIconKey(Icons.Outlined.KeyboardArrowUp, "上", 1f, enabled) { send("\u001b[A") }
-            TerminalIconKey(Icons.AutoMirrored.Outlined.KeyboardArrowRight, "右", 1f, enabled) { send("\u001b[C") }
-            TerminalIconKey(Icons.AutoMirrored.Outlined.KeyboardReturn, "回车", 1.35f, enabled) { send("\r") }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TacticalKeycap("Home", 1f, enabled = enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                send("\u001b[H")
+            }
+            TacticalKeycap("End", 1f, enabled = enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                send("\u001b[F")
+            }
+            TacticalKeycap("PgUp", 1.1f, enabled = enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                send("\u001b[5~")
+            }
+            TacticalKeycap("PgDn", 1.1f, enabled = enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                send("\u001b[6~")
+            }
+            TacticalIconKey(Icons.AutoMirrored.Outlined.KeyboardArrowLeft, "左", 1.15f, enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                send("\u001b[D")
+            }
+            TacticalIconKey(Icons.Outlined.KeyboardArrowDown, "下", 1.15f, enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                send("\u001b[B")
+            }
+            TacticalIconKey(Icons.Outlined.KeyboardArrowUp, "上", 1.15f, enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                send("\u001b[A")
+            }
+            TacticalIconKey(Icons.AutoMirrored.Outlined.KeyboardArrowRight, "右", 1.15f, enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                send("\u001b[C")
+            }
         }
     }
 }
 
 @Composable
-private fun RowScope.TerminalKeycap(
+private fun RowScope.TacticalKeycap(
     label: String,
     weight: Float,
     active: Boolean = false,
     enabled: Boolean,
+    isDanger: Boolean = false,
+    isAccent: Boolean = false,
     onClick: () -> Unit,
 ) {
+    val bg = when {
+        active -> TerminalAccent
+        isDanger -> Color(0xFFFDE8E8)
+        isAccent -> TerminalAccent.copy(alpha = 0.15f)
+        else -> TerminalKeycap
+    }
+    val border = when {
+        active -> TerminalAccent
+        isDanger -> MuxRed
+        isAccent -> TerminalAccent
+        else -> TerminalBorder
+    }
+    val fg = when {
+        active -> MuxOnAccent
+        isDanger -> MuxRed
+        isAccent -> TerminalAccent
+        !enabled -> TerminalMuted
+        else -> TerminalForeground
+    }
+
     Surface(
-        modifier = Modifier.weight(weight).height(48.dp).clickable(enabled = enabled, onClick = onClick),
+        modifier = Modifier
+            .weight(weight)
+            .height(44.dp)
+            .clickable(enabled = enabled, onClick = onClick),
         shape = Square,
-        color = if (active) TerminalAccent else TerminalKeycap,
-        border = BorderStroke(1.dp, if (active) TerminalAccent else TerminalBorder),
+        color = bg,
+        border = BorderStroke(1.dp, border),
     ) {
         Box(contentAlignment = Alignment.Center) {
-            Text(label, color = if (active) MuxOnAccent else if (enabled) TerminalForeground else TerminalMuted, fontFamily = MonoFamily, fontSize = 11.sp)
+            Text(
+                label,
+                color = fg,
+                fontFamily = MonoFamily,
+                fontWeight = if (active || isDanger || isAccent) FontWeight.Bold else FontWeight.Medium,
+                fontSize = if (label.length > 3) 10.sp else 12.sp,
+                letterSpacing = 0.02.em,
+            )
         }
     }
 }
 
 @Composable
-private fun RowScope.TerminalIconKey(
+private fun RowScope.TacticalIconKey(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     description: String,
     weight: Float,
@@ -816,25 +1072,58 @@ private fun RowScope.TerminalIconKey(
     onClick: () -> Unit,
 ) {
     Surface(
-        modifier = Modifier.weight(weight).height(48.dp).clickable(enabled = enabled, onClick = onClick),
+        modifier = Modifier
+            .weight(weight)
+            .height(44.dp)
+            .clickable(enabled = enabled, onClick = onClick),
         shape = Square,
         color = TerminalKeycap,
         border = BorderStroke(1.dp, TerminalBorder),
     ) {
         Box(contentAlignment = Alignment.Center) {
-            Icon(icon, description, tint = if (enabled) TerminalForeground else TerminalMuted, modifier = Modifier.size(20.dp))
+            Icon(
+                icon,
+                description,
+                tint = if (enabled) TerminalForeground else TerminalMuted,
+                modifier = Modifier.size(19.dp),
+            )
         }
     }
 }
 
 @Composable
-private fun CompactHeader(title: String, detail: String, modifier: Modifier = Modifier, detailColor: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
-    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (detail.isNotBlank()) {
-            Spacer(Modifier.width(8.dp))
-            Text(detail, style = MaterialTheme.typography.labelMedium, color = detailColor, fontFamily = MonoFamily, maxLines = 1, overflow = TextOverflow.Ellipsis)
+private fun CockpitHeader(
+    title: String,
+    badge: String,
+    modifier: Modifier = Modifier,
+    badgeColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.Center) {
+        if (badge.isNotBlank()) {
+            Text(
+                text = badge.uppercase(),
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 10.sp,
+                    lineHeight = 12.sp,
+                    letterSpacing = 0.06.em,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+                color = badgeColor,
+                fontFamily = MonoFamily,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontSize = 15.sp,
+                lineHeight = 18.sp,
+                fontWeight = FontWeight.Bold,
+            ),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -858,9 +1147,13 @@ private fun ConnectionErrorState(error: String?, retry: () -> Unit, unpair: () -
 @Composable
 private fun LoadingState(label: String) {
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
-        Spacer(Modifier.height(12.dp))
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SquareStepIndicator(color = MaterialTheme.colorScheme.primary, blockSize = 8.dp, gap = 4.dp, blockCount = 5)
+        Spacer(Modifier.height(16.dp))
+        Text(
+            label.uppercase(),
+            style = MaterialTheme.typography.bodySmall.copy(letterSpacing = 0.06.em, fontFamily = MonoFamily),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -877,15 +1170,51 @@ private fun EmptyState(icon: androidx.compose.ui.graphics.vector.ImageVector, ti
 @Composable
 private fun ErrorPanel(error: String?, modifier: Modifier = Modifier) {
     if (error.isNullOrBlank()) return
-    Surface(color = Color(0xFFFFDAD6), shape = Square, modifier = modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Text(error, color = Color(0xFF410002), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
+    Surface(
+        color = MuxErrorBg,
+        shape = Square,
+        border = BorderStroke(1.dp, MuxErrorLine),
+        modifier = modifier.fillMaxWidth().padding(vertical = 8.dp),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(6.dp).background(MuxErrorFg, Square))
+            Spacer(Modifier.width(10.dp))
+            Text(
+                error,
+                color = MuxErrorFg,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = MonoFamily),
+            )
+        }
     }
 }
 
 @Composable
 private fun StatusBanner(text: String, color: Color, modifier: Modifier = Modifier) {
-    Surface(color = color, contentColor = Color.White, shape = Square, modifier = modifier) {
-        Text(text, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp))
+    Surface(
+        color = color.copy(alpha = 0.12f),
+        contentColor = color,
+        shape = Square,
+        border = BorderStroke(1.dp, color),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(6.dp).background(color, Square))
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = text.uppercase(),
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontFamily = MonoFamily,
+                    letterSpacing = 0.05.em,
+                    fontWeight = FontWeight.Bold,
+                ),
+            )
+        }
     }
 }
 
