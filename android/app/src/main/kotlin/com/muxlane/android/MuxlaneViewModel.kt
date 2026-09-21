@@ -318,7 +318,14 @@ class MuxlaneSession(private val app: Application) {
                 start()
             }.onFailure {
                 client.close()
-                _state.value = _state.value.copy(connecting = false, connected = false, error = message(it))
+                _state.value = _state.value.copy(
+                    connecting = false,
+                    connected = false,
+                    error = when {
+                        message(it) == "尚未连接" -> "桌面尚未连接中继，请先在桌面设置确认中继状态为“已连接”"
+                        else -> message(it)
+                    },
+                )
             }
         }
     }
@@ -581,7 +588,9 @@ class MuxlaneSession(private val app: Application) {
 
     private fun rpc(block: suspend () -> Unit) {
         if (!_state.value.connected) {
-            _state.value = _state.value.copy(error = "连接尚未恢复")
+            _state.value = _state.value.copy(
+                error = if (_state.value.connecting) "正在连接机器，请稍候…" else "连接尚未恢复，请检查桌面中继状态",
+            )
             start()
             return
         }

@@ -639,7 +639,6 @@ private fun TerminalScreen(model: MuxlaneViewModel) {
     }
 
     Scaffold(
-        modifier = Modifier.imePadding(),
         containerColor = MuxCanvas,
         topBar = {
             TerminalTopBar(

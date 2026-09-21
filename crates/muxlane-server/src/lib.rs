@@ -559,9 +559,7 @@ impl MuxlaneServer {
 
     pub fn start_relay(self: &Arc<Self>, url: String, token: Option<String>) {
         let url = url.trim().trim_end_matches('/').to_string();
-        if !self.relay.mark_started() {
-            return;
-        }
+        let should_start = self.relay.mark_started();
         let server = Arc::clone(self);
         self.runtime.spawn(async move {
             server
@@ -569,8 +567,10 @@ impl MuxlaneServer {
                 .set_url((!url.is_empty()).then_some(url.clone()))
                 .await;
             server.relay().set_token(token).await;
-            if let Err(error) = crate::relay::run(server, url).await {
-                tracing::warn!(%error, "relay client stopped");
+            if should_start {
+                if let Err(error) = crate::relay::run(server).await {
+                    tracing::warn!(%error, "relay client stopped");
+                }
             }
         });
     }

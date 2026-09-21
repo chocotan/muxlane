@@ -32,6 +32,7 @@ struct PairState {
 pub struct RelayHandle {
     inner: Arc<Mutex<RelayInner>>,
     started: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
 }
 
 struct RelayInner {
@@ -57,6 +58,7 @@ impl RelayHandle {
                 code_tx: None,
             })),
             started: Arc::new(AtomicBool::new(false)),
+            connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -70,6 +72,14 @@ impl RelayHandle {
 
     pub async fn token(&self) -> Option<String> {
         self.inner.lock().await.token.clone()
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    fn set_connected(&self, connected: bool) {
+        self.connected.store(connected, Ordering::Relaxed);
     }
 
     pub async fn url(&self) -> Option<String> {
@@ -142,11 +152,7 @@ fn random_code() -> String {
     format!("{n:08}")
 }
 
-pub async fn run(server: Arc<MuxlaneServer>, url: String) -> anyhow::Result<()> {
-    let url = url.trim().trim_end_matches('/').to_string();
-    if !url.is_empty() {
-        server.relay().set_url(Some(url)).await;
-    }
+pub async fn run(server: Arc<MuxlaneServer>) -> anyhow::Result<()> {
     loop {
         let Some(base) = server.relay().url().await else {
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -159,6 +165,7 @@ pub async fn run(server: Arc<MuxlaneServer>, url: String) -> anyhow::Result<()> 
             Ok(()) => tracing::info!("relay host disconnected, reconnecting"),
             Err(error) => tracing::warn!("relay host failed: {error:?}"),
         }
+        server.relay().set_connected(false);
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
@@ -181,6 +188,7 @@ async fn connect_once(
         .await
         .with_context(|| format!("connect {ws_url}"))?;
     let (mut sink, mut stream) = ws.split();
+    server.relay().set_connected(true);
     let (code_tx, mut code_rx) = mpsc::unbounded_channel();
     server.relay().bind_code_sender(code_tx).await;
     tracing::info!(%ws_url, "relay host connected");
