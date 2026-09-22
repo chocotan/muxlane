@@ -696,7 +696,10 @@ private fun TerminalScreen(model: MuxlaneViewModel) {
                 enabled = state.connected,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, imeAction = ImeAction.None),
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
+                    // Keep the IME anchor out of the bottom edge. A bottom-aligned
+                    // hidden field makes Android pan/reserve a large input area above
+                    // the keyboard even though Muxlane only renders shortcut keys there.
+                    .align(Alignment.TopStart)
                     .size(1.dp)
                     .alpha(0.01f)
                     .focusRequester(focusRequester)
