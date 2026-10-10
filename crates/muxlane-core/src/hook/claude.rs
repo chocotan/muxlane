@@ -2,7 +2,10 @@ use super::write_file_if_changed;
 use crate::Result;
 use std::path::Path;
 
-/// 生成 claude settings.json 的 hooks 片段（Stop + Notification）
+const MANAGED_PREFIX: &str = "MUXLANE_MANAGED_HOOK=1 ";
+
+/// 生成 claude settings.json 的 hooks 片段。
+/// Stop 是回合结束；TaskCompleted 才是任务清单里的一项完成。两者都上报 done。
 /// hook 命令约定：node <scripts_dir>/report.mjs <event>
 pub fn claude_hooks_value(
     scripts_dir: &Path,
@@ -16,8 +19,8 @@ pub fn claude_hooks_value(
                 "type": "command",
                 // 身份/鉴权完全来自每个 PTY 注入的 env；全局 settings 不绑定具体 pane。
                 "command": format!(
-                    "node {} {}",
-                    scripts_dir.join("report.mjs").display(),
+                    "{MANAGED_PREFIX}node '{}' {}",
+                    scripts_dir.join("report.mjs").to_string_lossy().replace('\'', "'\\''"),
                     event,
                 ),
             }]
@@ -27,6 +30,7 @@ pub fn claude_hooks_value(
         "UserPromptSubmit": [mk("working")],
         "PreToolUse": [mk("working")],
         "Stop": [mk("done")],
+        "TaskCompleted": [mk("done")],
         "Notification": [mk("blocked")]
     })
 }
@@ -43,14 +47,31 @@ fn remove_where_command(value: &mut serde_json::Value, pred: &dyn Fn(&str) -> bo
         .get_mut("hooks")
         .and_then(|hooks| hooks.as_array_mut())
     {
+        let originally_empty = hooks.is_empty();
         hooks.retain_mut(|value| remove_where_command(value, pred));
-        return !hooks.is_empty();
+        return originally_empty || !hooks.is_empty();
     }
     true
 }
 
+fn is_muxlane_command(command: &str) -> bool {
+    if command.starts_with(MANAGED_PREFIX) {
+        return true;
+    }
+    ["/muxlane/hooks/report.mjs", "/lmux/hooks/report.mjs"]
+        .iter()
+        .any(|path| {
+            command.find(path).is_some_and(|index| {
+                command[index + path.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| next.is_whitespace() || matches!(next, '\'' | '"'))
+            })
+        })
+}
+
 fn remove_report_commands(value: &mut serde_json::Value) -> bool {
-    remove_where_command(value, &|command| command.contains("report.mjs"))
+    remove_where_command(value, &is_muxlane_command)
 }
 
 /// 向 JSON 文件的指定键合并 hooks 配置（claude settings.json）
@@ -63,13 +84,12 @@ pub fn inject_claude_hooks(settings_path: &Path, hooks_value: serde_json::Value)
     let mut merged = existing.clone();
     // 只合并 "hooks" 键；用户的其它配置原样保留
     if let (Some(obj), Some(new_hooks)) = (merged.as_object_mut(), hooks_value.as_object()) {
-        // 先清掉旧 lmux 时代的条目（改名的遗留路径），否则下面会误判重复、新 hook 写不进去
+        // Replace our managed hooks across all installation/data directories.
+        // Preserve other hooks, including unrelated scripts named report.mjs.
         if let Some(hook_obj) = obj.get_mut("hooks").and_then(|value| value.as_object_mut()) {
             for value in hook_obj.values_mut() {
                 if let Some(items) = value.as_array_mut() {
-                    items.retain_mut(|value| {
-                        remove_where_command(value, &|command| command.contains("/lmux/hooks/"))
-                    });
+                    items.retain_mut(remove_report_commands);
                 }
             }
         }
@@ -190,10 +210,50 @@ mod tests {
         assert!(stop[0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
-            .starts_with("node "));
+            .starts_with(MANAGED_PREFIX));
         assert!(!serde_json::to_string(&value)
             .unwrap()
             .contains("lmux/hooks"));
+    }
+
+    #[test]
+    fn changed_installation_path_replaces_only_muxlane_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let user =
+            serde_json::json!({"type":"command", "command":"node /user/hooks/report.mjs done"});
+        std::fs::write(&settings, serde_json::to_string(&serde_json::json!({
+            "theme":"dark", "hooks":{
+                "Stop":[{"matcher":"", "hooks":[user.clone(),
+                    {"type":"command", "command":"node /tmp/old/muxlane/hooks/report.mjs done"},
+                    {"type":"command", "command":"node /tmp/another/muxlane/hooks/report.mjs done"}]}]
+            }
+        })).unwrap()).unwrap();
+        for path in ["/tmp/first/muxlane/hooks", "/tmp/pi's work/muxlane/hooks"] {
+            let hooks = claude_hooks_value(Path::new(path), "", Path::new("/tmp/muxlane.sock"));
+            inject_claude_hooks(&settings, hooks.clone()).unwrap();
+            inject_claude_hooks(&settings, hooks).unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+            assert_eq!(value["theme"], "dark");
+            let stop = value["hooks"]["Stop"].as_array().unwrap();
+            assert_eq!(stop.len(), 2);
+            assert_eq!(stop[0]["hooks"], serde_json::json!([user.clone()]));
+            for event in ["UserPromptSubmit", "PreToolUse", "TaskCompleted", "Notification"] {
+                assert_eq!(value["hooks"][event].as_array().unwrap().len(), 1);
+            }
+            assert!(value["hooks"]["TaskCompleted"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with(" done"));
+        }
+        uninstall_claude_hooks(&settings).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            value["hooks"]["Stop"],
+            serde_json::json!([{"matcher":"", "hooks":[user]}])
+        );
     }
 
     #[test]
