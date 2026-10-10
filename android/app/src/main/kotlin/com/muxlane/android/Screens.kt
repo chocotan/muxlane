@@ -11,6 +11,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -249,6 +251,7 @@ private fun PairScreen(model: MuxlaneViewModel) {
             .statusBarsPadding()
             .navigationBarsPadding()
             .imePadding()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 20.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -266,7 +269,7 @@ private fun PairScreen(model: MuxlaneViewModel) {
             Spacer(Modifier.width(12.dp))
             Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge)
         }
-        Spacer(Modifier.weight(0.7f))
+        Spacer(Modifier.height(24.dp))
         Column(Modifier.fillMaxWidth().widthIn(max = 560.dp).align(Alignment.CenterHorizontally)) {
             Text(stringResource(R.string.connect_workspace), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 24.dp))
             OutlinedTextField(
@@ -314,7 +317,7 @@ private fun PairScreen(model: MuxlaneViewModel) {
                 else Text(stringResource(R.string.pair_secure))
             }
         }
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(24.dp))
     }
 }
 

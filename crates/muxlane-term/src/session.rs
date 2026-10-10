@@ -536,8 +536,9 @@ fn configure_tmux_server_inner(server: &str, config_path: &Path) -> bool {
         // 关着的话 tmux 会把图片数据整个吞掉，只剩占位符。
         ("allow-passthrough", "on"),
     ] {
+        // Older tmux lacks some key/graphics options; skip unknown options quietly.
         let ok = std::process::Command::new("tmux")
-            .args(["-L", server, "set-option", "-g", option, value])
+            .args(["-L", server, "set-option", "-gq", option, value])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -591,7 +592,7 @@ set-option -g xterm-keys on
 set-option -g history-limit 50000
 set-option -g window-size latest
 set-option -g mouse on
-set-option -g allow-passthrough on
+set-option -gq allow-passthrough on
 set-option -g set-clipboard external
 set-option -g copy-command \"if command -v pbcopy >/dev/null 2>&1; then pbcopy; elif command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; else cat >/dev/null; fi\"
 set-option -sg escape-time 10
@@ -689,6 +690,7 @@ mod tests {
     fn muxlane_tmux_config_enables_scrollback_without_status_bar() {
         let config = std::fs::read_to_string(tmux_config_path()).unwrap();
         assert!(config.contains("set-option -g mouse on"));
+        assert!(config.contains("set-option -gq allow-passthrough on"));
         assert!(config.contains("set-option -g set-titles off"));
         assert!(config.contains("set-option -g status off"));
         assert!(config.contains("set-option -g copy-command"));
