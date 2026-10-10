@@ -1044,7 +1044,17 @@ mod tests {
         let shell = local_preset_params(&presets[0], &project);
         assert_eq!(shell.program, None);
         assert_eq!(shell.agent_type, Some(AgentType::Shell));
-        for id in ["claude", "codex", "pi", "opencode"] {
+        let mut pi = presets
+            .iter()
+            .find(|preset| preset.id == "pi")
+            .unwrap()
+            .clone();
+        pi.program = "muxlane-test-preset".into();
+        assert_eq!(
+            local_preset_params(&pi, &project).program,
+            Some(pi.program.clone())
+        );
+        for id in ["claude", "codex", "opencode"] {
             let mut preset = presets
                 .iter()
                 .find(|preset| preset.id == id)

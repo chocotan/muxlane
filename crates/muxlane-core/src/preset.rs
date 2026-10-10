@@ -31,15 +31,18 @@ impl AgentPreset {
         which(&self.program).is_some()
     }
 
-    /// Resolve the executable visible from a project, including project-local bins.
+    /// Resolve Pi from PATH; other agents may use project-local bins.
     pub fn executable_in(&self, cwd: &Path) -> Option<PathBuf> {
         if self.agent_type == AgentType::Shell {
             return Some(PathBuf::from(&self.program));
         }
+        if self.agent_type == AgentType::Pi {
+            return which(&self.program);
+        }
         project_binary(cwd, &self.program).or_else(|| which(&self.program))
     }
 
-    /// Check project-local binary directories before falling back to PATH.
+    /// Check installation using the same resolution rules as launching.
     pub fn installed_in(&self, cwd: &Path) -> bool {
         self.executable_in(cwd).is_some()
     }
@@ -192,6 +195,40 @@ mod tests {
     #[test]
     fn shell_always_visible() {
         assert!(builtin_presets("/not/actually/installed")[0].installed());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pi_uses_path_and_ignores_project_local_bins() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let global = which("sh").unwrap();
+        let local_only = format!(
+            "muxlane-local-pi-{}",
+            temp.path().file_name().unwrap().to_string_lossy()
+        );
+        let mut preset = builtin_presets("/bin/sh")
+            .into_iter()
+            .find(|p| p.id == "pi")
+            .unwrap();
+        for dir in ["node_modules/.bin", ".venv/bin", ".local/bin"] {
+            let bin_dir = temp.path().join(dir);
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            for program in ["sh", local_only.as_str()] {
+                let executable = bin_dir.join(program);
+                std::fs::write(&executable, "").unwrap();
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        }
+
+        preset.program = "sh".into();
+        assert_eq!(preset.executable_in(temp.path()), Some(global));
+        assert!(preset.installed_in(temp.path()));
+        preset.program = local_only;
+        assert_eq!(preset.executable_in(temp.path()), None);
+        assert!(!preset.installed_in(temp.path()));
     }
 
     #[test]

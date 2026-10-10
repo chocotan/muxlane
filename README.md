@@ -23,6 +23,8 @@ Muxlane 使用 Rust + GPUI 构建，面向 Linux 与 macOS。Android 查看器�
 
 Muxlane 提供会话管理和终端界面。各 Agent CLI 及其登录配置需在实际运行会话的机器上准备。macOS 上从启动台打开应用时，会读取登录 Shell 的 PATH 并补充 nvm 下的 Node 工具目录，用于检测和启动通过 npm 安装的 Agent。
 
+Pi 预设使用 PATH 中的 Pi，不会自动选择项目 `node_modules/.bin` 等目录里的开发依赖版本。
+
 ## 标签页与自由分屏
 
 同一窗格可容纳多个标签页，也可以向右或向下分屏，按任务需要继续嵌套布局。
