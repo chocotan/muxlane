@@ -507,11 +507,7 @@ impl MuxlaneServer {
             .filter(|value| !value.is_empty())
         {
             if host_id != self.machine_id() {
-                return Ok(Response::err(
-                    req.id,
-                    "unauthorized",
-                    "unknown machine",
-                ));
+                return Ok(Response::err(req.id, "unauthorized", "unknown machine"));
             }
             format!("mobile:{device}")
         } else {
@@ -559,20 +555,17 @@ impl MuxlaneServer {
 
     pub fn start_relay(self: &Arc<Self>, url: String, token: Option<String>) {
         let url = url.trim().trim_end_matches('/').to_string();
+        self.relay
+            .configure((!url.is_empty()).then_some(url), token);
         let should_start = self.relay.mark_started();
-        let server = Arc::clone(self);
-        self.runtime.spawn(async move {
-            server
-                .relay()
-                .set_url((!url.is_empty()).then_some(url.clone()))
-                .await;
-            server.relay().set_token(token).await;
-            if should_start {
+        if should_start {
+            let server = Arc::clone(self);
+            self.runtime.spawn(async move {
                 if let Err(error) = crate::relay::run(server).await {
                     tracing::warn!(%error, "relay client stopped");
                 }
-            }
-        });
+            });
+        }
     }
 
     pub async fn begin_pair_offer(self: &Arc<Self>) -> anyhow::Result<PairOffer> {

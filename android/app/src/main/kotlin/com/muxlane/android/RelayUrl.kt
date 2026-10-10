@@ -1,10 +1,30 @@
 package com.muxlane.android
 
 import java.net.URI
+import java.net.URLDecoder
+
+fun parsePairLink(raw: String): Pair<String, String>? = runCatching {
+    val uri = URI(raw.trim())
+    if (uri.scheme != "muxlane" || uri.host != "pair") return@runCatching null
+    val query = uri.rawQuery.orEmpty().split('&').map { it.split('=', limit = 2) }
+    fun parameter(name: String): String = query
+        .firstOrNull { URLDecoder.decode(it[0], "UTF-8") == name }
+        ?.getOrNull(1)
+        ?.let { URLDecoder.decode(it, "UTF-8") }
+        .orEmpty()
+    parameter("relay") to parameter("id").ifEmpty { parameter("host") }
+}.getOrNull()
+
+fun parsePairQr(raw: String): Pair<String, String>? = runCatching {
+    val (relay, rawId) = parsePairLink(raw) ?: return@runCatching null
+    val id = rawId.trim()
+    require(id.length in 1..64 && id.all { it.isLetterOrDigit() || it in "-_." })
+    normalizeRelayUrl(relay) to id
+}.getOrNull()
 
 fun normalizeRelayUrl(raw: String): String {
     val value = raw.trim().trimEnd('/')
-    require(value.isNotEmpty()) { "请填写中继地址" }
+    require(value.isNotEmpty()) { "缺少中继地址" }
     val uri = runCatching { URI(value) }.getOrElse { error("中继地址格式不正确") }
     val scheme = uri.scheme?.lowercase()
     require(scheme == "ws" || scheme == "wss") { "中继地址必须以 wss:// 或 ws:// 开头" }

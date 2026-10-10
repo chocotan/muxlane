@@ -84,12 +84,12 @@ Muxlane 提供会话管理和终端界面。各 Agent CLI 及其登录配置需�
 1. 在 VPS 或本机启动中继：
 
 ```bash
-cargo run -p muxlane-relay -- 0.0.0.0:9843
+MUXLANE_RELAY_TOKEN=your-relay-secret cargo run -p muxlane-relay -- 0.0.0.0:9843
 ```
 
-公网请用 Caddy/nginx 终止 TLS，把 `wss://your.example/host/`、`/pair/`、`/phone/` 反代到该端口。局域网可直接用 `ws://192.168.x.x:9843`。
+公网请用 Caddy/nginx 终止 TLS，把 `wss://your.example/host/`、`/pair/`、`/phone/`、`/chan/` 反代到该端口。局域网可直接用 `ws://192.168.x.x:9843`。
 
-2. 桌面：设置 → 填写中继 URL 并保存。同一页会显示这台电脑的机器 ID。
+2. 桌面：设置 → 手机中继 → 填写中继 URL 和同一个中继密钥，开启中继并应用。连接成功后，同一页会显示机器 ID 和配对二维码。关闭开关会断开中继及手机会话，并保留地址和密钥。
 
    Headless：
 
@@ -97,7 +97,7 @@ cargo run -p muxlane-relay -- 0.0.0.0:9843
 muxlane --headless --relay ws://127.0.0.1:9843
 ```
 
-3. 手机 App（`android/`）填同一中继 URL 和机器 ID。之后用保存的 token 重连，不必再输入 ID。
+3. 手机 App（`android/`）点击「扫码配对」，授权相机并扫描电脑上的配对二维码，再点击「添加机器」。扫码在 App 内离线完成，无需安装其他扫码应用或 Google Play 服务；也可以手动填写或粘贴中继 URL 和机器 ID。之后用保存的 token 重连，不必再输入 ID。
 
 能做的事：看会话树、打开终端、输入、系统通知（Blocked/Done/Failed）、新建/删除会话。不做分屏、远端部署、在手机上跑 Agent。
 

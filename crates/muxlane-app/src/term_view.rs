@@ -94,7 +94,7 @@ fn decode_kitty_image_bytes(stored: &muxlane_term::StoredImage) -> anyhow::Resul
                 image::ImageReader::with_format(std::io::Cursor::new(&stored.bytes), image_format)
                     .decode()?;
             let mut rgba = decoded.into_rgba8();
-            for pixel in rgba.chunks_exact_mut(4) {
+            for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
             Ok(RenderImage::new(smallvec::SmallVec::from_elem(
@@ -1505,24 +1505,28 @@ impl Render for TermView {
                                     let resize_owner = focused;
                                     let executor = cx.background_executor().clone();
                                     let timer = executor.clone();
-                                    executor.spawn(async move {
-                                        timer.timer(PTY_RESIZE_DEBOUNCE).await;
-                                        let Some((cols, rows, px_w, px_h)) =
-                                            take_pending_resize(&pending, &scheduled)
-                                        else {
-                                            return;
-                                        };
-                                        if resize_owner {
-                                            if let Some(writer) = &writer {
-                                                // pixel_width/height 不填就只有 rows/cols，Kitty 图形协议的
-                                                // 客户端（如 kitten icat）会因为拿不到像素尺寸直接拒绝发图。
-                                                let _ = writer.resize(cols, rows, px_w, px_h);
+                                    executor
+                                        .spawn(async move {
+                                            timer.timer(PTY_RESIZE_DEBOUNCE).await;
+                                            let Some((cols, rows, px_w, px_h)) =
+                                                take_pending_resize(&pending, &scheduled)
+                                            else {
+                                                return;
+                                            };
+                                            if resize_owner {
+                                                if let Some(writer) = &writer {
+                                                    // pixel_width/height 不填就只有 rows/cols，Kitty 图形协议的
+                                                    // 客户端（如 kitten icat）会因为拿不到像素尺寸直接拒绝发图。
+                                                    let _ = writer.resize(cols, rows, px_w, px_h);
+                                                }
+                                                if let Some(remote) = &remote {
+                                                    let _ = remote.send(RemoteTermCommand::Resize(
+                                                        cols, rows,
+                                                    ));
+                                                }
                                             }
-                                            if let Some(remote) = &remote {
-                                                let _ = remote.send(RemoteTermCommand::Resize(cols, rows));
-                                            }
-                                        }
-                                    }).detach();
+                                        })
+                                        .detach();
                                 }
                                 refresh_snapshot_after_resize(&vt_resize, &mut snapshot);
                                 let term = term.clone();

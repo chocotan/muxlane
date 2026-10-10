@@ -73,6 +73,12 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "WebSocket URL of your self-hosted muxlane-relay. On LAN, use this machine's address.",
     ),
     ("settings.relay_url_apply", "应用", "Apply"),
+    ("settings.relay", "手机中继", "Phone relay"),
+    (
+        "settings.relay_help",
+        "关闭后保留地址，不再连接中继",
+        "Turn off to keep the address but stop connecting",
+    ),
     (
         "settings.relay_token",
         "中继密钥",
@@ -87,10 +93,16 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("settings.machine_id", "机器 ID", "Machine ID"),
     (
         "settings.machine_id_help",
-        "电脑连上中继后，把这个 ID 填到手机即可添加这台机器",
-        "After this computer joins the relay, enter this ID on the phone to add it.",
+        "电脑连上中继后，手机扫下方二维码，或手动填这个 ID",
+        "After this computer joins the relay, scan the code below or enter this ID on the phone.",
     ),
     ("settings.machine_id_copy", "复制", "Copy"),
+    ("settings.pair_qr", "手机扫码添加", "Scan to add"),
+    (
+        "settings.pair_qr_help",
+        "用手机 App 的扫码填入中继地址和机器 ID",
+        "Scan this in the phone app to fill the relay URL and machine ID",
+    ),
     ("dialog.pair_phone", "配对手机", "Pair Phone"),
     (
         "dialog.pair_phone_help",

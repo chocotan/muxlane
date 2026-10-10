@@ -228,8 +228,16 @@ async fn send_replay_chunks(
         .chunks(muxlane_core::protocol::TERM_REPLAY_CHUNK_SIZE)
         .enumerate()
     {
-        if !send_replay_chunk(sink, agent, sub_id, replay_id, chunk_index as u32, chunk, replay_gzip)
-            .await
+        if !send_replay_chunk(
+            sink,
+            agent,
+            sub_id,
+            replay_id,
+            chunk_index as u32,
+            chunk,
+            replay_gzip,
+        )
+        .await
         {
             return false;
         }
@@ -349,8 +357,7 @@ mod tests {
             let event: TermReplayChunkEvent = serde_json::from_value(message.params).unwrap();
             let payload = muxlane_core::protocol::b64_decode(&event.data_b64).unwrap();
             compressed += payload.len();
-            received
-                .extend(muxlane_core::protocol::gzip_decode(&payload));
+            received.extend(muxlane_core::protocol::gzip_decode(&payload));
         }
         assert_eq!(received, replay, "gzip replay round-trips byte-exact");
         assert!(

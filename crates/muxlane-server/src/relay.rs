@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
+use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 const PAIR_TTL: Duration = Duration::from_secs(5 * 60);
@@ -31,13 +32,18 @@ struct PairState {
 #[derive(Clone)]
 pub struct RelayHandle {
     inner: Arc<Mutex<RelayInner>>,
+    config: watch::Sender<RelayConfig>,
     started: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
 }
 
-struct RelayInner {
+#[derive(Clone, Default, PartialEq)]
+struct RelayConfig {
     url: Option<String>,
     token: Option<String>,
+}
+
+struct RelayInner {
     pair: Option<PairState>,
     code_tx: Option<mpsc::UnboundedSender<String>>,
 }
@@ -52,26 +58,53 @@ impl RelayHandle {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(RelayInner {
-                url: None,
-                token: None,
                 pair: None,
                 code_tx: None,
             })),
+            config: watch::channel(RelayConfig::default()).0,
             started: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn set_url(&self, url: Option<String>) {
-        self.inner.lock().await.url = url.filter(|value| !value.trim().is_empty());
+        let url = url.filter(|value| !value.trim().is_empty());
+        self.config.send_if_modified(|config| {
+            if config.url == url {
+                return false;
+            }
+            config.url = url;
+            true
+        });
     }
 
     pub async fn set_token(&self, token: Option<String>) {
-        self.inner.lock().await.token = token.filter(|value| !value.trim().is_empty());
+        let token = token.filter(|value| !value.trim().is_empty());
+        self.config.send_if_modified(|config| {
+            if config.token == token {
+                return false;
+            }
+            config.token = token;
+            true
+        });
+    }
+
+    pub(crate) fn configure(&self, url: Option<String>, token: Option<String>) {
+        let next = RelayConfig {
+            url: url.filter(|value| !value.trim().is_empty()),
+            token: token.filter(|value| !value.trim().is_empty()),
+        };
+        self.config.send_if_modified(|config| {
+            if *config == next {
+                return false;
+            }
+            *config = next;
+            true
+        });
     }
 
     pub async fn token(&self) -> Option<String> {
-        self.inner.lock().await.token.clone()
+        self.config.borrow().token.clone()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -83,7 +116,7 @@ impl RelayHandle {
     }
 
     pub async fn url(&self) -> Option<String> {
-        self.inner.lock().await.url.clone()
+        self.config.borrow().url.clone()
     }
 
     pub async fn bind_code_sender(&self, tx: mpsc::UnboundedSender<String>) {
@@ -91,8 +124,8 @@ impl RelayHandle {
     }
 
     pub async fn offer_code(&self) -> anyhow::Result<PairOffer> {
+        let relay_url = self.url().await.context("relay URL is not configured")?;
         let mut inner = self.inner.lock().await;
-        let relay_url = inner.url.clone().context("relay URL is not configured")?;
         let code = random_code();
         let expires_at = Instant::now() + PAIR_TTL;
         inner.pair = Some(PairState {
@@ -153,20 +186,36 @@ fn random_code() -> String {
 }
 
 pub async fn run(server: Arc<MuxlaneServer>) -> anyhow::Result<()> {
+    let mut config_rx = server.relay().config.subscribe();
     loop {
-        let Some(base) = server.relay().url().await else {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+        let config = config_rx.borrow_and_update().clone();
+        let Some(base) = config.url else {
+            config_rx.changed().await?;
             continue;
         };
         let host_id = server.machine_id();
         let ws_url = join_url(&base, &format!("host/{host_id}"));
-        let token = server.relay().token().await;
-        match connect_once(Arc::clone(&server), &ws_url, token).await {
-            Ok(()) => tracing::info!("relay host disconnected, reconnecting"),
-            Err(error) => tracing::warn!("relay host failed: {error:?}"),
-        }
+        let changed = tokio::select! {
+            biased;
+            result = config_rx.changed() => {
+                result?;
+                true
+            }
+            result = connect_once(Arc::clone(&server), &ws_url, config.token) => {
+                match result {
+                    Ok(()) => tracing::info!("relay host disconnected, reconnecting"),
+                    Err(error) => tracing::warn!("relay host failed: {error:?}"),
+                }
+                false
+            }
+        };
         server.relay().set_connected(false);
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if !changed {
+            tokio::select! {
+                result = config_rx.changed() => { result?; }
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+        }
     }
 }
 
@@ -199,8 +248,11 @@ async fn connect_once(
         tracing::debug!("relay pair code registered");
     }
 
+    // Dropping the host connection also cancels its active phone channels.
+    let mut channels = JoinSet::new();
     loop {
         tokio::select! {
+            _ = channels.join_next(), if !channels.is_empty() => {}
             code = code_rx.recv() => {
                 let Some(code) = code else { break };
                 sink.send(Message::Text(code.into())).await?;
@@ -213,7 +265,7 @@ async fn connect_once(
                         tracing::debug!(%chan, "relay phone channel dialing");
                         let base = base_url(ws_url);
                         let host = Arc::clone(&server);
-                        tokio::spawn(async move {
+                        channels.spawn(async move {
                             let token = host.relay().token().await;
                             if let Err(error) = run_channel(host, &base, &chan, token).await {
                                 tracing::debug!(%chan, %error, "relay channel closed");
@@ -267,19 +319,15 @@ fn websocket_request(
 ) -> anyhow::Result<tokio_tungstenite::tungstenite::http::Request<()>> {
     let mut request = url.into_client_request()?;
     if let Some(token) = token {
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {token}").parse()?,
-        );
+        request
+            .headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse()?);
     }
     Ok(request)
 }
 
 /// Validate a relay token without taking over the real host registration.
-pub async fn validate_relay_credentials(
-    relay_url: &str,
-    token: &str,
-) -> anyhow::Result<()> {
+pub async fn validate_relay_credentials(relay_url: &str, token: &str) -> anyhow::Result<()> {
     let probe = join_url(
         relay_url.trim().trim_end_matches('/'),
         "host/muxlane-auth-probe",
@@ -406,6 +454,13 @@ impl RelaySession {
         for waker in incoming.wakers.drain(..) {
             waker.wake();
         }
+    }
+}
+
+impl Drop for RelaySession {
+    fn drop(&mut self) {
+        // Wake the RPC reader on cancellation so it releases subscriptions too.
+        self.close();
     }
 }
 

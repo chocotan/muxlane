@@ -239,7 +239,12 @@ mod tests {
             let stop = value["hooks"]["Stop"].as_array().unwrap();
             assert_eq!(stop.len(), 2);
             assert_eq!(stop[0]["hooks"], serde_json::json!([user.clone()]));
-            for event in ["UserPromptSubmit", "PreToolUse", "TaskCompleted", "Notification"] {
+            for event in [
+                "UserPromptSubmit",
+                "PreToolUse",
+                "TaskCompleted",
+                "Notification",
+            ] {
                 assert_eq!(value["hooks"][event].as_array().unwrap().len(), 1);
             }
             assert!(value["hooks"]["TaskCompleted"][0]["hooks"][0]["command"]

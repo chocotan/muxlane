@@ -211,8 +211,10 @@ pub struct MuxlaneApp {
     pub(crate) project_input: Entity<TextField>,
     pub(crate) dialog_error: Option<String>,
     pub(crate) relay_url: Option<String>,
+    pub(crate) relay_enabled: bool,
     pub(crate) relay_token: Option<String>,
     pub(crate) relay_error: Option<String>,
+    pub(crate) relay_validation: Option<gpui::Task<()>>,
 
     // 菜单/确认框
     pub(crate) session_menu: Option<SessionMenu>,
@@ -622,11 +624,8 @@ impl MuxlaneApp {
         });
         let relay_token = muxlane_store::load_relay_token(&store_path).ok().flatten();
         let settings_relay_token_input = cx.new(|cx| {
-            let mut field = TextField::new_secure(
-                i18n::text(language, "placeholder.relay_token"),
-                window,
-                cx,
-            );
+            let mut field =
+                TextField::new_secure(i18n::text(language, "placeholder.relay_token"), window, cx);
             field.set_theme_mode(theme_mode, cx);
             if let Some(token) = relay_token.as_deref() {
                 field.set_text(token, cx);
@@ -698,8 +697,12 @@ impl MuxlaneApp {
             project_input,
             dialog_error: None,
             relay_url: persisted.relay_url.clone(),
+            relay_enabled: persisted
+                .relay_enabled
+                .unwrap_or(persisted.relay_url.is_some()),
             relay_token,
             relay_error: None,
+            relay_validation: None,
             quit_confirm_open: false,
             quit_confirmed: false,
             quit_cancel_focus: cx.focus_handle(),
@@ -808,8 +811,10 @@ impl MuxlaneApp {
                 app.open_agent(&id, window, cx);
             }
         }
-        if let Some(url) = app.relay_url.clone() {
-            app.server.start_relay(url, app.relay_token.clone());
+        if app.relay_enabled {
+            if let Some(url) = app.relay_url.clone() {
+                app.server.start_relay(url, app.relay_token.clone());
+            }
         }
         app.persist();
         app
@@ -898,6 +903,7 @@ impl MuxlaneApp {
         app.language = Some(self.language.id().into());
         app.default_terminal_preset = self.default_terminal_preset.clone();
         app.relay_url = self.relay_url.clone();
+        app.relay_enabled = Some(self.relay_enabled);
         self.persistence.submit_app(app);
     }
 

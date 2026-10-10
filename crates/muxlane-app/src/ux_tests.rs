@@ -524,9 +524,7 @@ fn relay_url_input_keeps_focus_and_accepts_typed_text() {
         // 点击输入框获得焦点（TextField 内部 on_click）。
         cx.update_window(window, |_, window, cx| {
             view.update(cx, |app, cx| {
-                app.settings_relay_input
-                    .focus_handle(cx)
-                    .focus(window, cx);
+                app.settings_relay_input.focus_handle(cx).focus(window, cx);
             });
         })
         .unwrap();
@@ -535,9 +533,7 @@ fn relay_url_input_keeps_focus_and_accepts_typed_text() {
         // 只在焦点完全离开 settings 页时才重新分配）。
         cx.update_window(window, |_, window, cx| {
             let focused_on_input = view.update(cx, |app, cx| {
-                app.settings_relay_input
-                    .focus_handle(cx)
-                    .is_focused(window)
+                app.settings_relay_input.focus_handle(cx).is_focused(window)
             });
             assert!(
                 focused_on_input,
@@ -549,11 +545,7 @@ fn relay_url_input_keeps_focus_and_accepts_typed_text() {
         cx.simulate_keystrokes(window, "w");
         draw(cx, window);
         cx.update(|cx| {
-            let text = view
-                .read(cx)
-                .settings_relay_input
-                .read(cx)
-                .text();
+            let text = view.read(cx).settings_relay_input.read(cx).text();
             assert!(
                 text.contains('w'),
                 "typed text did not reach relay input: {text:?}"
@@ -585,6 +577,120 @@ fn relay_url_is_committed_when_settings_close_and_restored_on_reopen() {
             });
         })
         .unwrap();
+    });
+}
+
+#[test]
+fn relay_toggle_restores_saved_settings_without_revalidation() {
+    with_app(|cx, window, view| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.relay_url = Some("ws://127.0.0.1:9843".into());
+                app.relay_token = Some("saved-token".into());
+                app.settings_relay_token_input.update(cx, |input, cx| {
+                    input.set_text("saved-token", cx);
+                });
+                app.settings_page = SettingsPage::General;
+                app.open_settings(window, cx);
+            });
+        })
+        .unwrap();
+        draw(cx, window);
+        for enabled in [true, false, true] {
+            activate_settings_control(cx, window, &view, "settings-relay-toggle");
+            cx.update(|cx| {
+                let app = view.read(cx);
+                assert_eq!(app.relay_enabled, enabled);
+                assert_eq!(app.relay_url.as_deref(), Some("ws://127.0.0.1:9843"));
+                assert!(app.relay_validation.is_none());
+                let configured = app
+                    .server
+                    .runtime_handle()
+                    .block_on(app.server.relay_handle().url());
+                assert_eq!(configured, enabled.then(|| "ws://127.0.0.1:9843".into()));
+            });
+        }
+    });
+}
+
+#[test]
+fn relay_validation_uses_tokio_and_cannot_update_after_disable() {
+    use std::time::{Duration, Instant};
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    drop(listener);
+    with_app_on_runtime(&runtime, |cx, window, view| {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.relay_enabled = true;
+                app.settings_page = SettingsPage::General;
+                app.open_settings(window, cx);
+                app.settings_relay_input
+                    .update(cx, |input, cx| input.set_text(&url, cx));
+                app.settings_relay_token_input
+                    .update(cx, |input, cx| input.set_text("token", cx));
+                app.close_settings(window, cx);
+            });
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            let failed = cx.update(|cx| {
+                view.read(cx)
+                    .relay_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("中继密钥验证失败"))
+            });
+            if failed {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "relay validation did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        cx.update(|cx| {
+            let error = view.read(cx).relay_error.as_ref().unwrap();
+            assert!(
+                !error.contains("panicked"),
+                "validation must run on Tokio: {error}"
+            );
+        });
+
+        // Keep a TCP handshake pending, then disable before its result arrives.
+        let pending = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let pending_url = format!("ws://{}", pending.local_addr().unwrap());
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |app, cx| {
+                app.open_settings(window, cx);
+                app.settings_relay_input
+                    .update(cx, |input, cx| input.set_text(&pending_url, cx));
+                app.close_settings(window, cx);
+                assert!(app.relay_validation.is_some());
+                app.open_settings(window, cx);
+            });
+        })
+        .unwrap();
+        draw(cx, window);
+        activate_settings_control(cx, window, &view, "settings-relay-toggle");
+        drop(pending);
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let app = view.read(cx);
+            assert!(!app.relay_enabled);
+            assert!(app.relay_validation.is_none());
+            assert!(app.relay_error.is_none());
+            assert!(runtime.block_on(app.server.relay_handle().url()).is_none());
+        });
     });
 }
 

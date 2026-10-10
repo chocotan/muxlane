@@ -265,6 +265,9 @@ pub struct PersistedApp {
     /// Self-hosted muxlane-relay WebSocket URL for mobile pairing.
     #[serde(default)]
     pub relay_url: Option<String>,
+    /// When false, keep the saved URL but do not connect. Missing means on if a URL exists.
+    #[serde(default)]
+    pub relay_enabled: Option<bool>,
 }
 
 impl PersistedApp {
@@ -354,6 +357,7 @@ impl PersistedApp {
         self.shortcut_bindings.migrate_legacy_defaults();
         self.project_order = previous.project_order.clone();
         self.relay_url = previous.relay_url.clone();
+        self.relay_enabled = previous.relay_enabled;
         self
     }
 }
@@ -389,6 +393,7 @@ impl Default for PersistedApp {
             shortcut_bindings: PersistedShortcutBindings::default(),
             project_order: Default::default(),
             relay_url: None,
+            relay_enabled: None,
         }
     }
 }
@@ -540,7 +545,7 @@ pub fn load_relay_token(path: &Path) -> anyhow::Result<Option<String>> {
 
 pub fn save_relay_token(path: &Path, token: Option<&str>) -> anyhow::Result<()> {
     let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(())
+        return Ok(());
     };
     let _guard = lock_state(path)?;
     let mut secrets = load_secrets(&secrets_path(path))?;
@@ -1261,6 +1266,19 @@ mod tests {
         let merged =
             PersistedApp::from_snapshot(&Snapshot::default()).with_ui_prefs_from(&restored);
         assert_eq!(merged.relay_url.as_deref(), Some("ws://127.0.0.1:9843"));
+        assert_eq!(merged.relay_enabled, None);
+    }
+
+    #[test]
+    fn relay_enabled_survives_ui_preference_merge() {
+        let previous = PersistedApp {
+            relay_url: Some("ws://127.0.0.1:9843".into()),
+            relay_enabled: Some(false),
+            ..Default::default()
+        };
+        let merged =
+            PersistedApp::from_snapshot(&Snapshot::default()).with_ui_prefs_from(&previous);
+        assert_eq!(merged.relay_enabled, Some(false));
     }
 
     #[test]

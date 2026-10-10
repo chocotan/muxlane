@@ -60,6 +60,7 @@ import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.KeyboardHide
 import androidx.compose.material.icons.outlined.LinkOff
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.animation.AnimatedContent
@@ -234,6 +235,12 @@ fun MuxlaneRoot(model: MuxlaneViewModel) {
 private fun PairScreen(model: MuxlaneViewModel) {
     val state by model.state.collectAsState()
     val context = LocalContext.current
+    val scan = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val text = result.data?.getStringExtra(QrScanActivity.EXTRA_TEXT)
+        if (!text.isNullOrBlank()) {
+            applyPairText(model, text)
+        }
+    }
     val canPair = state.relayUrl.isNotBlank() && state.hostId.isNotBlank() && !state.connecting
     BackHandler(state.pairings.isNotEmpty()) { model.cancelAddMachine() }
     Column(
@@ -257,51 +264,32 @@ private fun PairScreen(model: MuxlaneViewModel) {
                 }
             }
             Spacer(Modifier.width(12.dp))
-            Column {
-                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge)
-                Text(
-                    stringResource(R.string.app_subtitle),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontFamily = MonoFamily,
-                )
-            }
+            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge)
         }
         Spacer(Modifier.weight(0.7f))
         Column(Modifier.fillMaxWidth().widthIn(max = 560.dp).align(Alignment.CenterHorizontally)) {
-            Text(stringResource(R.string.connect_workspace), style = MaterialTheme.typography.headlineSmall)
-            Text(
-                stringResource(R.string.pair_body),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp, bottom = 22.dp),
-            )
+            Text(stringResource(R.string.connect_workspace), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 24.dp))
             OutlinedTextField(
                 value = state.relayUrl,
                 onValueChange = model::setRelay,
                 label = { Text(stringResource(R.string.relay_label)) },
-                placeholder = { Text(stringResource(R.string.relay_placeholder)) },
                 leadingIcon = { Icon(Icons.Outlined.Dns, null) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
                 singleLine = true,
                 shape = Square,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    stringResource(R.string.relay_tls_hint),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            Row(Modifier.fillMaxWidth()) {
+                TextButton(onClick = { scan.launch(QrScanActivity.intent(context)) }, shape = Square, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                    Icon(Icons.Outlined.QrCodeScanner, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(stringResource(R.string.scan_qr))
+                }
                 TextButton(onClick = {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
                     applyPairText(model, text)
-                }, shape = Square) { Text(stringResource(R.string.paste_pairing)) }
+                }, shape = Square, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text(stringResource(R.string.paste_pairing)) }
             }
             OutlinedTextField(
                 value = state.hostId,
@@ -324,21 +312,6 @@ private fun PairScreen(model: MuxlaneViewModel) {
             ) {
                 if (state.connecting) SquareStepIndicator(color = Color.White, blockSize = 6.dp)
                 else Text(stringResource(R.string.pair_secure))
-            }
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = Square,
-                modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-            ) {
-                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Security, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        stringResource(R.string.pair_security_note),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
             }
         }
         Spacer(Modifier.weight(1f))
@@ -436,7 +409,6 @@ private fun WorkspaceScreen(model: MuxlaneViewModel) {
                 snapshot.projects.isEmpty() -> EmptyState(
                     Icons.Outlined.Folder,
                     stringResource(R.string.no_projects),
-                    stringResource(R.string.connection_failed_body),
                 )
                 else -> {
                     val blocked = snapshot.agents.count { it.status == AgentStatus.BLOCKED }
@@ -1135,12 +1107,8 @@ private fun ConnectionErrorState(error: String?, retry: () -> Unit, unpair: () -
         Icon(Icons.Outlined.LinkOff, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp))
         Spacer(Modifier.height(14.dp))
         Text(stringResource(R.string.connection_failed_title), style = MaterialTheme.typography.titleLarge)
-        Text(
-            error ?: stringResource(R.string.connection_failed_body),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(top = 6.dp, bottom = 18.dp),
-        )
+        if (!error.isNullOrBlank()) Text(error, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+        Spacer(Modifier.height(18.dp))
         Button(onClick = retry, shape = Square) { Text(stringResource(R.string.retry)) }
         TextButton(onClick = unpair, shape = Square) { Text(stringResource(R.string.unpair)) }
     }
@@ -1160,12 +1128,11 @@ private fun LoadingState(label: String) {
 }
 
 @Composable
-private fun EmptyState(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, detail: String) {
+private fun EmptyState(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String) {
     Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp))
         Spacer(Modifier.height(14.dp))
         Text(title, style = MaterialTheme.typography.titleLarge)
-        Text(detail, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 6.dp))
     }
 }
 
@@ -1230,7 +1197,6 @@ private fun SpawnSheet(model: MuxlaneViewModel) {
         state.presets.forEach { preset ->
             ListItem(
                 headlineContent = { Text(preset.label) },
-                supportingContent = { Text(preset.program.ifBlank { "Shell" }, fontFamily = MonoFamily) },
                 leadingContent = { Icon(Icons.Outlined.Terminal, null, tint = MaterialTheme.colorScheme.primary) },
                 trailingContent = { Icon(Icons.Outlined.Add, stringResource(R.string.new_session)) },
                 modifier = Modifier.clickable { model.spawn(preset) },
@@ -1247,7 +1213,7 @@ private fun DeleteConfirm(model: MuxlaneViewModel, agentId: String) {
         onDismissRequest = model::cancelDelete,
         shape = Square,
         title = { Text(stringResource(R.string.delete_session_title)) },
-        text = { Text(stringResource(R.string.delete_session_body, title)) },
+        text = { Text(title) },
         confirmButton = {
             Button(
                 onClick = model::confirmDelete,
@@ -1267,7 +1233,7 @@ private fun RemoveMachineConfirm(model: MuxlaneViewModel, hostId: String) {
         onDismissRequest = model::cancelRemoveMachine,
         shape = Square,
         title = { Text(stringResource(R.string.remove_machine_title)) },
-        text = { Text(stringResource(R.string.remove_machine_body, name)) },
+        text = { Text(name) },
         confirmButton = {
             Button(
                 onClick = model::confirmRemoveMachine,
@@ -1323,10 +1289,9 @@ private fun statusColor(status: AgentStatus): Color = when (status) {
 
 private fun applyPairText(model: MuxlaneViewModel, text: String) {
     val value = text.trim()
-    val uri = runCatching { android.net.Uri.parse(value) }.getOrNull()
-    if (uri?.scheme == "muxlane" && uri.host == "pair") {
-        uri.getQueryParameter("relay")?.let(model::setRelay)
-        uri.getQueryParameter("id")?.orEmpty()?.ifEmpty { uri.getQueryParameter("host").orEmpty() }?.let(model::setHostId)
+    parsePairLink(value)?.let { (relay, hostId) ->
+        model.setRelay(relay)
+        model.setHostId(hostId)
         return
     }
     Regex("""wss?://\S+""").find(value)?.value?.trimEnd(',', ';')?.let(model::setRelay)

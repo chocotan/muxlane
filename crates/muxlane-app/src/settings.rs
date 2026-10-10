@@ -6,8 +6,8 @@ use crate::theme::{Theme, ThemeMode};
 use crate::ui_scale::px as ui_px;
 use crate::widgets::semantic_button;
 use gpui::{
-    deferred, div, prelude::*, relative, rgba, Context, Div, Focusable, MouseButton, ParentElement,
-    Stateful, Styled, Window,
+    deferred, div, img, prelude::*, relative, rgba, Context, Div, Focusable, MouseButton,
+    ParentElement, Stateful, Styled, Window,
 };
 
 pub(crate) const FONT_FAMILIES: &[&str] = &[
@@ -443,27 +443,7 @@ impl MuxlaneApp {
                 preset_select,
                 theme,
             ))
-            .child(setting_row(
-                "settings-row-relay-url",
-                i18n::text(self.language, "settings.relay_url"),
-                Some(i18n::text(self.language, "settings.relay_url_help")),
-                self.render_relay_url_field(cx),
-                theme,
-            ))
-            .child(setting_row(
-                "settings-row-relay-token",
-                i18n::text(self.language, "settings.relay_token"),
-                Some(i18n::text(self.language, "settings.relay_token_help")),
-                self.render_relay_token_field(cx),
-                theme,
-            ))
-            .child(setting_row(
-                "settings-row-machine-id",
-                i18n::text(self.language, "settings.machine_id"),
-                Some(i18n::text(self.language, "settings.machine_id_help")),
-                self.render_machine_id_field(cx),
-                theme,
-            ))
+            .child(self.render_relay_group(cx))
             .child(setting_row(
                 "settings-row-project-workspaces",
                 i18n::text(self.language, "settings.project_workspaces"),
@@ -527,6 +507,126 @@ impl MuxlaneApp {
             .into_any_element()
     }
 
+    fn render_relay_group(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = Theme::for_mode(self.theme_mode);
+        let enabled = self.relay_enabled;
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(
+                div()
+                    .px_6()
+                    .pt_4()
+                    .pb_1()
+                    .text_size(ui_px(15.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgba(theme.fg0))
+                    .child(i18n::text(self.language, "settings.relay")),
+            )
+            .child(setting_row(
+                "settings-row-relay-enabled",
+                i18n::text(self.language, "settings.relay"),
+                Some(i18n::text(self.language, "settings.relay_help")),
+                render_switch(
+                    "settings-relay-toggle",
+                    i18n::text(self.language, "settings.relay"),
+                    enabled,
+                    theme,
+                )
+                .track_focus(&self.settings_focus.control("settings-relay-toggle", cx))
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    this.set_relay_enabled(!this.relay_enabled, cx);
+                })),
+                theme,
+            ))
+            .child(setting_row(
+                "settings-row-relay-url",
+                i18n::text(self.language, "settings.relay_url"),
+                Some(i18n::text(self.language, "settings.relay_url_help")),
+                self.render_relay_url_field(cx),
+                theme,
+            ))
+            .child(setting_row(
+                "settings-row-relay-token",
+                i18n::text(self.language, "settings.relay_token"),
+                Some(i18n::text(self.language, "settings.relay_token_help")),
+                self.render_relay_token_field(cx),
+                theme,
+            ))
+            .child(setting_row(
+                "settings-row-machine-id",
+                i18n::text(self.language, "settings.machine_id"),
+                Some(i18n::text(self.language, "settings.machine_id_help")),
+                self.render_machine_id_field(cx),
+                theme,
+            ))
+            .when(enabled, |page| {
+                page.when_some(self.pair_qr(), |page, source| {
+                    page.child(
+                        div()
+                            .px_6()
+                            .py_3()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .border_b_1()
+                            .border_color(rgba(theme.line))
+                            .child(img(source).w(ui_px(132.)).h(ui_px(132.)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(ui_px(12.))
+                                            .text_color(rgba(theme.fg0))
+                                            .child(i18n::text(self.language, "settings.pair_qr")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(ui_px(10.))
+                                            .text_color(rgba(theme.fg2))
+                                            .child(i18n::text(
+                                                self.language,
+                                                "settings.pair_qr_help",
+                                            )),
+                                    ),
+                            ),
+                    )
+                })
+            })
+            .when_some(self.relay_error.clone(), |page, error| {
+                page.child(
+                    div()
+                        .px_6()
+                        .pb_3()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.red))
+                        .child(error),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn set_relay_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.relay_enabled == enabled {
+            return;
+        }
+        self.relay_enabled = enabled;
+        if enabled {
+            self.apply_relay_settings(cx);
+        } else {
+            self.relay_validation.take();
+            self.relay_error = None;
+            self.server
+                .start_relay(String::new(), self.relay_token.clone());
+            self.persist();
+        }
+        cx.notify();
+    }
+
     fn render_relay_url_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::for_mode(self.theme_mode);
         let apply_label = i18n::text(self.language, "settings.relay_url_apply");
@@ -581,8 +681,16 @@ impl MuxlaneApp {
             .child(
                 div()
                     .text_size(ui_px(11.))
-                    .text_color(rgba(if relay_connected { theme.green } else { theme.red }))
-                    .child(if relay_connected { "已连接" } else { "未连接" }),
+                    .text_color(rgba(if relay_connected {
+                        theme.green
+                    } else {
+                        theme.red
+                    }))
+                    .child(if relay_connected {
+                        "已连接"
+                    } else {
+                        "未连接"
+                    }),
             )
             .into_any_element()
     }
@@ -604,6 +712,7 @@ impl MuxlaneApp {
     }
 
     fn apply_relay_settings(&mut self, cx: &mut Context<Self>) {
+        self.relay_validation.take();
         let url = self
             .settings_relay_input
             .read(cx)
@@ -611,14 +720,29 @@ impl MuxlaneApp {
             .trim()
             .trim_end_matches('/')
             .to_string();
-        let token = self.settings_relay_token_input.read(cx).text().trim().to_string();
+        let token = self
+            .settings_relay_token_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_string();
         let relay_url = (!url.is_empty()).then_some(url.clone());
         // A secure field may not restore its text during an early settings close;
         // never erase a configured relay credential unless a new one is entered.
         let relay_token = (!token.is_empty())
             .then_some(token)
             .or_else(|| self.relay_token.clone());
-        if self.relay_url == relay_url && self.relay_token == relay_token {
+        if !self.relay_enabled {
+            self.relay_url = relay_url;
+            self.relay_error = None;
+            if relay_token.is_some() {
+                let _ = muxlane_store::save_relay_token(&self.store_path, relay_token.as_deref());
+            }
+            self.relay_token = relay_token;
+            self.server
+                .start_relay(String::new(), self.relay_token.clone());
+            self.persist();
+            cx.notify();
             return;
         }
         if relay_url.is_some() && relay_token.is_none() {
@@ -630,11 +754,9 @@ impl MuxlaneApp {
             self.relay_url = None;
             self.relay_token = relay_token;
             self.relay_error = None;
-            self.server.start_relay(String::new(), self.relay_token.clone());
-            let _ = muxlane_store::save_relay_token(
-                &self.store_path,
-                self.relay_token.as_deref(),
-            );
+            self.server
+                .start_relay(String::new(), self.relay_token.clone());
+            let _ = muxlane_store::save_relay_token(&self.store_path, self.relay_token.as_deref());
             self.persist();
             cx.notify();
             return;
@@ -642,21 +764,36 @@ impl MuxlaneApp {
 
         let relay_url = relay_url.expect("relay URL checked above");
         let relay_token = relay_token.expect("relay token checked above");
+        if self.relay_url.as_ref() == Some(&relay_url)
+            && self.relay_token.as_ref() == Some(&relay_token)
+        {
+            self.relay_error = None;
+            self.server.start_relay(relay_url, Some(relay_token));
+            self.persist();
+            cx.notify();
+            return;
+        }
         self.relay_error = Some("正在验证中继密钥…".into());
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = muxlane_server::validate_relay_credentials(&relay_url, &relay_token).await;
+        let validation = self.spawn_remote_operation({
+            let relay_url = relay_url.clone();
+            let relay_token = relay_token.clone();
+            async move {
+                muxlane_server::validate_relay_credentials(&relay_url, &relay_token).await
+            }
+        });
+        self.relay_validation = Some(cx.spawn(async move |this, cx| {
+            let result = validation.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(()) => {
                         this.relay_url = Some(relay_url.clone());
                         this.relay_token = Some(relay_token.clone());
                         this.relay_error = None;
-                        this.server.start_relay(relay_url, Some(relay_token.clone()));
-                        let _ = muxlane_store::save_relay_token(
-                            &this.store_path,
-                            Some(&relay_token),
-                        );
+                        this.server
+                            .start_relay(relay_url, Some(relay_token.clone()));
+                        let _ =
+                            muxlane_store::save_relay_token(&this.store_path, Some(&relay_token));
                         this.persist();
                     }
                     Err(error) => {
@@ -665,8 +802,15 @@ impl MuxlaneApp {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
+    }
+
+    fn pair_qr(&self) -> Option<gpui::ImageSource> {
+        let relay = self.relay_url.as_deref()?.trim();
+        if relay.is_empty() {
+            return None;
+        }
+        crate::qr::image(&crate::qr::pair_link(relay, &self.server.machine_id()))
     }
 
     fn render_machine_id_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -709,7 +853,9 @@ impl MuxlaneApp {
                     .hover(|style| style.bg(rgba(theme.bg2)))
                     .track_focus(&self.settings_focus.control("settings-machine-id-copy", cx))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(this.server.machine_id()));
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            this.server.machine_id(),
+                        ));
                     }))
                     .child(copy_label),
             )
@@ -1410,22 +1556,12 @@ impl MuxlaneApp {
                 theme,
             ))
             .child(setting_row(
-                "settings-row-relay-token",
-                i18n::text(self.language, "settings.relay_token"),
-                Some(i18n::text(self.language, "settings.relay_token_help")),
-                self.render_relay_token_field(cx),
+                "settings-row-language",
+                i18n::text(self.language, "settings.language"),
+                Some(i18n::text(self.language, "settings.language_help")),
+                language_select,
                 theme,
             ))
-            .when_some(self.relay_error.clone(), |page, error| {
-                page.child(
-                    div()
-                        .px_6()
-                        .pb_3()
-                        .text_size(ui_px(12.))
-                        .text_color(rgba(theme.red))
-                        .child(error),
-                )
-            })
             .into_any_element()
     }
 

@@ -19,7 +19,7 @@ class MainActivity : ComponentActivity() {
         if (android.os.Build.VERSION.SDK_INT >= 29) {
             window.isNavigationBarContrastEnforced = false
         }
-        handlePairLink(intent)
+        if (savedInstanceState == null) handlePairLink(intent)
         handleNotification(intent)
         setContent {
             MuxlaneTheme {
@@ -36,11 +36,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handlePairLink(intent: android.content.Intent?) {
-        val data = intent?.data ?: return
-        if (data.scheme != "muxlane" || data.host != "pair") return
+        val (relay, hostId) = parsePairLink(intent?.dataString ?: return) ?: return
         model.beginAddMachine(
-            relayUrl = data.getQueryParameter("relay").orEmpty(),
-            hostId = data.getQueryParameter("id").orEmpty().ifEmpty { data.getQueryParameter("host").orEmpty() },
+            relayUrl = relay,
+            hostId = hostId,
         )
     }
 

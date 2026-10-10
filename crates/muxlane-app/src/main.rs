@@ -10,6 +10,9 @@ mod icons;
 mod menus;
 mod notifications;
 mod persistence;
+mod qr;
+#[allow(dead_code)]
+mod qrcodegen;
 mod remotes;
 mod sessions;
 mod settings;
@@ -142,11 +145,20 @@ fn main() {
 
     bootstrap::install(&dir);
 
+    let relay_enabled = relay_flag.is_some()
+        || persisted
+            .relay_enabled
+            .unwrap_or(relay_flag.is_some() || persisted.relay_url.is_some());
+    if relay_flag.is_some() {
+        persisted.relay_enabled = Some(true);
+    }
     let relay_url = relay_flag.or(persisted.relay_url.clone());
     let relay_token = muxlane_store::load_relay_token(&store_path).ok().flatten();
     if let Some(url) = relay_url.clone() {
         persisted.relay_url = Some(url.clone());
-        server.start_relay(url, relay_token);
+        if relay_enabled {
+            server.start_relay(url, relay_token);
+        }
     }
 
     if headless {

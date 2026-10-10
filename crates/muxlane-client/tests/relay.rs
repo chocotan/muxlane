@@ -82,12 +82,10 @@ async fn desktop_pairs_and_connects_over_relay() {
         },
     );
 
-    // 桌面「配对」：拿码 → pair_relay 得 token + machine
-    // host WS 注册码到 relay 是异步的，先等它就绪
-    let offer = server.begin_pair_offer().await.unwrap();
+    // QR 和桌面配对都使用稳定机器 ID；host 注册到 relay 是异步的。
     let mut paired = None;
     for _ in 0..20 {
-        match muxlane_client::pair_relay(&relay_url, &offer.code, "desktop-test").await {
+        match muxlane_client::pair_relay(&relay_url, "m_relay_peer", "desktop-test").await {
             Ok(pair) => {
                 paired = Some(pair);
                 break;
@@ -95,7 +93,7 @@ async fn desktop_pairs_and_connects_over_relay() {
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
         }
     }
-    let (token, machine) = paired.expect("pair_relay should succeed once host registered the code");
+    let (token, machine) = paired.expect("pair_relay should succeed once the host is connected");
     assert_eq!(machine.machine_id, "m_relay_peer");
     assert_eq!(machine.name, "relay-box");
 
@@ -158,10 +156,65 @@ async fn desktop_pairs_and_connects_over_relay() {
         .iter()
         .any(|feature| feature == muxlane_core::protocol::features::PAIR));
 
-    // 错误码被拒
+    // 错误机器 ID 被拒
     assert!(
         muxlane_client::pair_relay(&relay_url, "00000000", "desktop-test")
             .await
             .is_err()
     );
+
+    // Reapplying unchanged settings must keep an authenticated channel alive.
+    server.start_relay(relay_url.clone(), None);
+    assert!(conn
+        .call(
+            muxlane_core::protocol::methods::SYSTEM_HELLO,
+            serde_json::json!({})
+        )
+        .await
+        .is_ok());
+
+    // Disabling must close both the host and existing phone channels.
+    server.start_relay(String::new(), None);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while server.relay_handle().is_connected() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("relay must stop promptly");
+    let closed = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        conn.call(
+            muxlane_core::protocol::methods::SYSTEM_HELLO,
+            serde_json::json!({}),
+        ),
+    )
+    .await
+    .expect("existing phone channel must close");
+    assert!(closed.is_err());
+    assert!(
+        muxlane_client::pair_relay(&relay_url, "m_relay_peer", "disabled-test")
+            .await
+            .is_err()
+    );
+
+    // The saved URL can be enabled again, and the original token still works.
+    server.start_relay(relay_url.clone(), None);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !server.relay_handle().is_connected() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("relay must restart promptly");
+    let mut reconnected = muxlane_client::connect_relay(&relay_url, &machine.machine_id, &token)
+        .await
+        .unwrap();
+    assert!(reconnected
+        .call(
+            muxlane_core::protocol::methods::SYSTEM_HELLO,
+            serde_json::json!({})
+        )
+        .await
+        .is_ok());
 }

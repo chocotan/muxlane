@@ -166,16 +166,14 @@ impl Relay {
                     .map(str::to_owned);
                 let path_kind = parse_path(request.uri().path()).map(|path| path.kind);
                 if matches!(path_kind, Some(PathKind::Host | PathKind::Chan))
-                    && expected_token.as_deref().is_some_and(|expected| {
-                        auth.as_deref() != Some(expected)
-                    })
+                    && expected_token
+                        .as_deref()
+                        .is_some_and(|expected| auth.as_deref() != Some(expected))
                 {
-                    return Err(
-                        tokio_tungstenite::tungstenite::http::Response::builder()
-                            .status(401)
-                            .body(Some("unauthorized".into()))
-                            .expect("valid relay auth response"),
-                    );
+                    return Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                        .status(401)
+                        .body(Some("unauthorized".into()))
+                        .expect("valid relay auth response"));
                 }
                 Ok(response)
             },
@@ -184,9 +182,10 @@ impl Relay {
         let path = uri.unwrap_or_else(|| "/".into());
         let parsed = parse_path(&path).ok_or_else(|| anyhow::anyhow!("unknown path {path}"))?;
         if matches!(parsed.kind, PathKind::Host | PathKind::Chan)
-            && self.auth_token.as_deref().is_some_and(|expected| {
-                auth.as_deref() != Some(expected)
-            })
+            && self
+                .auth_token
+                .as_deref()
+                .is_some_and(|expected| auth.as_deref() != Some(expected))
         {
             anyhow::bail!("relay authentication failed");
         }

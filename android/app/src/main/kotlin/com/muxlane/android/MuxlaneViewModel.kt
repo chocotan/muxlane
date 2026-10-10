@@ -285,7 +285,7 @@ class MuxlaneSession(private val app: Application) {
                 return
             }
         if (hostId.isEmpty()) {
-            _state.value = _state.value.copy(error = "请填写电脑上的机器 ID")
+            _state.value = _state.value.copy(error = "缺少机器 ID")
             return
         }
         scope.launch {
@@ -322,7 +322,7 @@ class MuxlaneSession(private val app: Application) {
                     connecting = false,
                     connected = false,
                     error = when {
-                        message(it) == "尚未连接" -> "桌面尚未连接中继，请先在桌面设置确认中继状态为“已连接”"
+                        message(it) == "尚未连接" -> "中继未连接"
                         else -> message(it)
                     },
                 )
@@ -589,7 +589,7 @@ class MuxlaneSession(private val app: Application) {
     private fun rpc(block: suspend () -> Unit) {
         if (!_state.value.connected) {
             _state.value = _state.value.copy(
-                error = if (_state.value.connecting) "正在连接机器，请稍候…" else "连接尚未恢复，请检查桌面中继状态",
+                error = if (_state.value.connecting) "正在连接…" else "连接未恢复",
             )
             start()
             return
