@@ -587,44 +587,90 @@ impl VTerm {
         Some(line)
     }
 
-    pub fn url_at(&self, visual: usize, col: usize) -> Option<String> {
-        let text = self.line_text(visual)?;
-        let mut start_idx = 0;
-        for token in text.split_inclusive(|c: char| {
-            c.is_whitespace()
-                || c == '"'
-                || c == '\''
-                || c == '<'
-                || c == '>'
-                || c == '('
-                || c == ')'
-                || c == '['
-                || c == ']'
-        }) {
-            let token_len = token.chars().count();
-            let end_idx = start_idx + token_len;
-            let trimmed = token.trim_matches(|c: char| {
-                c.is_whitespace()
-                    || c == '"'
-                    || c == '\''
-                    || c == '<'
-                    || c == '>'
-                    || c == '('
-                    || c == ')'
-                    || c == '['
-                    || c == ']'
-                    || c == ','
-                    || c == ';'
-            });
-            if col >= start_idx
-                && col < end_idx
-                && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
-            {
-                return Some(trimmed.to_string());
-            }
-            start_idx = end_idx;
+    /// OSC8 targets or the token under a visual cell, including soft-wrapped lines.
+    /// The caller validates tokens as web URLs or existing directories.
+    pub fn link_at(&self, visual: usize, col: usize) -> Option<String> {
+        let guard = self.lock_inner()?;
+        let grid = guard.term.grid();
+        if visual >= grid.screen_lines() || col >= grid.columns() {
+            return None;
         }
-        None
+        let line = visual as i32 - grid.display_offset() as i32;
+        let point = Point::new(Line(line), Column(col));
+        if let Some(link) = grid[point].hyperlink() {
+            return Some(link.uri().to_string());
+        }
+
+        let mut first = line;
+        let mut last = line;
+        let wraps = |line| {
+            grid[Point::new(Line(line), Column(grid.columns() - 1))]
+                .flags
+                .contains(Flags::WRAPLINE)
+        };
+        while first > -(grid.history_size() as i32) && wraps(first - 1) {
+            first -= 1;
+        }
+        while last < grid.screen_lines() as i32 - 1 && wraps(last) {
+            last += 1;
+        }
+        let mut text = String::new();
+        let mut clicked = 0;
+        for row in first..=last {
+            for column in 0..grid.columns() {
+                let cell = &grid[Point::new(Line(row), Column(column))];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                if row == line
+                    && (column == col
+                        || (cell.flags.contains(Flags::WIDE_CHAR) && column + 1 == col))
+                {
+                    clicked = text.len();
+                }
+                text.push(cell.c);
+                if let Some(zero_width) = cell.zerowidth() {
+                    text.extend(zero_width);
+                }
+            }
+        }
+        // Quoted paths can contain spaces.
+        for quote in ['`', '"', '\''] {
+            let mut boundaries = text.match_indices(quote);
+            while let (Some((start, _)), Some((end, _))) = (boundaries.next(), boundaries.next()) {
+                if clicked > start && clicked < end {
+                    return Some(text[start + 1..end].to_string());
+                }
+            }
+        }
+        let boundary = |c: char| c.is_whitespace() || "\"'`<>".contains(c);
+        let start = text[..clicked].rfind(boundary).map_or(0, |index| {
+            index + text[index..].chars().next().unwrap().len_utf8()
+        });
+        let end = text[clicked..]
+            .find(boundary)
+            .map_or(text.len(), |index| clicked + index);
+        let token = text[start..end].trim_start_matches('(');
+        let ipv6 = token.starts_with("http://[") || token.starts_with("https://[");
+        let separator = |c: char| boundary(c) || (!ipv6 && "[]".contains(c));
+        if text[clicked..].starts_with(separator) {
+            return None;
+        }
+        let start = text[..clicked].rfind(separator).map_or(0, |index| {
+            index + text[index..].chars().next().unwrap().len_utf8()
+        });
+        let end = text[clicked..]
+            .find(separator)
+            .map_or(text.len(), |index| clicked + index);
+        let token = text[start..end].trim_start_matches('(');
+        let mut token = token.trim_end_matches([',', ';', '。', '，', '；']);
+        if token.starts_with("http://") || token.starts_with("https://") {
+            token = token.trim_end_matches('.');
+        }
+        while token.ends_with(')') && token.matches(')').count() > token.matches('(').count() {
+            token = &token[..token.len() - 1];
+        }
+        (!token.is_empty()).then(|| token.to_string())
     }
 }
 
@@ -907,6 +953,67 @@ fn indexed_color(i: u8) -> u32 {
             let v = 8 + (i - 232) * 10;
             rgba_u32(v, v, v)
         }
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn links_use_cell_positions_and_osc8_targets() {
+        let term = VTerm::new(100, 4);
+        term.feed("中文 (https://example.com/wiki/a_(b)). 结束".as_bytes());
+        for col in [6, 10, 33] {
+            assert_eq!(
+                term.link_at(0, col).as_deref(),
+                Some("https://example.com/wiki/a_(b)")
+            );
+        }
+        assert_eq!(term.link_at(0, 4), None);
+        term.feed(b"\r\n\x1b]8;;https://example.com/docs\x1b\\Read docs\x1b]8;;\x1b\\");
+        assert_eq!(
+            term.link_at(1, 5).as_deref(),
+            Some("https://example.com/docs")
+        );
+        term.feed("\r\n`/tmp/项目 folder`".as_bytes());
+        for col in [7, 8, 13] {
+            assert_eq!(term.link_at(2, col).as_deref(), Some("/tmp/项目 folder"));
+        }
+        assert_eq!(term.link_at(4, 0), None);
+        assert_eq!(term.link_at(0, 100), None);
+    }
+
+    #[test]
+    fn links_follow_soft_wraps_and_scrolled_viewport() {
+        let term = VTerm::new(16, 3);
+        term.feed(b"https://example.com/long/path");
+        assert_eq!(
+            term.link_at(1, 5).as_deref(),
+            Some("https://example.com/long/path")
+        );
+        term.feed(b"\r\nother\r\nnewest\r\nlast");
+        assert!(term.scroll_display(2));
+        assert_eq!(
+            term.link_at(0, 5).as_deref(),
+            Some("https://example.com/long/path")
+        );
+    }
+
+    #[test]
+    fn links_preserve_parent_directories_and_ipv6_authorities() {
+        let term = VTerm::new(100, 4);
+        term.feed(b"./child/.. . ..\r\nhttp://[::1]:8080/docs\r\n[/tmp/child]");
+        assert_eq!(term.link_at(0, 4).as_deref(), Some("./child/.."));
+        assert_eq!(term.link_at(0, 11).as_deref(), Some("."));
+        assert_eq!(term.link_at(0, 13).as_deref(), Some(".."));
+        for col in [0, 7, 10, 18] {
+            assert_eq!(
+                term.link_at(1, col).as_deref(),
+                Some("http://[::1]:8080/docs")
+            );
+        }
+        assert_eq!(term.link_at(2, 5).as_deref(), Some("/tmp/child"));
     }
 }
 

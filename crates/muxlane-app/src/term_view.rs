@@ -12,6 +12,7 @@ use muxlane_core::model::AgentId;
 use muxlane_term::{PtySession, RenderSnapshot, VTerm};
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -30,6 +31,51 @@ const SCROLLBAR_WIDTH: f32 = 10.0;
 const SCROLLBAR_RIGHT: f32 = 2.0;
 const MIN_SCROLLBAR_THUMB: f32 = 24.0;
 const MAX_OSC52_CLIPBOARD_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LinkTarget {
+    Web(String),
+    Directory(PathBuf),
+}
+
+fn resolve_link(text: &str, directory: Option<&Path>, home: Option<&Path>) -> Option<LinkTarget> {
+    if text.chars().any(char::is_control) {
+        return None;
+    }
+    if text.starts_with("http://") || text.starts_with("https://") {
+        let url = gpui::http_client::Url::parse(text).ok()?;
+        return url
+            .host_str()
+            .is_some()
+            .then(|| LinkTarget::Web(text.into()));
+    }
+    // A remote path must not accidentally open a matching path on the local host.
+    let directory = directory?;
+    let path = if text.starts_with("file://") {
+        gpui::http_client::Url::parse(text)
+            .ok()?
+            .to_file_path()
+            .ok()?
+    } else if text == "~" {
+        home?.to_path_buf()
+    } else if let Some(relative) = text.strip_prefix("~/") {
+        home?.join(relative)
+    } else {
+        directory.join(text)
+    };
+    if path.is_dir() {
+        return Some(LinkTarget::Directory(path));
+    }
+    // Strip a prose full stop only after checking the actual directory name.
+    let filename = path.file_name()?.to_str()?.trim_end_matches(['.', ')']);
+    let path = path.with_file_name(filename);
+    path.is_dir().then_some(LinkTarget::Directory(path))
+}
+
+fn link_click_moved(start: Point<Pixels>, end: Point<Pixels>) -> bool {
+    f32::from(start.x - end.x).abs() > 4.0 || f32::from(start.y - end.y).abs() > 4.0
+}
+
 fn inner_extent(outer_width: f32, outer_height: f32, padding_x: f32, padding_y: f32) -> (f32, f32) {
     (
         (outer_width - padding_x * 2.0).max(1.0),
@@ -514,6 +560,8 @@ pub struct TermView {
     scrollbar_drag: Option<f32>,
     selecting: bool,
     forwarding_mouse: bool,
+    pending_link: Option<(Point<Pixels>, LinkTarget)>,
+    link_hovered: bool,
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) bound_window: Option<gpui::WindowId>,
     focus_subscriptions: Option<(Subscription, Subscription, Subscription)>,
@@ -780,6 +828,8 @@ impl TermView {
             scrollbar_drag: None,
             selecting: false,
             forwarding_mouse: false,
+            pending_link: None,
+            link_hovered: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             bound_window: None,
             focus_subscriptions: None,
@@ -835,6 +885,8 @@ impl TermView {
             scrollbar_drag: None,
             selecting: false,
             forwarding_mouse: false,
+            pending_link: None,
+            link_hovered: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
             bound_window: None,
             focus_subscriptions: None,
@@ -894,6 +946,24 @@ impl TermView {
             .or_else(|| self.remote_input.clone().map(InputSink::Remote))
     }
 
+    fn link_target(&self, position: Point<Pixels>) -> Option<LinkTarget> {
+        let bounds = self.last_bounds.lock().ok().and_then(|bounds| *bounds)?;
+        if !bounds.contains(&position) {
+            return None;
+        }
+        let (line, col, _) = self.grid_point(position)?;
+        let (_, offset) = self.vterm.scroll_metrics();
+        let text = self.vterm.link_at((line + offset as i32) as usize, col)?;
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        resolve_link(
+            &text,
+            self.writer
+                .as_ref()
+                .map(|writer| writer.initial_directory()),
+            home.as_deref(),
+        )
+    }
+
     fn grid_point(&self, position: Point<Pixels>) -> Option<(i32, usize, bool)> {
         let bounds = self.last_bounds.lock().ok().and_then(|bounds| *bounds)?;
         let (cell_w, cell_h) = self
@@ -918,6 +988,20 @@ impl TermView {
     }
 
     fn finish_mouse(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
+        if let Some((start, target)) = self.pending_link.take() {
+            if !link_click_moved(start, event.position) {
+                self.selecting = false;
+                self.pending_selection = None;
+                self.vterm.stop_selection();
+                match target {
+                    LinkTarget::Web(url) => cx.open_url(&url),
+                    LinkTarget::Directory(path) => cx.open_with_system(&path),
+                }
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+        }
         let mut handled = false;
         if self.forwarding_mouse {
             if let (Some(sink), Some((line, col, _))) =
@@ -1305,6 +1389,8 @@ impl Render for TermView {
             self.focus_subscriptions = None;
             self.selecting = false;
             self.forwarding_mouse = false;
+            self.pending_link = None;
+            self.link_hovered = false;
             self.scrollbar_drag = None;
             self.pending_selection = None;
             if let Ok(mut bounds) = self.last_bounds.lock() {
@@ -1852,6 +1938,7 @@ impl Render for TermView {
                     .id("term-selection-layer")
                     .absolute()
                     .size_full()
+                    .when(self.link_hovered, |layer| layer.cursor_pointer())
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -1860,13 +1947,16 @@ impl Render for TermView {
                             let Some((line, col, right)) = this.grid_point(event.position) else {
                                 return;
                             };
-                            if event.modifiers.control || event.modifiers.platform {
-                                if let Some(url) = this.vterm.url_at(line.max(0) as usize, col) {
-                                    #[cfg(target_os = "macos")]
-                                    let _ = std::process::Command::new("open").arg(&url).spawn();
-                                    #[cfg(not(target_os = "macos"))]
-                                    let _ =
-                                        std::process::Command::new("xdg-open").arg(&url).spawn();
+                            this.pending_link = None;
+                            if event.click_count == 1
+                                && !event.modifiers.shift
+                                && !event.modifiers.alt
+                            {
+                                if let Some(target) = this.link_target(event.position) {
+                                    this.pending_link = Some((event.position, target));
+                                    this.vterm.begin_selection(line, col, right);
+                                    this.selecting = true;
+                                    this.forwarding_mouse = false;
                                     cx.stop_propagation();
                                     return;
                                 }
@@ -1921,6 +2011,13 @@ impl Render for TermView {
                     }))
                     .on_mouse_move(
                         cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                            if this
+                                .pending_link
+                                .as_ref()
+                                .is_some_and(|(start, _)| link_click_moved(*start, event.position))
+                            {
+                                this.pending_link = None;
+                            }
                             if this.selecting {
                                 if let Some((line, col, right)) = this.grid_point(event.position) {
                                     // 帧节流：mousemove 60-120Hz，每帧最多应用一次选区更新。
@@ -1961,6 +2058,12 @@ impl Render for TermView {
                                 cx.stop_propagation();
                                 return;
                             }
+                            let link_hovered = !event.modifiers.shift
+                                && this.link_target(event.position).is_some();
+                            if this.link_hovered != link_hovered {
+                                this.link_hovered = link_hovered;
+                                cx.notify();
+                            }
                             let Some(grab_offset) = this.scrollbar_drag else {
                                 return;
                             };
@@ -1988,6 +2091,7 @@ impl Render for TermView {
                     .on_mouse_up_out(
                         MouseButton::Left,
                         cx.listener(|this, event, _window, cx| {
+                            this.pending_link = None;
                             this.finish_mouse(event, cx);
                             if this.scrollbar_drag.take().is_some() {
                                 cx.stop_propagation();
@@ -2107,6 +2211,74 @@ fn dim_u32(c: u32) -> u32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn link_targets_open_only_web_urls_and_existing_local_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("目录 with spaces");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(root.path().join("file.txt"), "text").unwrap();
+        let cwd = Some(root.path());
+        let home = Some(root.path());
+        for text in [
+            folder.to_str().unwrap().to_string(),
+            "目录 with spaces".into(),
+            "./目录 with spaces".into(),
+            "~/目录 with spaces".into(),
+            gpui::http_client::Url::from_directory_path(&folder)
+                .unwrap()
+                .to_string(),
+        ] {
+            let Some(LinkTarget::Directory(path)) = resolve_link(&text, cwd, home) else {
+                panic!("directory not recognized: {text}");
+            };
+            assert_eq!(path.canonicalize().unwrap(), folder.canonicalize().unwrap());
+            assert_eq!(resolve_link(&text, None, home), None, "remote path: {text}");
+        }
+        for text in [".", "./目录 with spaces/.."] {
+            let Some(LinkTarget::Directory(path)) = resolve_link(text, cwd, home) else {
+                panic!("directory not recognized: {text}");
+            };
+            assert_eq!(
+                path.canonicalize().unwrap(),
+                root.path().canonicalize().unwrap()
+            );
+        }
+        let dotted = root.path().join("folder.");
+        std::fs::create_dir(&dotted).unwrap();
+        assert_eq!(
+            resolve_link("folder.", cwd, home),
+            Some(LinkTarget::Directory(dotted.clone()))
+        );
+        assert_eq!(resolve_link("folder..", cwd, home), None);
+        for text in [
+            "https://example.com/a?x=1#section",
+            "http://localhost:3000",
+            "http://[::1]:8080/docs",
+        ] {
+            assert_eq!(
+                resolve_link(text, None, None),
+                Some(LinkTarget::Web(text.into()))
+            );
+        }
+        for text in [
+            "missing",
+            "file.txt",
+            "javascript:alert(1)",
+            "file://other-host/tmp",
+            "https://example.com/\n",
+        ] {
+            assert_eq!(resolve_link(text, cwd, home), None, "{text}");
+        }
+        assert!(!link_click_moved(
+            point(gpui::px(10.), gpui::px(10.)),
+            point(gpui::px(12.), gpui::px(12.))
+        ));
+        assert!(link_click_moved(
+            point(gpui::px(10.), gpui::px(10.)),
+            point(gpui::px(20.), gpui::px(10.))
+        ));
+    }
+
     struct TestTermRoot {
         term: Option<gpui::Entity<TermView>>,
         inset: Pixels,
@@ -2116,6 +2288,68 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().size_full().p(self.inset).children(self.term.clone())
         }
+    }
+
+    #[test]
+    fn clicking_links_opens_the_browser_while_drag_and_shift_select_text() {
+        use gpui::{TestAppContext, VisualTestContext};
+
+        let mut cx = TestAppContext::single();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let term = cx.new(|cx| {
+            TermView::new_remote(
+                "link-test".into(),
+                VTerm::new_with_clipboard(80, 24),
+                sender,
+                "monospace".into(),
+                Theme::for_mode(Default::default()),
+                false,
+                cx,
+            )
+        });
+        let handle = cx.add_window(|_, _| TestTermRoot {
+            term: Some(term.clone()),
+            inset: gpui::px(0.),
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), &cx);
+        visual.simulate_resize(size(gpui::px(800.), gpui::px(400.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let (start, end) = visual.update(|_, cx| {
+            let view = term.read(cx);
+            view.vterm.feed(b"https://example.com/docs");
+            let bounds = view.last_bounds.lock().unwrap().unwrap();
+            let (width, height) = *view.cell_size.lock().unwrap();
+            (
+                bounds.origin + point(gpui::px(width * 2.5), gpui::px(height * 0.5)),
+                bounds.origin + point(gpui::px(width * 10.5), gpui::px(height * 0.5)),
+            )
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        while receiver.try_recv().is_ok() {}
+
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.update(|window, cx| window.simulate_next_frame(cx));
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        assert_eq!(visual.opened_url(), None);
+        visual.update(|_, cx| assert!(term.read(cx).vterm.selection_to_string().is_some()));
+
+        let shift = gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        visual.simulate_click(start, shift);
+        assert_eq!(visual.opened_url(), None);
+        visual.simulate_click(start, Default::default());
+        assert_eq!(
+            visual.opened_url().as_deref(),
+            Some("https://example.com/docs")
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "link clicks must not reach the PTY"
+        );
+        visual.update(|_, cx| assert!(!term.read(cx).selecting));
     }
 
     #[test]

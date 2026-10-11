@@ -119,6 +119,7 @@ struct Shared {
 
 pub struct PtySession {
     pub agent: AgentId,
+    cwd: PathBuf,
     pty_master: std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>,
     writer: std::sync::Mutex<Box<dyn Write + Send>>,
     tap_tx: broadcast::Sender<bytes::Bytes>,
@@ -254,6 +255,7 @@ impl PtySession {
 
         let session = Arc::new(PtySession {
             agent: cfg.agent.clone(),
+            cwd: cfg.cwd.clone(),
             pty_master: std::sync::Mutex::new(pair.master),
             writer: std::sync::Mutex::new(writer),
             tap_tx: tap_tx.clone(),
@@ -418,6 +420,10 @@ impl PtySession {
 
     pub fn tmux_session_name(&self) -> Option<&str> {
         self.tmux_session_name.as_deref()
+    }
+
+    pub fn initial_directory(&self) -> &Path {
+        &self.cwd
     }
 
     pub fn kill_persistent(&self) -> bool {
