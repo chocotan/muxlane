@@ -58,6 +58,55 @@ fn remote_online(snapshot: muxlane_core::model::Snapshot) -> muxlane_client::Cli
 }
 
 #[test]
+fn terminal_enter_marks_only_the_current_shell_as_working() {
+    for remote in [false, true] {
+        with_app(|cx, _window, app| {
+            cx.update(|cx| {
+                app.update(cx, |app, cx| {
+                    let mut snapshot = remote_snapshot(AgentStatus::Idle, 10);
+                    snapshot.agents.truncate(1);
+                    let id = snapshot.agents[0].id.clone();
+                    if remote {
+                        app.remote_snaps.insert("remote".into(), snapshot);
+                    } else {
+                        app.last_snapshot = snapshot;
+                    }
+                    for kind in [
+                        AgentType::Pi,
+                        AgentType::Codex,
+                        AgentType::Claude,
+                        AgentType::Shell,
+                    ] {
+                        let snapshot = if remote {
+                            app.remote_snaps.get_mut("remote").unwrap()
+                        } else {
+                            &mut app.last_snapshot
+                        };
+                        snapshot.agents[0].agent_type = kind;
+                        snapshot.agents[0].status = AgentStatus::Idle;
+                        app.mark_agent_working(&id, cx);
+                        let snapshot = if remote {
+                            &app.remote_snaps["remote"]
+                        } else {
+                            &app.last_snapshot
+                        };
+                        assert_eq!(
+                            snapshot.agents[0].status,
+                            if kind == AgentType::Shell {
+                                AgentStatus::Working
+                            } else {
+                                AgentStatus::Idle
+                            },
+                            "remote={remote}, foreground={kind:?}",
+                        );
+                    }
+                });
+            });
+        });
+    }
+}
+
+#[test]
 fn remote_read_tabs_stay_read_across_unrelated_snapshot_refreshes() {
     with_app(|cx, _window, app| {
         let snapshot = remote_snapshot(AgentStatus::Done, 10);

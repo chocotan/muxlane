@@ -18,7 +18,7 @@ Muxlane 使用 Rust + GPUI 构建，面向 Linux 与 macOS。Android 查看器�
 
 - **快速创建会话**：按 `Win / Super + K`（Linux）或 `Command + K`（macOS）打开命令面板。
 - **默认终端预设**：可将 Shell 或常用 Agent 设为默认，用于新建标签页和分屏。
-- **Shell 中自动识别**：在普通 Shell 会话里手动运行 Pi、Codex、Claude Code 等命令时，会话会自动切换为对应 Agent 的标题、状态和通知；Agent 退出后恢复为 Shell。识别依据终端前台进程，不会因为输出中出现命令名而误判。
+- **Shell 中自动识别**：在普通 Shell 会话里手动运行 Pi、Codex、Claude Code 等命令时，会话会自动切换为对应 Agent 的标题、状态检测规则和通知；Agent 内的回车不直接标记为运行中。Agent 退出后恢复为 Shell 的检测规则，恢复后台会话后也会继续跟踪前台程序。识别依据终端前台进程，不会因为输出中出现命令名而误判。
 - **本地与远端运行**：本地会话使用本机环境，远端会话在对应远端机器执行。
 
 Muxlane 提供会话管理和终端界面。各 Agent CLI 及其登录配置需在实际运行会话的机器上准备。macOS 上从启动台打开应用时，会读取登录 Shell 的 PATH 并补充 nvm 下的 Node 工具目录，用于检测和启动通过 npm 安装的 Agent。

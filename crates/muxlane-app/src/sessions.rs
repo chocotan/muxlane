@@ -51,6 +51,12 @@ impl MuxlaneApp {
     }
 
     pub(crate) fn mark_agent_working(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+        if !self
+            .find_agent_terminal(agent)
+            .is_some_and(|instance| instance.agent_type == muxlane_core::model::AgentType::Shell)
+        {
+            return;
+        }
         let mut local = false;
         if let Some(a) = self.last_snapshot.agent_mut(agent) {
             local = true;

@@ -132,13 +132,14 @@ impl ServerState {
         agents
     }
 
-    /// Shell presets, plus shells currently running an Agent in the foreground.
+    /// Shell launch IDs survive restoration even when the saved foreground type is an Agent.
     pub(crate) fn is_shell_origin(&self, agent: &AgentId) -> bool {
         self.shell_identities.contains_key(agent)
-            || self
-                .agents
-                .iter()
-                .any(|instance| &instance.id == agent && instance.agent_type == AgentType::Shell)
+            || self.agents.iter().any(|instance| {
+                &instance.id == agent
+                    && (instance.agent_type == AgentType::Shell
+                        || instance.id.starts_with("shell_"))
+            })
     }
 
     /// Only a verified foreground process sample may change a shell's identity.
@@ -308,7 +309,7 @@ impl ServerState {
         let Some(current) = self
             .agents
             .iter()
-            .find(|a| &a.id == agent)
+            .find(|a| &a.id == agent && a.agent_type == AgentType::Shell)
             .map(|a| a.status)
         else {
             return vec![];
@@ -411,6 +412,16 @@ mod tests {
         };
         assert!(state.observe_foreground(&id, &foreground, Some("old shell title")));
         assert_eq!(state.agents[0].title, "Pi");
+        assert!(state.mark_screen_working(&id).is_empty());
+        assert_eq!(state.agents[0].status, AgentStatus::Idle);
+        let pi_screen = muxlane_core::detect::ScreenInput {
+            bottom_lines: vec!["Thinking…".into()],
+            ..Default::default()
+        };
+        state.observe_screen(&id, &pi_screen);
+        state.observe_screen(&id, &pi_screen);
+        assert_eq!(state.agents[0].status, AgentStatus::Working);
+        state.apply_status(&id, AgentStatus::Idle, None);
         let report = AgentReportParams {
             token: "unused".into(),
             agent: id.clone(),
@@ -420,6 +431,18 @@ mod tests {
         let events = state.report_hook(&report).await;
         assert_eq!(events[0].params["agent_type"], "pi");
         assert!(state.detector.has_hook_authority(&id));
+        let mut restored = ServerState::new(state.machine.clone());
+        restored.add_agent(state.projects[0].clone(), state.agents[0].clone());
+        assert!(restored.is_shell_origin(&id));
+        assert!(restored.observe_foreground(
+            &id,
+            &crate::foreground::ShellForeground {
+                shell: "zsh".into(),
+                agent_type: AgentType::Shell,
+            },
+            None,
+        ));
+        assert_eq!(restored.agents[0].agent_type, AgentType::Shell);
         let screen = muxlane_core::detect::ScreenInput {
             osc_title: Some("Agent task title".into()),
             ..Default::default()
@@ -440,6 +463,16 @@ mod tests {
         assert_eq!(state.agents[0].status, AgentStatus::Idle);
         assert!(state.agents[0].seen);
         assert!(!state.detector.has_hook_authority(&id));
+        assert!(!state.mark_screen_working(&id).is_empty());
+        assert_eq!(state.agents[0].status, AgentStatus::Working);
+        let shell_screen = muxlane_core::detect::ScreenInput {
+            bottom_lines: vec!["user@host:~$".into()],
+            osc_title: screen.osc_title.clone(),
+            ..Default::default()
+        };
+        state.observe_screen(&id, &shell_screen);
+        state.observe_screen(&id, &shell_screen);
+        assert_eq!(state.agents[0].status, AgentStatus::Idle);
         state.observe_screen(&id, &screen);
         assert_eq!(
             state.agents[0].title, "Shell",
@@ -452,6 +485,8 @@ mod tests {
         foreground.agent_type = AgentType::Codex;
         assert!(state.observe_foreground(&id, &foreground, screen.osc_title.as_deref()));
         assert_eq!(state.agents[0].title, "Codex");
+        assert!(state.mark_screen_working(&id).is_empty());
+        assert_eq!(state.agents[0].status, AgentStatus::Idle);
         assert_eq!(
             state.report_hook(&report).await[0].params["agent_type"],
             "codex"

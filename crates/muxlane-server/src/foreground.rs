@@ -182,6 +182,7 @@ fn command_agent(command: &str) -> Option<AgentType> {
     }
     for (package, kind) in [
         ("/@mariozechner/pi-coding-agent/", AgentType::Pi),
+        ("/@earendil-works/pi-coding-agent/", AgentType::Pi),
         ("/@anthropic-ai/claude-code/", AgentType::Claude),
         ("/@openai/codex/", AgentType::Codex),
         ("/opencode-ai/", AgentType::Opencode),
@@ -236,7 +237,7 @@ mod tests {
 
     #[test]
     fn recognizes_executables_and_npm_entrypoints_not_mentions() {
-        for command in ["pi", "/usr/local/bin/pi --help", "node /home/test/.nvm/versions/node/v22/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js", "node /opt/bin/pi"] {
+        for command in ["pi", "/usr/local/bin/pi --help", "node /home/test/.nvm/versions/node/v22/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js", "node /opt/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "node /opt/bin/pi"] {
             assert_eq!(command_agent(command), Some(AgentType::Pi), "{command}");
         }
         for command in [
