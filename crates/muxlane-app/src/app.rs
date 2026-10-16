@@ -142,6 +142,9 @@ pub struct MuxlaneApp {
 
     // 快照/远程镜像
     pub(crate) last_snapshot: Snapshot,
+    /// Acknowledged local results, including events whose snapshot has not arrived yet.
+    pub(crate) local_read_results:
+        HashMap<AgentId, (muxlane_core::model::AgentStatus, Option<u64>)>,
     /// 远程机器（本地快照缓存：host name → snapshot）
     pub(crate) remotes: Vec<Arc<muxlane_client::RemoteHost>>,
     pub(crate) remote_snaps: HashMap<String, Snapshot>,
@@ -215,6 +218,13 @@ pub struct MuxlaneApp {
     pub(crate) relay_token: Option<String>,
     pub(crate) relay_error: Option<String>,
     pub(crate) relay_validation: Option<gpui::Task<()>>,
+    pub(crate) notebooks: Vec<String>,
+    pub(crate) open_notes: Vec<PathBuf>,
+    pub(crate) active_note: Option<PathBuf>,
+    pub(crate) note_preview: bool,
+    pub(crate) note_input: Entity<TextField>,
+    note_saved: String,
+    _note_subscription: Subscription,
 
     // 菜单/确认框
     pub(crate) session_menu: Option<SessionMenu>,
@@ -264,14 +274,7 @@ impl MuxlaneApp {
                         >(ev.params)
                         {
                             this.update(cx, |this, cx| {
-                                let mut draft =
-                                    this.notification_draft(p.agent, p.from, p.to, p.message);
-                                if let Some(agent_type) = p.agent_type {
-                                    draft.agent_type = agent_type;
-                                }
-                                this.notifications
-                                    .update(cx, |center, cx| center.push_notification(draft, cx));
-                                cx.notify();
+                                this.handle_agent_status(None, p, cx);
                             })
                             .ok();
                         }
@@ -446,22 +449,17 @@ impl MuxlaneApp {
                                 to,
                                 message,
                             } => {
-                                let focused = this.notification_focused_agent() == Some(&agent);
-                                if let Some(snap) = this.remote_snaps.get_mut(&host) {
-                                    if let Some(a) = snap.agents.iter_mut().find(|a| a.id == agent)
-                                    {
-                                        a.status = to;
-                                        if to.is_finished() {
-                                            a.seen = focused;
-                                        }
-                                    }
-                                }
-                                let mut draft = this.notification_draft(agent, from, to, message);
-                                if let Some(agent_type) = agent_type {
-                                    draft.agent_type = agent_type;
-                                }
-                                this.notifications
-                                    .update(cx, |center, cx| center.push_notification(draft, cx));
+                                this.handle_agent_status(
+                                    Some(&host),
+                                    muxlane_core::protocol::AgentStatusEvent {
+                                        agent,
+                                        agent_type,
+                                        from,
+                                        to,
+                                        message,
+                                    },
+                                    cx,
+                                );
                             }
                             _ => {}
                         }
@@ -632,6 +630,28 @@ impl MuxlaneApp {
             }
             field
         });
+        let note_input = cx.new(|cx| {
+            let mut field = TextField::new_multiline(
+                i18n::text(language, "notes.placeholder"),
+                window,
+                cx,
+            );
+            field.set_theme_mode(theme_mode, cx);
+            field
+        });
+        let note_subscription = cx.observe(&note_input, |this, input, cx| {
+            let text = input.read(cx).text();
+            if text == this.note_saved {
+                return;
+            }
+            this.note_saved = text.clone();
+            if let Some(path) = this.active_note.clone() {
+                if let Err(error) = std::fs::write(&path, text) {
+                    tracing::warn!(%error, "save note failed");
+                }
+            }
+            cx.notify();
+        });
 
         let mut app = MuxlaneApp {
             store_path: store_path.clone(),
@@ -647,6 +667,7 @@ impl MuxlaneApp {
             workspace,
             floating: crate::floating::FloatingState::from_persisted(&persisted),
             last_snapshot: initial_snapshot,
+            local_read_results: HashMap::new(),
             remotes,
             remote_snaps: HashMap::new(),
             remote_states: HashMap::new(),
@@ -703,6 +724,17 @@ impl MuxlaneApp {
             relay_token,
             relay_error: None,
             relay_validation: None,
+            notebooks: persisted
+                .notebooks
+                .iter()
+                .map(|notebook| notebook.scope.clone())
+                .collect(),
+            open_notes: Vec::new(),
+            active_note: None,
+            note_preview: false,
+            note_input,
+            note_saved: String::new(),
+            _note_subscription: note_subscription,
             quit_confirm_open: false,
             quit_confirmed: false,
             quit_cancel_focus: cx.focus_handle(),
@@ -820,7 +852,22 @@ impl MuxlaneApp {
         app
     }
 
-    pub(crate) fn apply_local_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+    pub(crate) fn apply_local_snapshot(&mut self, mut snapshot: Snapshot, cx: &mut Context<Self>) {
+        // A snapshot can already be in flight when the user reads a result. Keep that
+        // acknowledgement across the race, but never carry it into a new run/result.
+        self.local_read_results
+            .retain(|agent, _| snapshot.agent(agent).is_some());
+        for agent in &mut snapshot.agents {
+            if let Some((status, since)) = self.local_read_results.get_mut(&agent.id) {
+                if agent.status == *status && since.is_none_or(|since| since == agent.status_since) {
+                    *since = Some(agent.status_since);
+                    agent.seen = true;
+                    agent.status = muxlane_core::model::AgentStatus::Idle;
+                } else if agent.status != muxlane_core::model::AgentStatus::Idle {
+                    self.local_read_results.remove(&agent.id);
+                }
+            }
+        }
         let machine_id = self.local_machine_id();
         let valid_projects: std::collections::HashSet<_> = snapshot
             .projects
@@ -848,6 +895,11 @@ impl MuxlaneApp {
                 .cloned(),
         );
         self.last_snapshot = snapshot;
+        if let Some(agent) = self.notification_focused_agent().cloned() {
+            if self.last_snapshot.agent(&agent).is_some_and(|a| a.status.is_finished()) {
+                self.mark_agent_seen(&agent, cx);
+            }
+        }
         // Remove the owner first: cleanup synchronizes the selected floating project.
         self.reconcile_machine_workspaces(&machine_id, &valid_projects);
         self.cleanup_removed_agents(&removed.into_iter().collect::<Vec<_>>(), cx);
@@ -904,6 +956,13 @@ impl MuxlaneApp {
         app.default_terminal_preset = self.default_terminal_preset.clone();
         app.relay_url = self.relay_url.clone();
         app.relay_enabled = Some(self.relay_enabled);
+        app.notebooks = self
+            .notebooks
+            .iter()
+            .map(|scope| muxlane_store::PersistedNotebook {
+                scope: scope.clone(),
+            })
+            .collect();
         self.persistence.submit_app(app);
     }
 
@@ -917,6 +976,60 @@ impl MuxlaneApp {
             }
         }
         None
+    }
+
+    pub(crate) fn handle_agent_status(
+        &mut self,
+        host: Option<&str>,
+        event: muxlane_core::protocol::AgentStatusEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let focused = self.notification_focused_agent() == Some(&event.agent);
+        let acknowledged = host.is_none()
+            && self.local_read_results.get(&event.agent).is_some_and(|(status, _)| {
+                *status == event.to && event.to.is_finished()
+            });
+        let transition = event.from != event.to && !acknowledged;
+        // Same-status events only enrich the message. Reapplying Done/Failed here
+        // would undo an acknowledgement made before this late hook arrived.
+        if transition {
+            if host.is_none()
+                && (event.to.is_finished()
+                    || matches!(event.to, muxlane_core::model::AgentStatus::Working | muxlane_core::model::AgentStatus::Blocked))
+            {
+                self.local_read_results.remove(&event.agent);
+            }
+            let snapshot = match host {
+                Some(host) => self.remote_snaps.get_mut(host),
+                None => Some(&mut self.last_snapshot),
+            };
+            if let Some(agent) = snapshot.and_then(|snap| snap.agent_mut(&event.agent)) {
+                agent.status = event.to;
+                if event.to.is_finished() {
+                    agent.seen = focused;
+                }
+            }
+        }
+        let mut draft = self.notification_draft(
+            event.agent.clone(),
+            if acknowledged { event.to } else { event.from },
+            event.to,
+            event.message,
+        );
+        if let Some(agent_type) = event.agent_type {
+            draft.agent_type = agent_type;
+        }
+        self.notifications
+            .update(cx, |center, cx| center.push_notification(draft, cx));
+        if focused && event.to.is_finished() {
+            self.mark_agent_seen(&event.agent, cx);
+            if host.is_none() && transition {
+                // Status events have no status_since; bind the receipt to the first
+                // matching snapshot, rather than the previous run's timestamp.
+                self.local_read_results.insert(event.agent, (event.to, None));
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn notification_draft(
@@ -1068,6 +1181,9 @@ impl Render for MuxlaneApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if this.note_typing(window, cx) {
+                    return;
+                }
                 let pane = this.active_pane.clone();
                 if let Some(agent) = this
                     .pane_tree
@@ -1078,49 +1194,82 @@ impl Render for MuxlaneApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &NewShellTab, window, cx| {
+                if this.note_typing(window, cx) {
+                    return;
+                }
                 let pane = this.active_pane.clone();
                 this.new_shell_tab(&pane, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
+                if this.note_typing(window, cx) {
+                    return;
+                }
                 let pane = this.active_pane.clone();
                 this.split_pane(&pane, muxlane_core::SplitAxis::Horizontal, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
+                if this.note_typing(window, cx) {
+                    return;
+                }
                 let pane = this.active_pane.clone();
                 this.split_pane(&pane, muxlane_core::SplitAxis::Vertical, window, cx);
             }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                if this.note_typing(window, cx) {
+                    return;
+                }
                 this.next_tab(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PreviousTab, window, cx| {
+                if this.note_typing(window, cx) {
+                    return;
+                }
                 this.prev_tab(window, cx);
             }))
             .on_action(cx.listener(|this, _: &SelectTab1, window, cx| {
-                this.select_tab_n(0, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(0, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectTab2, window, cx| {
-                this.select_tab_n(1, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(1, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectTab3, window, cx| {
-                this.select_tab_n(2, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(2, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectTab4, window, cx| {
-                this.select_tab_n(3, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(3, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectTab5, window, cx| {
-                this.select_tab_n(4, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(4, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectTab6, window, cx| {
-                this.select_tab_n(5, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(5, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectTab7, window, cx| {
-                this.select_tab_n(6, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(6, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectTab8, window, cx| {
-                this.select_tab_n(7, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(7, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectTab9, window, cx| {
-                this.select_tab_n(8, window, cx);
+                if !this.note_typing(window, cx) {
+                    this.select_tab_n(8, window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &ToggleTheme, _window, cx| {
                 this.toggle_theme(cx);
@@ -1150,7 +1299,11 @@ impl Render for MuxlaneApp {
                     .terms
                     .values()
                     .any(|term| term.focus_handle(cx).is_focused(window));
-                if this.settings_open && matches!(ev.keystroke.key.as_str(), "tab" | "f6") {
+                if this.note_typing(window, cx) && ev.keystroke.key.as_str() == "escape" {
+                    this.active_note = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if this.settings_open && matches!(ev.keystroke.key.as_str(), "tab" | "f6") {
                     this.cycle_settings_focus(ev.keystroke.modifiers.shift, window, cx);
                     cx.stop_propagation();
                 } else if this.quit_confirm_open {
@@ -1312,7 +1465,18 @@ impl Render for MuxlaneApp {
                     }),
                 ),
         );
-        root = root.child(grid);
+        let workspace = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(if self.active_note.is_some() {
+                self.render_note_workspace(theme, cx)
+            } else {
+                grid
+            });
+        root = root.child(workspace);
         if self.split_drag.is_some() || self.sidebar.drag.is_some() {
             let mut overlay = div()
                 .id("layout-drag-overlay")

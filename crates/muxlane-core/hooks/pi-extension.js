@@ -95,8 +95,9 @@ export default function (pi) {
     if (shouldIgnoreRun(ctx)) return
     const text = assistantText(event?.messages || [])
     if (text) latestAssistant = shortText(text, 180)
-    // Pi < 0.80.4 没有 agent_settled；旧版在 agent_end 且没有重试时完成上报。
-    if (doneReported || (ctx?.isIdle && !ctx.isIdle())) return
+    // Pi < 0.80.4 没有 agent_settled。willRetry 表示这轮还会自动继续。
+    // 不能用 ctx.isIdle()：agent_end 时它经常仍是 false，done 会被丢掉，loading 就停不下来。
+    if (doneReported || event?.willRetry) return
     doneReported = true
     let msg = latestAssistant
     if (event?.error || ctx?.error) {
@@ -114,7 +115,8 @@ export default function (pi) {
   // 新版 Pi 在所有重试、压缩和排队消息结束后触发；旧版没有此事件。
   pi.on("agent_settled", async (event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
-    if (doneReported || (ctx?.isIdle && !ctx.isIdle())) return
+    // aborted 的一轮由用户取消，不算完成；其余 settled 都要收掉 working。
+    if (doneReported || event?.aborted) return
     doneReported = true
     let msg = latestAssistant
     if (event?.error || ctx?.error) {

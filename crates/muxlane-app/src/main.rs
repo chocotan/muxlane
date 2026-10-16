@@ -8,6 +8,7 @@ mod floating;
 mod i18n;
 mod icons;
 mod menus;
+mod notes;
 mod notifications;
 mod persistence;
 mod qr;

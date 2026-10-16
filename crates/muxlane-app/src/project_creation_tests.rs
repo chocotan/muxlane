@@ -228,10 +228,10 @@ fn project_menu_offers_only_detected_local_editors() {
             let project_id = cx.update(|cx| view.read(cx).last_snapshot.projects[0].id.clone());
             open_menu(
                 cx,
-                crate::menus::DeleteTarget::LocalProject {
+                crate::menus::TreeMenuTarget::Delete(crate::menus::DeleteTarget::LocalProject {
                     project: project_id,
                     label: "zbase".into(),
-                },
+                }),
             );
             draw(cx, window);
             let mut visual = gpui::VisualTestContext::from_window(window, cx);
@@ -260,11 +260,11 @@ fn project_menu_offers_only_detected_local_editors() {
             // Remote projects must not offer local editors.
             open_menu(
                 cx,
-                crate::menus::DeleteTarget::RemoteProject {
+                crate::menus::TreeMenuTarget::Delete(crate::menus::DeleteTarget::RemoteProject {
                     host: "peer".into(),
                     project: "r".into(),
                     label: "r".into(),
-                },
+                }),
             );
             draw(cx, window);
             let mut visual = gpui::VisualTestContext::from_window(window, cx);

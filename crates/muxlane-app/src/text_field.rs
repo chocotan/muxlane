@@ -42,6 +42,60 @@ fn ime_caret_x(origin_x: f32, prefix_chars: usize, scale: f32) -> f32 {
     origin_x + (12.0 + prefix_chars as f32 * 7.2) * scale
 }
 
+fn visual_lines(content: &str) -> Vec<(usize, usize)> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, ch) in content.char_indices() {
+        if ch == '\n' {
+            lines.push((start, index));
+            start = index + ch.len_utf8();
+        }
+    }
+    lines.push((start, content.len()));
+    lines
+}
+
+fn line_of(lines: &[(usize, usize)], cursor: usize) -> usize {
+    lines
+        .iter()
+        .position(|(start, end)| cursor >= *start && cursor <= *end)
+        .unwrap_or(0)
+}
+
+fn offset_at_column(content: &str, start: usize, end: usize, column: usize) -> usize {
+    content[start..end]
+        .char_indices()
+        .nth(column)
+        .map(|(index, _)| start + index)
+        .unwrap_or(end)
+}
+
+fn vertical_target(content: &str, cursor: usize, down: bool) -> usize {
+    let lines = visual_lines(content);
+    let cursor = cursor.min(content.len());
+    let index = line_of(&lines, cursor);
+    let next = if down {
+        if index + 1 >= lines.len() {
+            return cursor;
+        }
+        index + 1
+    } else if index == 0 {
+        return cursor;
+    } else {
+        index - 1
+    };
+    let column = content[lines[index].0..cursor].chars().count();
+    let (start, end) = lines[next];
+    offset_at_column(content, start, end, column)
+}
+
+fn line_edge(content: &str, cursor: usize, home: bool) -> usize {
+    let lines = visual_lines(content);
+    let cursor = cursor.min(content.len());
+    let (start, end) = lines[line_of(&lines, cursor)];
+    if home { start } else { end }
+}
+
 pub struct TextField {
     focus: FocusHandle,
     content: String,
@@ -49,6 +103,7 @@ pub struct TextField {
     selected_range: Range<usize>,
     marked_range: Option<Range<usize>>,
     secure: bool,
+    multiline: bool,
     theme_mode: ThemeMode,
     _focus_subscription: Subscription,
 }
@@ -70,9 +125,20 @@ impl TextField {
             selected_range: 0..0,
             marked_range: None,
             secure: false,
+            multiline: false,
             theme_mode: ThemeMode::Light,
             _focus_subscription: focus_subscription,
         }
+    }
+
+    pub fn new_multiline(
+        placeholder: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut field = Self::new(placeholder, window, cx);
+        field.multiline = true;
+        field
     }
 
     pub fn new_secure(
@@ -344,6 +410,78 @@ impl TextField {
             }
         }
     }
+
+    fn render_multiline(
+        &self,
+        focused: bool,
+        theme: Theme,
+        cursor_c: u32,
+    ) -> gpui::AnyElement {
+        if self.content.is_empty() {
+            return div()
+                .flex()
+                .items_center()
+                .min_h(ui_px(20.))
+                .text_color(rgba(theme.fg2))
+                .child(self.placeholder.clone())
+                .when(focused, |el| {
+                    el.child(div().ml(ui_px(1.)).w(ui_px(1.5)).h(ui_px(16.)).bg(rgba(cursor_c)))
+                })
+                .into_any_element();
+        }
+        let sel_start = self.selected_range.start.min(self.content.len());
+        let sel_end = self.selected_range.end.min(self.content.len());
+        let mut column = div().flex().flex_col().w_full().text_color(rgba(theme.fg0));
+        for (start, end) in visual_lines(&self.content) {
+            let line = &self.content[start..end];
+            let mut row = div().flex().items_center().min_h(ui_px(20.)).w_full();
+            let caret = focused && sel_start == sel_end && (start..=end).contains(&sel_start);
+            if caret {
+                let before = &self.content[start..sel_start];
+                let after = &self.content[sel_start..end];
+                if !before.is_empty() {
+                    row = row.child(div().child(before.to_string()));
+                }
+                row = row.child(div().w(ui_px(1.5)).h(ui_px(16.)).bg(rgba(cursor_c)));
+                if !after.is_empty() {
+                    row = row.child(div().child(after.to_string()));
+                }
+            } else if focused && sel_start < sel_end {
+                let highlight_start = sel_start.max(start).min(end);
+                let highlight_end = sel_end.max(start).min(end);
+                if highlight_start < highlight_end {
+                    let before = &self.content[start..highlight_start];
+                    let selected = &self.content[highlight_start..highlight_end];
+                    let after = &self.content[highlight_end..end];
+                    if !before.is_empty() {
+                        row = row.child(div().child(before.to_string()));
+                    }
+                    row = row.child(
+                        div()
+                            .bg(rgba(theme.selection()))
+                            .child(selected.to_string()),
+                    );
+                    if !after.is_empty() {
+                        row = row.child(div().child(after.to_string()));
+                    }
+                } else {
+                    row = row.child(if line.is_empty() {
+                        " ".to_string()
+                    } else {
+                        line.to_string()
+                    });
+                }
+            } else {
+                row = row.child(if line.is_empty() {
+                    " ".to_string()
+                } else {
+                    line.to_string()
+                });
+            }
+            column = column.child(row);
+        }
+        column.into_any_element()
+    }
 }
 
 impl Focusable for TextField {
@@ -446,15 +584,23 @@ impl EntityInputHandler for TextField {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let start = utf16_to_byte(&self.content, range_utf16.start).min(self.content.len());
-        let prefix = self.content[..start].chars().count();
-        let x = ime_caret_x(
-            f32::from(element_bounds.origin.x),
-            prefix,
-            crate::ui_scale::factor(),
-        );
+        let scale = crate::ui_scale::factor();
+        if !self.multiline {
+            let prefix = self.content[..start].chars().count();
+            let x = ime_caret_x(f32::from(element_bounds.origin.x), prefix, scale);
+            return Some(Bounds {
+                origin: point(gpui::px(x), element_bounds.origin.y),
+                size: size(ui_px(2.), element_bounds.size.height),
+            });
+        }
+        let lines = visual_lines(&self.content);
+        let index = line_of(&lines, start);
+        let column = self.content[lines[index].0..start].chars().count();
+        let x = ime_caret_x(f32::from(element_bounds.origin.x), column, scale);
+        let y = f32::from(element_bounds.origin.y) + index as f32 * f32::from(ui_px(20.));
         Some(Bounds {
-            origin: point(gpui::px(x), element_bounds.origin.y),
-            size: size(ui_px(2.), element_bounds.size.height),
+            origin: point(gpui::px(x), gpui::px(y)),
+            size: size(ui_px(2.), ui_px(20.)),
         })
     }
 
@@ -489,7 +635,9 @@ impl Render for TextField {
         let sel_end = self.selected_range.end.min(content_len);
         let has_selection = sel_start < sel_end;
 
-        let content_el = if self.content.is_empty() {
+        let content_el = if self.multiline {
+            self.render_multiline(focused, theme, cursor_c)
+        } else if self.content.is_empty() {
             div()
                 .flex()
                 .items_center()
@@ -507,13 +655,17 @@ impl Render for TextField {
                             .bg(rgba(cursor_c)),
                     )
                 })
+                .into_any_element()
         } else if !focused {
             let display_text = if self.secure {
                 "•".repeat(self.content.chars().count())
             } else {
                 self.content.clone()
             };
-            div().text_color(rgba(text_c)).child(display_text)
+            div()
+                .text_color(rgba(text_c))
+                .child(display_text)
+                .into_any_element()
         } else {
             let before = if self.secure {
                 "•".repeat(self.content[..sel_start].chars().count())
@@ -543,7 +695,7 @@ impl Render for TextField {
             if !after.is_empty() {
                 row = row.child(div().child(after));
             }
-            row
+            row.into_any_element()
         };
 
         div()
@@ -551,9 +703,11 @@ impl Render for TextField {
             .relative()
             .track_focus(&focus)
             .flex()
-            .items_center()
+            .when(!self.multiline, |el| el.items_center().min_h(ui_px(34.)))
+            .when(self.multiline, |el| {
+                el.items_start().h_full().overflow_y_scroll().py_2()
+            })
             .w_full()
-            .min_h(ui_px(34.))
             .px_3()
             .border_1()
             .border_color(rgba(border_c))
@@ -574,12 +728,50 @@ impl Render for TextField {
                 let ctrl_or_cmd = ctrl || platform;
 
                 let handled = match key {
+                    "enter" if this.multiline && !ctrl && !alt && !platform => {
+                        this.replace_text_in_range(None, "\n", window, cx);
+                        true
+                    }
+                    "tab" if this.multiline && !ctrl && !alt && !platform => {
+                        this.replace_text_in_range(None, "  ", window, cx);
+                        true
+                    }
+                    "up" | "down" if this.multiline => {
+                        let target =
+                            vertical_target(&this.content, this.selected_range.end, key == "down");
+                        this.selected_range = target..target;
+                        this.marked_range = None;
+                        cx.notify();
+                        true
+                    }
                     "home" => {
-                        this.move_home(shift, cx);
+                        if this.multiline && !ctrl_or_cmd {
+                            let target = line_edge(&this.content, this.selected_range.start, true);
+                            if shift {
+                                this.selected_range = target..this.selected_range.end;
+                            } else {
+                                this.selected_range = target..target;
+                            }
+                            this.marked_range = None;
+                            cx.notify();
+                        } else {
+                            this.move_home(shift, cx);
+                        }
                         true
                     }
                     "end" => {
-                        this.move_end(shift, cx);
+                        if this.multiline && !ctrl_or_cmd {
+                            let target = line_edge(&this.content, this.selected_range.end, false);
+                            if shift {
+                                this.selected_range = this.selected_range.start..target;
+                            } else {
+                                this.selected_range = target..target;
+                            }
+                            this.marked_range = None;
+                            cx.notify();
+                        } else {
+                            this.move_end(shift, cx);
+                        }
                         true
                     }
                     "left" => {
@@ -701,5 +893,18 @@ mod tests {
         assert!((ime_caret_x(20.0, 2, 1.0) - 46.4).abs() < f32::EPSILON);
         assert!((ime_caret_x(20.0, 2, 1.5) - 59.6).abs() < f32::EPSILON);
         assert!((ime_caret_x(20.0, 2, 2.0) - 72.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn vertical_move_keeps_column_and_stops_at_ends() {
+        let content = "ab\ncd";
+        assert_eq!(vertical_target(content, 1, true), 4);
+        assert_eq!(vertical_target(content, 4, false), 1);
+        assert_eq!(vertical_target(content, 0, false), 0);
+        assert_eq!(vertical_target(content, 5, true), 5);
+        assert_eq!(vertical_target("abc\nx", 2, true), 5);
+        assert_eq!(line_edge(content, 4, true), 3);
+        assert_eq!(line_edge(content, 4, false), 5);
+        assert_eq!(visual_lines("a\n\nb"), vec![(0, 1), (2, 2), (3, 4)]);
     }
 }

@@ -57,8 +57,17 @@ pub(crate) enum DeleteTarget {
 }
 
 #[derive(Clone)]
+pub(crate) enum TreeMenuTarget {
+    Delete(DeleteTarget),
+    Notes {
+        host: Option<String>,
+        project: Option<String>,
+    },
+}
+
+#[derive(Clone)]
 pub(crate) struct TreeMenu {
-    pub(crate) target: DeleteTarget,
+    pub(crate) target: TreeMenuTarget,
     pub(crate) position: Point<Pixels>,
 }
 
@@ -188,7 +197,10 @@ impl MuxlaneApp {
             return div().into_any_element();
         };
         let menu_el = match &menu.target {
-            DeleteTarget::RemoteMachine { host } => {
+            TreeMenuTarget::Notes { host, project } => {
+                self.notes_toggle_menu(host.as_deref(), project.as_deref(), theme, cx)
+            }
+            TreeMenuTarget::Delete(DeleteTarget::RemoteMachine { host }) => {
                 let host_name = host.clone();
                 let host_name_2 = host.clone();
                 let host_name_3 = host.clone();
@@ -200,6 +212,7 @@ impl MuxlaneApp {
                     .border_1()
                     .border_color(rgba(theme.line))
                     .shadow_lg()
+                    .child(self.notes_toggle_item(Some(host), None, theme, cx))
                     .child(
                         semantic_button(
                             "tree-refresh-remote",
@@ -325,27 +338,32 @@ impl MuxlaneApp {
                         .text_color(rgba(theme.red))
                         .hover(|style| style.bg(rgba(theme.bg2)))
                         .on_click(cx.listener({
-                            let target = menu.target.clone();
+                            let host = host.clone();
                             move |this, _event, _window, cx| {
                                 this.tree_menu = None;
-                                this.begin_delete(target.clone(), cx);
+                                this.begin_delete(
+                                    DeleteTarget::RemoteMachine { host: host.clone() },
+                                    cx,
+                                );
                             }
                         }))
                         .child(i18n::text(self.language, "menu.delete_remote_machine")),
                     )
             }
-            DeleteTarget::LocalProject { .. } | DeleteTarget::RemoteProject { .. } => {
+            TreeMenuTarget::Delete(
+                DeleteTarget::LocalProject { .. } | DeleteTarget::RemoteProject { .. },
+            ) => {
                 let label = match &menu.target {
-                    DeleteTarget::LocalProject { .. } => {
+                    TreeMenuTarget::Delete(DeleteTarget::LocalProject { .. }) => {
                         i18n::text(self.language, "menu.delete_project_ellipsis")
                     }
-                    DeleteTarget::RemoteProject { .. } => {
+                    TreeMenuTarget::Delete(DeleteTarget::RemoteProject { .. }) => {
                         i18n::text(self.language, "menu.delete_remote_project")
                     }
                     _ => unreachable!(),
                 };
                 let editors: Vec<_> = match &menu.target {
-                    DeleteTarget::LocalProject { project, .. } => self
+                    TreeMenuTarget::Delete(DeleteTarget::LocalProject { project, .. }) => self
                         .last_snapshot
                         .project(project)
                         .map(|project| project.path.clone())
@@ -358,12 +376,22 @@ impl MuxlaneApp {
                         .unwrap_or_default(),
                     _ => Vec::new(),
                 };
+                let (host, project) = match &menu.target {
+                    TreeMenuTarget::Delete(DeleteTarget::RemoteProject { host, project, .. }) => {
+                        (Some(host.as_str()), Some(project.as_str()))
+                    }
+                    TreeMenuTarget::Delete(DeleteTarget::LocalProject { project, .. }) => {
+                        (None, Some(project.as_str()))
+                    }
+                    _ => (None, None),
+                };
                 let mut menu_el = div()
                     .w(ui_px(190.))
                     .bg(rgba(theme.bg1))
                     .border_1()
                     .border_color(rgba(theme.line))
-                    .shadow_lg();
+                    .shadow_lg()
+                    .child(self.notes_toggle_item(host, project, theme, cx));
                 for (launcher, path) in &editors {
                     let label = i18n::text(self.language, launcher.editor.label_key());
                     let launcher = launcher.clone();
@@ -398,10 +426,13 @@ impl MuxlaneApp {
                         .text_color(rgba(theme.red))
                         .hover(|style| style.bg(rgba(theme.bg2)))
                         .on_click(cx.listener({
-                            let target = menu.target.clone();
+                            let TreeMenuTarget::Delete(target) = menu.target.clone() else {
+                                unreachable!("project menu is a delete target");
+                            };
                             move |this, _event, _window, cx| {
+                                let target = target.clone();
                                 this.tree_menu = None;
-                                this.begin_delete(target.clone(), cx);
+                                this.begin_delete(target, cx);
                             }
                         }))
                         .child(label),
@@ -424,6 +455,53 @@ impl MuxlaneApp {
             .left(menu.position.x)
             .top(menu.position.y)
             .child(menu_el)
+            .into_any_element()
+    }
+
+    fn notes_toggle_menu(
+        &mut self,
+        host: Option<&str>,
+        project: Option<&str>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
+            .w(ui_px(180.))
+            .bg(rgba(theme.bg1))
+            .border_1()
+            .border_color(rgba(theme.line))
+            .shadow_lg()
+            .child(self.notes_toggle_item(host, project, theme, cx))
+    }
+
+    fn notes_toggle_item(
+        &mut self,
+        host: Option<&str>,
+        project: Option<&str>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let scope = self.notes_scope(host, project);
+        let enabled = self.notes_enabled(&scope);
+        let label = i18n::text(
+            self.language,
+            if enabled {
+                "notes.disable"
+            } else {
+                "notes.enable"
+            },
+        );
+        semantic_button("tree-notes-toggle", label, theme)
+            .px_3()
+            .py_2()
+            .text_size(ui_px(12.))
+            .text_color(rgba(theme.fg0))
+            .hover(|style| style.bg(rgba(theme.bg2)))
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.tree_menu = None;
+                this.toggle_notes(&scope, window, cx);
+            }))
+            .child(label)
             .into_any_element()
     }
 
@@ -889,10 +967,10 @@ mod tests {
             remote: false,
         });
         let mut tree_menu = Some(TreeMenu {
-            target: DeleteTarget::LocalProject {
+            target: TreeMenuTarget::Delete(DeleteTarget::LocalProject {
                 project: "project-1".into(),
                 label: "demo".into(),
-            },
+            }),
             position: Point::new(ui_px(30.), ui_px(40.)),
         });
 
