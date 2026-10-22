@@ -34,6 +34,16 @@ class ProtocolTest {
     }
 
     @Test
+    fun pieAndUnknownAgentTypesStillLoadTheSnapshot() {
+        val snapshot = muxlaneJson.decodeFromString(
+            Snapshot.serializer(),
+            """{"agents":[{"id":"a","project":"p","agent_type":"pie","title":"Pie"},{"id":"b","project":"p","agent_type":"future","title":"Future"}]}""",
+        )
+        assertEquals(AgentType.PIE, snapshot.agents[0].agentType)
+        assertEquals(AgentType.UNKNOWN, snapshot.agents[1].agentType)
+    }
+
+    @Test
     fun b64RoundTrip() {
         val src = "你好".toByteArray(Charsets.UTF_8)
         assertTrue(b64Decode(b64Encode(src)).contentEquals(src))

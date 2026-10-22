@@ -36,6 +36,8 @@ val muxlaneJson = Json {
     ignoreUnknownKeys = true
     encodeDefaults = true
     explicitNulls = false
+    // A newer desktop can add an agent type before this app knows it.
+    coerceInputValues = true
 }
 
 @Serializable
@@ -101,6 +103,7 @@ enum class AgentType {
     @SerialName("codex") CODEX,
     @SerialName("opencode") OPENCODE,
     @SerialName("pi") PI,
+    @SerialName("pie") PIE,
     @SerialName("gemini") GEMINI,
     @SerialName("agy") AGY,
     @SerialName("qwen") QWEN,
