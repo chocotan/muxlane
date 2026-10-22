@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1e2e"/>
+      <stop offset="100%" stop-color="#11111b"/>
+    </linearGradient>
+    <linearGradient id="primary" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#89b4fa"/>
+      <stop offset="100%" stop-color="#b4befe"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a6e3a1"/>
+      <stop offset="100%" stop-color="#94e2d5"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- Outer Frame -->
+  <rect x="32" y="32" width="448" height="448" fill="url(#bg)" stroke="#313244" stroke-width="6" filter="url(#shadow)"/>
+
+  <!-- Terminal Header Bar -->
+  <rect x="32" y="32" width="448" height="72" fill="#181825"/>
+  <rect x="32" y="70" width="448" height="34" fill="#181825"/>
+
+  <!-- Window Controls -->
+  <rect x="74" y="58" width="20" height="20" fill="#f38ba8"/>
+  <rect x="106" y="58" width="20" height="20" fill="#f9e2af"/>
+  <rect x="138" y="58" width="20" height="20" fill="#a6e3a1"/>
+
+  <!-- Terminal Prompt & Matrix Lines -->
+  <!-- Prompt Symbol >_ -->
+  <path d="M100 180 L180 250 L100 320" fill="none" stroke="url(#primary)" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Cursor block -->
+  <rect x="220" y="296" width="90" height="24" fill="url(#accent)"/>
+
+  <!-- Split Multiplexer Grid Hint -->
+  <rect x="260" y="160" width="160" height="100" fill="#181825" stroke="#45475a" stroke-width="5" stroke-dasharray="10 6"/>
+  <rect x="340" y="280" width="80" height="100" fill="#181825" stroke="#45475a" stroke-width="5"/>
+  <rect x="368" y="318" width="24" height="24" fill="#89b4fa"/>
+</svg>
