@@ -23,6 +23,7 @@ pub struct VTerm {
     /// 读频率也低（只在程序主动查询时），用 Mutex 不划算。
     window_size: Arc<AtomicU64>,
     silent: Arc<AtomicBool>,
+    default_colors: Arc<Mutex<[u32; 3]>>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -34,6 +35,8 @@ pub struct VTerm {
 pub enum TermSideEffect {
     ClipboardStore(String),
     PtyWrite(Vec<u8>),
+    /// OSC color reply. Keep it off the keyboard path so a paste cannot absorb it.
+    ColorReply(Vec<u8>),
 }
 
 struct VTermInner {
@@ -104,6 +107,8 @@ struct ClipboardBridge {
     window_size: Arc<AtomicU64>,
     /// 喂历史回放时置位：终端查询的应答不能再写回 PTY（当时已经答过了）。
     silent: Arc<AtomicBool>,
+    /// Actual foreground, background and cursor colors supplied by the renderer (RGBA).
+    default_colors: Arc<Mutex<[u32; 3]>>,
 }
 
 fn pack_window_size(cols: u16, rows: u16, cell_width: u16, cell_height: u16) -> u64 {
@@ -129,6 +134,27 @@ impl EventListener for ClipboardBridge {
             // 组好了应答文本，只需要回写进 PTY。
             Event::PtyWrite(text) if !self.silent.load(Ordering::Relaxed) => {
                 let _ = self.tx.send(TermSideEffect::PtyWrite(text.into_bytes()));
+            }
+            // OSC 4/10/11/12: Pi's system theme needs the palette and actual terminal
+            // defaults to generate panel backgrounds instead of its colorless fallback.
+            Event::ColorRequest(index, formatter) if !self.silent.load(Ordering::Relaxed) => {
+                let color = if index < 256 {
+                    indexed_color(index as u8)
+                } else {
+                    let Ok(colors) = self.default_colors.lock() else {
+                        return;
+                    };
+                    let Some(color) = colors.get(index - NamedColor::Foreground as usize) else {
+                        return;
+                    };
+                    *color
+                };
+                let text = formatter(Rgb {
+                    r: (color >> 24) as u8,
+                    g: (color >> 16) as u8,
+                    b: (color >> 8) as u8,
+                });
+                let _ = self.tx.send(TermSideEffect::ColorReply(text.into_bytes()));
             }
             // CSI 14t 报窗口像素尺寸：用最近一次 set_cell_pixel_size 写入的尺寸回答。拿不到
             // 真实像素尺寸的话（pixel_width/height=0）kitten icat 这类工具会直接拒绝发图。
@@ -251,6 +277,7 @@ impl VTerm {
         // 真实字体度量出来后会很快通过 set_cell_pixel_size 更新。
         let window_size = Arc::new(AtomicU64::new(pack_window_size(cols, rows, 8, 17)));
         let silent = Arc::new(AtomicBool::new(false));
+        let default_colors = Arc::new(Mutex::new([0xd7dae0ff, 0x181a1fff, 0x3d6cd8ff]));
         let term = Term::new(
             Default::default(),
             &size,
@@ -258,6 +285,7 @@ impl VTerm {
                 tx,
                 window_size: Arc::clone(&window_size),
                 silent: Arc::clone(&silent),
+                default_colors: Arc::clone(&default_colors),
             },
         );
         (
@@ -271,11 +299,19 @@ impl VTerm {
                 })),
                 window_size,
                 silent,
+                default_colors,
                 cols,
                 rows,
             },
             rx,
         )
+    }
+
+    /// Update the renderer's default RGBA colors used to answer OSC color queries.
+    pub fn set_default_colors(&self, foreground: u32, background: u32, cursor: u32) {
+        if let Ok(mut colors) = self.default_colors.lock() {
+            *colors = [foreground, background, cursor];
+        }
     }
 
     /// 喂历史回放字节：和 feed 一样解析，但不把终端查询（CSI 6n / 14t / DA…）的应答写回 PTY。
@@ -1032,6 +1068,62 @@ mod selection_tests {
             TermSideEffect::PtyWrite(bytes) => {
                 assert!(bytes.starts_with(b"\x1b["), "got {bytes:?}");
                 assert!(bytes.ends_with(b"R"), "got {bytes:?}");
+            }
+            other => panic!("expected PtyWrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc_color_queries_report_renderer_defaults_and_palette() {
+        let (vterm, mut rx) = VTerm::new_with_clipboard(80, 24);
+        vterm.set_default_colors(0x242831ff, 0xfaf9f6ff, 0x3d6cd8ff);
+        // The system theme asks for both defaults and all 16 ANSI colors at startup.
+        vterm.feed(b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]12;?\x07");
+        for expected in [
+            "\x1b]10;rgb:2424/2828/3131\x07",
+            "\x1b]11;rgb:fafa/f9f9/f6f6\x1b\\",
+            "\x1b]12;rgb:3d3d/6c6c/d8d8\x07",
+        ] {
+            match rx.try_recv().expect("default color reply") {
+                TermSideEffect::ColorReply(bytes) => assert_eq!(bytes, expected.as_bytes()),
+                other => panic!("expected PtyWrite, got {other:?}"),
+            }
+        }
+        for index in 0..=255u8 {
+            vterm.feed(format!("\x1b]4;{index};?\x07").as_bytes());
+            let TermSideEffect::ColorReply(bytes) = rx.try_recv().expect("palette color reply")
+            else {
+                panic!("expected PtyWrite");
+            };
+            vterm.feed(format!("\x1b[38;5;{index}mX\r").as_bytes());
+            let color = vterm.render_snapshot().rows[0].runs[0].style.fg;
+            let (r, g, b) = ((color >> 24) as u8, (color >> 16) as u8, (color >> 8) as u8);
+            assert_eq!(
+                bytes,
+                format!("\x1b]4;{index};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07")
+                    .as_bytes(),
+                "reported color must match rendered palette index {index}"
+            );
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn color_queries_follow_theme_updates_and_ignore_replay() {
+        let (vterm, mut rx) = VTerm::new_with_clipboard(80, 24);
+        vterm.feed_silent(b"\x1b]10;?\x07\x1b]11;?\x07\x1b]4;1;?\x07");
+        assert!(
+            rx.try_recv().is_err(),
+            "replay must not answer color queries"
+        );
+        let clone = vterm.clone();
+        clone.set_default_colors(0xd7dae0ff, 0x181a1fff, 0x3d6cd8ff);
+        vterm.feed(b"\x1b]11;");
+        assert!(rx.try_recv().is_err());
+        vterm.feed(b"?\x07");
+        match rx.try_recv().expect("fragmented query reply") {
+            TermSideEffect::ColorReply(bytes) => {
+                assert_eq!(bytes, b"\x1b]11;rgb:1818/1a1a/1f1f\x07");
             }
             other => panic!("expected PtyWrite, got {other:?}"),
         }

@@ -396,6 +396,8 @@ impl ShapeCache {
 #[derive(Debug)]
 pub enum RemoteTermCommand {
     Input(Vec<u8>),
+    /// Terminal color reply. Must not be merged into a keyboard/paste batch.
+    Report(Vec<u8>),
     Resize(u16, u16),
     /// 剪贴板图片：先经 SSH 落到远端 /tmp，再粘贴远端路径
     PasteImage {
@@ -416,6 +418,15 @@ impl InputSink {
             InputSink::Local(session) => session.write_input(bytes),
             InputSink::Remote(sender) => {
                 let _ = sender.send(RemoteTermCommand::Input(bytes.to_vec()));
+            }
+        }
+    }
+
+    fn report(&self, bytes: &[u8]) {
+        match self {
+            InputSink::Local(session) => session.write_input(bytes),
+            InputSink::Remote(sender) => {
+                let _ = sender.send(RemoteTermCommand::Report(bytes.to_vec()));
             }
         }
     }
@@ -685,6 +696,13 @@ impl TermView {
                             }
                         })
                         .is_err(),
+                    muxlane_term::TermSideEffect::ColorReply(bytes) => view
+                        .update(cx, move |view, _cx| {
+                            if let Some(sink) = view.input_sink() {
+                                sink.report(&bytes);
+                            }
+                        })
+                        .is_err(),
                 };
                 if stop {
                     break;
@@ -703,6 +721,7 @@ impl TermView {
         cx: &mut Context<Self>,
     ) -> Self {
         let (vterm, clipboard_rx) = VTerm::new_with_clipboard(120, 32);
+        vterm.set_default_colors(theme.fg0, theme.bg0, theme.cursor());
         let osc52_clipboard_enabled = Arc::new(AtomicBool::new(osc52_clipboard_enabled));
         let clipboard =
             Self::clipboard_task(clipboard_rx, Arc::clone(&osc52_clipboard_enabled), cx);
@@ -710,6 +729,7 @@ impl TermView {
         // replay 是历史字节，里面的终端查询（CSI 6n / 14t / DA…）当时已经回答过了；重新喂一遍时
         // 必须静默，否则会第二次把应答写进 PTY，当成键盘输入落到前台程序的输入框里。
         vterm.feed_silent(&replay);
+        session.set_terminal_colors(theme.fg0, theme.bg0);
         let vterm_for_task = vterm.clone();
         let session_for_task = Arc::clone(&session);
         let drain = cx.spawn(async move |view, cx| {
@@ -864,6 +884,7 @@ impl TermView {
         cx: &mut Context<Self>,
     ) -> Self {
         let (vterm, clipboard_rx) = terminal;
+        vterm.set_default_colors(theme.fg0, theme.bg0, theme.cursor());
         let osc52_clipboard_enabled = Arc::new(AtomicBool::new(osc52_clipboard_enabled));
         let clipboard =
             Self::clipboard_task(clipboard_rx, Arc::clone(&osc52_clipboard_enabled), cx);
@@ -914,6 +935,11 @@ impl TermView {
 
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
+        self.vterm
+            .set_default_colors(theme.fg0, theme.bg0, theme.cursor());
+        if let Some(session) = &self.writer {
+            session.set_terminal_colors(theme.fg0, theme.bg0);
+        }
         // 主题颜色烘进 ShapedLine 的 TextRun，必须重建 shaping 缓存。
         if let Ok(mut cache) = self.shape_cache.lock() {
             cache.rows.clear();

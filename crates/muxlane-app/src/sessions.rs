@@ -260,12 +260,21 @@ impl MuxlaneApp {
                 self.server.rt_spawn(async move {
                     while let Some(first) = command_rx.recv().await {
                         let mut input = Vec::new();
+                        let mut before = Vec::new();
+                        let mut after = Vec::new();
                         let mut resize = None;
                         let mut pastes: Vec<crate::term_view::RemoteTermCommand> = Vec::new();
                         let mut collect =
                             |command: crate::term_view::RemoteTermCommand| match command {
                                 crate::term_view::RemoteTermCommand::Input(bytes) => {
                                     input.extend(bytes)
+                                }
+                                crate::term_view::RemoteTermCommand::Report(bytes) => {
+                                    if input.is_empty() {
+                                        before.extend(bytes);
+                                    } else {
+                                        after.extend(bytes);
+                                    }
                                 }
                                 crate::term_view::RemoteTermCommand::Resize(cols, rows) => {
                                     resize = Some((cols, rows));
@@ -281,9 +290,12 @@ impl MuxlaneApp {
                         while let Ok(command) = command_rx.try_recv() {
                             collect(command);
                         }
-                        if !input.is_empty() {
+                        for bytes in [before, input, after] {
+                            if bytes.is_empty() {
+                                continue;
+                            }
                             if let Err(error) =
-                                command_remote.send_term_input(&command_agent, &input).await
+                                command_remote.send_term_input(&command_agent, &bytes).await
                             {
                                 command_vterm.feed(
                                     format!("\r\n\x1b[31mremote input failed: {error}\x1b[0m\r\n")
@@ -568,6 +580,8 @@ impl MuxlaneApp {
         if let Some(a) = self.last_snapshot.agent_mut(agent) {
             a.seen = true;
             if a.status.is_finished() {
+                self.local_read_results
+                    .insert(agent.clone(), (a.status, Some(a.status_since)));
                 a.status = muxlane_core::model::AgentStatus::Idle;
             }
         } else {
