@@ -335,6 +335,12 @@ impl PtySession {
             .unwrap_or_default()
     }
 
+    /// Tail used when a remote subscriber must rebuild its screen. Full replay
+    /// stays local so reconnects do not resend up to 4MB, including old images.
+    pub fn resync_snapshot(&self) -> bytes::Bytes {
+        self.replay_tail(256 * 1024)
+    }
+
     /// 回放尾部 n 字节：锁内只拷尾部，供屏幕采样等热路径使用
     pub fn replay_tail(&self, n: usize) -> bytes::Bytes {
         self.shared
@@ -366,6 +372,23 @@ impl PtySession {
             let _ = w.write_all(input);
             let _ = w.flush();
         }
+    }
+
+    /// Seed tmux's cached terminal defaults after attaching a renderer. Its startup
+    /// OSC queries may already be in replay, where query replies are suppressed.
+    /// tmux consumes these reports itself; never send them to a direct PTY process.
+    pub fn set_terminal_colors(&self, foreground: u32, background: u32) {
+        if self.tmux_session_name.is_none() {
+            return;
+        }
+        let mut reports = String::new();
+        for (code, color) in [(10, foreground), (11, background)] {
+            let (r, g, b) = ((color >> 24) as u8, (color >> 16) as u8, (color >> 8) as u8);
+            reports.push_str(&format!(
+                "\x1b]{code};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\"
+            ));
+        }
+        self.write_input(reports.as_bytes());
     }
 
     pub fn interaction_recent(&self) -> bool {
@@ -984,6 +1007,8 @@ mod tests {
         let s = PtySession::spawn(cfg).unwrap();
         let (_snap, mut rx) = s.subscribe();
         tokio::time::sleep(Duration::from_millis(200)).await;
+        // Color reports belong to tmux and must never become direct-process input.
+        s.set_terminal_colors(0x242831ff, 0xfaf9f6ff);
         s.write_input(b"ping\r\n");
         let mut got = Vec::new();
         for _ in 0..50 {
@@ -1028,6 +1053,77 @@ mod tests {
         );
         s.kill();
     }
+    #[tokio::test]
+    async fn tmux_forwards_default_color_queries_to_renderer() {
+        let socket = format!(
+            "muxlane-colors-test-{}-{}",
+            std::process::id(),
+            now_millis()
+        );
+        let cfg = LaunchCfg {
+            agent: "colors-a".into(),
+            agent_type: AgentType::Shell,
+            cwd: std::env::temp_dir(),
+            env: vec![],
+            program_override: Some("bash".into()),
+            args: vec![
+                "-c".into(),
+                r#"
+read -r start
+stty -echo -icanon
+printf '\033]11;?\007'
+reply=""
+while IFS= read -r -n 1 -t 3 byte; do
+    reply+="$byte"
+    if [[ "$byte" == $'\a' || "$byte" == '\' ]]; then break; fi
+done
+if [[ "$reply" == *"rgb:fafa/f9f9/f6f6"* ]]; then
+    printf '\r\nCOLOR-QUERY-OK\r\n'
+else
+    printf '\r\nCOLOR-QUERY-FAILED: %q\r\n' "$reply"
+fi
+sleep 1
+"#
+                .into(),
+            ],
+            cols: 80,
+            rows: 24,
+            tmux_session: Some("colors".into()),
+        };
+        let session = PtySession::spawn_with_tmux_socket(cfg, &socket).unwrap();
+        let _cleanup = TmuxServerCleanup::new(socket);
+        let (vterm, mut effects) = crate::VTerm::new_with_clipboard(80, 24);
+        vterm.set_default_colors(0x242831ff, 0xfaf9f6ff, 0x3d6cd8ff);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (replay, mut output) = session.subscribe();
+        // Match a view attaching after tmux has already queried colors: replay
+        // remains silent, then the renderer seeds tmux's cached defaults.
+        vterm.feed_silent(&replay);
+        session.set_terminal_colors(0x242831ff, 0xfaf9f6ff);
+        session.write_input(b"start\n");
+        let mut received = Vec::new();
+        let deadline = tokio::time::sleep(Duration::from_secs(5));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                Ok(bytes) = output.recv() => {
+                    received.extend_from_slice(&bytes);
+                    vterm.feed(&bytes);
+                    if received.windows(14).any(|w| w == b"COLOR-QUERY-OK") {
+                        break;
+                    }
+                }
+                Some(crate::TermSideEffect::PtyWrite(bytes) | crate::TermSideEffect::ColorReply(bytes)) = effects.recv() => {
+                    session.write_input(&bytes);
+                }
+                _ = &mut deadline => {
+                    panic!("tmux color query failed: {}", String::from_utf8_lossy(&received));
+                }
+            }
+        }
+        session.kill_persistent();
+    }
+
     #[test]
     fn tmux_session_survives_client_detach_and_reattaches() {
         let socket = format!(

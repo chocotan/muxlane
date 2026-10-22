@@ -43,6 +43,8 @@ impl SubRegistry {
         replay: Bytes,
         replay_chunks: bool,
         replay_gzip: bool,
+        data_gzip: bool,
+        data_stream: bool,
     ) {
         let ending = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(Notify::new());
@@ -55,6 +57,8 @@ impl SubRegistry {
             replay,
             replay_chunks,
             replay_gzip,
+            data_gzip,
+            data_stream,
             Arc::clone(&ending),
             Arc::clone(&wake),
             self.me.clone(),
@@ -115,12 +119,15 @@ async fn forward(
     replay: Bytes,
     replay_chunks: bool,
     replay_gzip: bool,
+    data_gzip: bool,
+    data_stream: bool,
     ending: Arc<AtomicBool>,
     wake: Arc<Notify>,
     registry: Option<Weak<Mutex<SubRegistry>>>,
 ) {
     let mut last_resync: Option<Instant> = None;
     let mut replay_id = 0u64;
+    let mut stream = data_stream.then(muxlane_core::protocol::DataStreamEncoder::new);
     if replay_chunks
         && !send_replay_chunks(&sink, &agent, &sub_id, replay_id, &replay, replay_gzip).await
     {
@@ -144,11 +151,29 @@ async fn forward(
             _ = wake.notified() => {}
             result = rx.recv() => match result {
                 Ok(bytes) => {
+                    let mut batch = bytes.to_vec();
+                    // A burst is one frame. Waiting would add latency to keystrokes and prompts.
+                    while batch.len() < 64 * 1024 {
+                        match rx.try_recv() {
+                            Ok(more) => batch.extend_from_slice(&more),
+                            Err(_) => break,
+                        }
+                    }
+                    let payload = if let Some(encoder) = stream.as_mut() {
+                        let Some(payload) = encoder.push(&batch) else {
+                            break;
+                        };
+                        payload
+                    } else if data_gzip {
+                        muxlane_core::protocol::gzip_encode(&batch)
+                    } else {
+                        batch
+                    };
                     let msg = EventMsg::new(
                         muxlane_core::protocol::events::TERM_DATA,
                         serde_json::to_value(TermDataEvent {
                             agent: agent.clone(),
-                            data_b64: muxlane_core::protocol::b64_encode(&bytes),
+                            data_b64: muxlane_core::protocol::b64_encode(&payload),
                         })
                         .unwrap_or_default(),
                     );
@@ -171,7 +196,8 @@ async fn forward(
                         }
                     }
                     // 队列满/Lagged 不是可忽略条件：以完整 replay resync 重建无损边界。
-                    let (snapshot, new_rx) = session.subscribe();
+                    let (_snapshot, new_rx) = session.subscribe();
+                    let snapshot = session.resync_snapshot();
                     rx = new_rx;
                     replay_id = replay_id.wrapping_add(1);
                     let sent = if replay_chunks {
@@ -394,23 +420,24 @@ mod tests {
             Bytes::new(),
             false,
             false,
+            false,
+            false,
         );
 
         for byte in 0..64u32 {
             tap_tx.send(Bytes::from(vec![byte as u8])).unwrap();
         }
-        for expected in 0..64u32 {
+        let mut received = Vec::new();
+        while received.len() < 64 {
             let message = tokio::time::timeout(Duration::from_secs(2), sink_rx.recv())
                 .await
                 .expect("frame within deadline")
                 .expect("frame");
             assert_eq!(message.event, muxlane_core::protocol::events::TERM_DATA);
             let event: TermDataEvent = serde_json::from_value(message.params).unwrap();
-            assert_eq!(
-                muxlane_core::protocol::b64_decode(&event.data_b64).unwrap(),
-                vec![expected as u8]
-            );
+            received.extend(muxlane_core::protocol::b64_decode(&event.data_b64).unwrap());
         }
+        assert_eq!(received, (0..64).map(|byte| byte as u8).collect::<Vec<_>>());
         session.kill();
     }
 
@@ -431,6 +458,8 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
+            false,
             false,
             false,
         );
@@ -487,6 +516,8 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
+            false,
             false,
             false,
         );
@@ -550,6 +581,8 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
+            false,
             false,
             false,
         );

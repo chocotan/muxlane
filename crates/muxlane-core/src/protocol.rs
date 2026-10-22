@@ -248,6 +248,12 @@ pub struct TermSubscribeParams {
     /// Old servers ignore this and send plain bytes; clients must handle both.
     #[serde(default)]
     pub accept_replay_gzip: bool,
+    /// Live term.data payloads are also gzip-compressed. Old servers ignore this.
+    #[serde(default)]
+    pub accept_data_gzip: bool,
+    /// Live term.data is one raw-deflate stream. Repeated screen redraws stay small.
+    #[serde(default)]
+    pub accept_data_stream: bool,
 }
 
 /// gzip 压缩 replay 字节（flate2 已在 workspace 依赖里；TUI 输出典型压缩比 5-10×）。
@@ -256,6 +262,62 @@ pub fn gzip_encode(data: &[u8]) -> Vec<u8> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let _ = encoder.write_all(data);
     encoder.finish().unwrap_or_else(|_| Vec::new())
+}
+
+/// Raw deflate stream shared by every live frame of one subscription.
+pub struct DataStreamEncoder {
+    encoder: flate2::write::DeflateEncoder<Vec<u8>>,
+}
+
+impl DataStreamEncoder {
+    pub fn new() -> Self {
+        Self {
+            encoder: flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast()),
+        }
+    }
+
+    /// Compress one batch and return only the new bytes, prefixed by a stream marker.
+    pub fn push(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        use std::io::Write;
+        let start = self.encoder.get_ref().len();
+        self.encoder.write_all(data).ok()?;
+        std::io::Write::flush(&mut self.encoder).ok()?;
+        let mut payload = vec![0];
+        payload.extend_from_slice(&self.encoder.get_ref()[start..]);
+        Some(payload)
+    }
+}
+
+#[cfg(test)]
+mod data_stream_tests {
+    use super::DataStreamEncoder;
+
+    #[test]
+    fn repeated_frames_shrink_after_the_dictionary_warms() {
+        let frame = b"\x1b[2J\x1b[Hstatus: compiling the same screen again\n";
+        let mut encoder = DataStreamEncoder::new();
+        let mut decoder = flate2::Decompress::new(false);
+        let mut first = 0;
+        for index in 0..8 {
+            let payload = encoder.push(frame).unwrap();
+            assert_eq!(payload[0], 0);
+            let before = decoder.total_out();
+            let mut plain = vec![0u8; frame.len()];
+            decoder.decompress(
+                &payload[1..],
+                &mut plain,
+                flate2::FlushDecompress::Sync,
+            ).unwrap();
+            let produced = (decoder.total_out() - before) as usize;
+            plain.truncate(produced);
+            assert_eq!(plain, frame);
+            if index == 0 {
+                first = payload.len();
+            } else {
+                assert!(payload.len() < first, "repeat {index}: {} >= {first}", payload.len());
+            }
+        }
+    }
 }
 
 /// 解压 replay 字节；输入不是 gzip 时原样返回（老服务端回退路径）。

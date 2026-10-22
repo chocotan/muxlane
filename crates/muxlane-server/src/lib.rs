@@ -254,7 +254,8 @@ impl MuxlaneServer {
         let prepared = {
             let session = self.sessions.lock().await.get(&params.agent).cloned();
             session.map(|session| {
-                let (snapshot, rx) = session.subscribe();
+                let (_snapshot, rx) = session.subscribe();
+                let snapshot = session.resync_snapshot();
                 (muxlane_core::model::new_id("sub"), snapshot, rx, session)
             })
         };
@@ -274,6 +275,8 @@ impl MuxlaneServer {
             snapshot.clone(),
             params.accept_replay_chunks,
             params.accept_replay_gzip,
+            params.accept_data_gzip,
+            params.accept_data_stream,
         );
         connection_subs.push(sub_id.clone());
         let replay_payload = if params.accept_replay_gzip {
