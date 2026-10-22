@@ -126,19 +126,33 @@ fn identify_panes(panes: &str, process_list: &str) -> HashMap<String, ShellForeg
 }
 
 fn parse_process(line: &str) -> Option<Process> {
-    let mut rest = line.trim();
-    let mut fields = Vec::new();
-    for _ in 0..4 {
-        let end = rest.find(char::is_whitespace)?;
-        fields.push(&rest[..end]);
-        rest = rest[end..].trim_start();
+    // BusyBox and BSD ps can glue right-aligned columns together. Take four
+    // numeric fields, then the command, instead of requiring a space between them.
+    let rest = line.trim_start();
+    let mut values = [0i64; 4];
+    let mut cursor = 0;
+    for value in &mut values {
+        let bytes = rest[cursor..].as_bytes();
+        let start = bytes.iter().position(|byte| !byte.is_ascii_whitespace())?;
+        cursor += start;
+        let token = rest[cursor..].split_whitespace().next()?;
+        let number: String = token
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit() || *ch == '-')
+            .collect();
+        if number.is_empty() || number == "-" {
+            return None;
+        }
+        *value = number.parse().ok()?;
+        cursor += number.len();
     }
-    Some(Process {
-        pid: fields[0].parse().ok()?,
-        parent: fields[1].parse().ok()?,
-        group: fields[2].parse().ok()?,
-        foreground: fields[3].parse().ok()?,
-        command: rest.into(),
+    let command = rest[cursor..].trim().to_string();
+    (!command.is_empty()).then_some(Process {
+        pid: values[0] as u32,
+        parent: values[1] as u32,
+        group: values[2],
+        foreground: values[3],
+        command,
     })
 }
 
@@ -159,6 +173,7 @@ fn command_agent(command: &str) -> Option<AgentType> {
         "codex" => Some(AgentType::Codex),
         "opencode" => Some(AgentType::Opencode),
         "pi" => Some(AgentType::Pi),
+        "pie" => Some(AgentType::Pie),
         "agy" => Some(AgentType::Agy),
         "qwen" => Some(AgentType::Qwen),
         "kimi" => Some(AgentType::Kimi),
@@ -183,6 +198,8 @@ fn command_agent(command: &str) -> Option<AgentType> {
     for (package, kind) in [
         ("/@mariozechner/pi-coding-agent/", AgentType::Pi),
         ("/@earendil-works/pi-coding-agent/", AgentType::Pi),
+        ("/pi-coding-agent/", AgentType::Pi),
+        ("/.pie/", AgentType::Pie),
         ("/@anthropic-ai/claude-code/", AgentType::Claude),
         ("/@openai/codex/", AgentType::Codex),
         ("/opencode-ai/", AgentType::Opencode),
@@ -237,9 +254,20 @@ mod tests {
 
     #[test]
     fn recognizes_executables_and_npm_entrypoints_not_mentions() {
-        for command in ["pi", "/usr/local/bin/pi --help", "node /home/test/.nvm/versions/node/v22/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js", "node /opt/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "node /opt/bin/pi"] {
+        for command in ["pi", "/usr/local/bin/pi --help", "node /home/test/.nvm/versions/node/v22/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js", "node /opt/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "node /opt/bin/pi", "node /opt/pi-coding-agent/dist/cli.js"] {
             assert_eq!(command_agent(command), Some(AgentType::Pi), "{command}");
         }
+        assert_eq!(
+            command_agent("node /home/choco/.pie/runtime/cli.js"),
+            Some(AgentType::Pie)
+        );
+        assert_eq!(command_agent("pie"), Some(AgentType::Pie));
+        let panes = "muxlane-shell_test\t100\n";
+        let busybox = "100 1 100 200/bin/bash\n200 100 200 200/usr/bin/node /opt/pi-coding-agent/dist/cli.js\n";
+        assert_eq!(
+            identify_panes(panes, busybox)["muxlane-shell_test"].agent_type,
+            AgentType::Pi
+        );
         for command in [
             "echo pi",
             "grep codex log",

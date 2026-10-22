@@ -97,6 +97,15 @@ pub fn builtin_presets(shell: impl Into<String>) -> Vec<AgentPreset> {
             require_installed: true,
         },
         AgentPreset {
+            id: "pie".into(),
+            label: "Pie".into(),
+            agent_type: AgentType::Pie,
+            program: "pie".into(),
+            args: vec![],
+            env: empty(),
+            require_installed: true,
+        },
+        AgentPreset {
             id: "agy".into(),
             label: "Agy".into(),
             agent_type: AgentType::Agy,
@@ -180,7 +189,7 @@ mod tests {
         let ps = builtin_presets("/bin/zsh");
         assert_eq!(ps[0].program, "/bin/zsh");
         for id in [
-            "shell", "claude", "codex", "opencode", "pi", "agy", "qwen", "kimi",
+            "shell", "claude", "codex", "opencode", "pi", "pie", "agy", "qwen", "kimi",
         ] {
             assert!(ps.iter().any(|p| p.id == id));
         }
@@ -189,7 +198,7 @@ mod tests {
             ps.iter()
                 .filter(|p| p.agent_type != AgentType::Shell)
                 .count(),
-            7
+            8
         );
     }
     #[test]

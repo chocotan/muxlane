@@ -35,6 +35,8 @@ pub enum AgentType {
     Codex,
     Opencode,
     Pi,
+    /// Pi-compatible CLI with its own `~/.pie` config directory.
+    Pie,
     /// Kept for deserializing older state; never offered or auto-detected.
     Gemini,
     Agy,
@@ -52,6 +54,7 @@ impl AgentType {
             AgentType::Codex => "codex",
             AgentType::Opencode => "opencode",
             AgentType::Pi => "pi",
+            AgentType::Pie => "pie",
             AgentType::Gemini => "gemini",
             AgentType::Agy => "agy",
             AgentType::Qwen => "qwen",
@@ -66,6 +69,7 @@ impl AgentType {
             AgentType::Codex => "codex",
             AgentType::Opencode => "opencode",
             AgentType::Pi => "pi",
+            AgentType::Pie => "pie",
             AgentType::Gemini => "gemini",
             AgentType::Agy => "agy",
             AgentType::Qwen => "qwen",

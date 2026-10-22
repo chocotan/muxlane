@@ -276,6 +276,7 @@ pub fn builtin_manifests() -> Vec<CompiledManifest> {
         ("codex", include_str!("manifests/codex.toml")),
         ("opencode", include_str!("manifests/opencode.toml")),
         ("pi", include_str!("manifests/pi.toml")),
+        ("pie", include_str!("manifests/pi.toml")),
         ("agy", include_str!("manifests/agy.toml")),
         ("qwen", include_str!("manifests/qwen.toml")),
         ("kimi", include_str!("manifests/kimi.toml")),
@@ -432,7 +433,7 @@ mod tests {
             .map(|m| m.agent_type)
             .collect::<std::collections::BTreeSet<_>>();
         let expected = [
-            "agy", "claude", "codex", "kimi", "opencode", "pi", "qwen", "shell",
+            "agy", "claude", "codex", "kimi", "opencode", "pi", "pie", "qwen", "shell",
         ]
         .into_iter()
         .map(str::to_string)

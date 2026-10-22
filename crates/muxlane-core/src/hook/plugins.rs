@@ -29,9 +29,13 @@ pub fn install_agent_plugins(home: &Path) -> Result<()> {
     write_file_if_changed(&opencode, OPENCODE_PLUGIN)?;
     let pi = home.join(".pi/agent/extensions/muxlane.ts");
     write_file_if_changed(&pi, PI_EXTENSION)?;
+    // Pie is a Pi-compatible CLI with its own config directory.
+    let pie = home.join(".pie/agent/extensions/muxlane.ts");
+    write_file_if_changed(&pie, PI_EXTENSION)?;
     for legacy in [
         ".config/opencode/plugins/lmux.ts",
         ".pi/agent/extensions/lmux.ts",
+        ".pie/agent/extensions/lmux.ts",
     ] {
         std::fs::remove_file(home.join(legacy)).ok();
     }
@@ -142,7 +146,11 @@ assert.equal(connections, 1)
                 .unwrap();
         let pi =
             std::fs::read_to_string(dir.path().join(".pi/agent/extensions/muxlane.ts")).unwrap();
+        let pie =
+            std::fs::read_to_string(dir.path().join(".pie/agent/extensions/muxlane.ts")).unwrap();
         assert!(opencode.contains("client.session.messages"));
+        assert_eq!(pi, pie);
+        assert!(pi.contains("willRetry !== false"));
         assert!(pi.contains("agent_settled"));
         assert!(pi.contains("assistantText"));
         assert!(pi.contains("isLegacySubagentProcess"));

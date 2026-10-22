@@ -95,9 +95,9 @@ export default function (pi) {
     if (shouldIgnoreRun(ctx)) return
     const text = assistantText(event?.messages || [])
     if (text) latestAssistant = shortText(text, 180)
-    // Pi < 0.80.4 没有 agent_settled。willRetry 表示这轮还会自动继续。
-    // 不能用 ctx.isIdle()：agent_end 时它经常仍是 false，done 会被丢掉，loading 就停不下来。
-    if (doneReported || event?.willRetry) return
+    // Pie's extension agent_end omits willRetry. Only old Pi, which still puts
+    // willRetry on the event, may finish here. Current Pie finishes in agent_settled.
+    if (doneReported || event?.willRetry !== false) return
     doneReported = true
     let msg = latestAssistant
     if (event?.error || ctx?.error) {
