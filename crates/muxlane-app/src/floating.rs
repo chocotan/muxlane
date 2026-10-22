@@ -703,15 +703,20 @@ impl MuxlaneApp {
                 cx.notify();
             });
         }
-        if !self
+        if self
             .floating
             .windows
             .get(&event.agent)
             .is_some_and(|h| h.window_id() == event.window)
         {
+            self.floating.focused = Some(identity);
+        } else if self.active.as_ref() == Some(&event.agent) && !self.is_detached(&event.agent) {
+            // Returning to the main native window must acknowledge its result too.
+            // Its terminal also emits focus events; previously only floating windows did.
+            self.floating.focused = None;
+        } else {
             return;
         }
-        self.floating.focused = Some(identity);
         self.mark_agent_seen(&event.agent, cx);
     }
 

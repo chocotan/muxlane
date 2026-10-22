@@ -19,7 +19,6 @@ pub(crate) const SIDEBAR_COLLAPSE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.or
 pub(crate) const DETACH_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><path d='M10 4H4v16h16v-6'/><path d='M14 4h6v6M20 4l-9 9'/></svg>"#;
 /// Arrow entering a box: bring a session back into the main window.
 pub(crate) const REATTACH_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><path d='M10 4H4v16h16v-6'/><path d='M20 10h-6V4M14 10l6-6'/></svg>"#;
-pub(crate) const NOTE_ICON: &[u8] = br#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='1.8' stroke-linecap='square' stroke-linejoin='miter'><path d='M6 3h12v18H6z'/><path d='M9 8h6M9 12h6M9 16h4'/></svg>"#;
 
 const SVG_ASSETS: &[(&str, &[u8])] = &[
     ("icons/split-horizontal.svg", SPLIT_HORIZONTAL_ICON),
@@ -38,7 +37,6 @@ const SVG_ASSETS: &[(&str, &[u8])] = &[
     ("icons/sidebar-collapse.svg", SIDEBAR_COLLAPSE_ICON),
     ("icons/detach.svg", DETACH_ICON),
     ("icons/reattach.svg", REATTACH_ICON),
-    ("icons/note.svg", NOTE_ICON),
 ];
 
 pub(crate) fn svg_asset(path: &str) -> Option<&'static [u8]> {

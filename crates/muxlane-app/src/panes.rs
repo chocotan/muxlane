@@ -51,29 +51,7 @@ impl MuxlaneApp {
         }
         self.active_pane = pane.clone();
         self.active = Some(agent.clone());
-        // 清理当前 agent 的 Toast 与标记通知已读
-        self.notifications
-            .update(cx, |center, cx| center.mark_agent_read(agent, cx));
-        if let Some(a) = self.last_snapshot.agent_mut(agent) {
-            a.seen = true;
-            if a.status.is_finished() {
-                a.status = muxlane_core::model::AgentStatus::Idle;
-            }
-        }
-        for snapshot in self.remote_snaps.values_mut() {
-            if let Some(instance) = snapshot.agent_mut(agent) {
-                instance.seen = true;
-            }
-        }
-        // 查看本地 Done agent 后回到 Idle。
-        if self.last_snapshot.agent(agent).is_some() {
-            let server = Arc::clone(&self.server);
-            let agent = agent.clone();
-            server.rt_spawn({
-                let server = Arc::clone(&server);
-                async move { server.mark_seen(&agent).await }
-            });
-        }
+        self.mark_agent_seen(agent, cx);
         self.persist();
     }
 

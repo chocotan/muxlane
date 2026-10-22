@@ -209,8 +209,6 @@ impl MuxlaneApp {
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.remote_project_input
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
-        self.note_input
-            .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         let theme = Theme::for_mode(self.theme_mode);
         for term in self.terms.values() {
             term.update(cx, |term, cx| term.set_theme(theme, cx));
@@ -301,7 +299,6 @@ impl MuxlaneApp {
             (&self.connect_key_path, "placeholder.private_key"),
             (&self.settings_relay_input, "placeholder.relay_url"),
             (&self.settings_relay_token_input, "placeholder.relay_token"),
-            (&self.note_input, "notes.placeholder"),
         ] {
             input.update(cx, |input, cx| {
                 input.set_placeholder(i18n::text(language, key), cx)

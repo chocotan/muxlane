@@ -124,9 +124,17 @@ impl NotificationCenter {
                 .iter_mut()
                 .find(|item| item.agent == draft.agent && item.to == draft.to)
             {
-                existing.message = Some(body);
-                existing.unread = !draft.focused;
-                existing.time_secs = now_secs;
+                existing.message = Some(body.clone());
+                // Enrichment is not a new result. Reading it is monotonic even if
+                // its final hook message arrives after focus moved elsewhere.
+                existing.unread &= !draft.focused;
+                for toast in self
+                    .toasts
+                    .iter_mut()
+                    .filter(|toast| toast.agent == draft.agent && toast.status == draft.to)
+                {
+                    toast.message = body.clone();
+                }
                 cx.notify();
             }
             return;
@@ -170,9 +178,6 @@ impl NotificationCenter {
         };
 
         if draft.focused {
-            if draft.desktop_enabled {
-                sound::send_desktop_notification(&toast_title, &body);
-            }
             cx.notify();
             return;
         }

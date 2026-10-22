@@ -57,6 +57,274 @@ fn remote_online(snapshot: muxlane_core::model::Snapshot) -> muxlane_client::Cli
     }
 }
 
+fn status_event(
+    agent: &str,
+    from: AgentStatus,
+    to: AgentStatus,
+    message: Option<&str>,
+) -> muxlane_core::protocol::AgentStatusEvent {
+    muxlane_core::protocol::AgentStatusEvent {
+        agent: agent.into(),
+        agent_type: Some(AgentType::Pi),
+        from,
+        to,
+        message: message.map(str::to_owned),
+    }
+}
+
+#[test]
+fn focused_local_results_stay_read_after_window_switch_and_late_snapshot() {
+    for detached in [false, true] {
+        for status in [AgentStatus::Done, AgentStatus::Failed] {
+            with_app(|cx, window, app| {
+                cx.update_window(window, |_, window, cx| {
+                    app.update(cx, |app, cx| {
+                        app.sound_enabled = false;
+                        app.last_snapshot.projects = vec![project("local")];
+                        for id in ["local-a", "local-b"] {
+                            app.last_snapshot.agents.push(AgentInstance {
+                                id: id.into(),
+                                project: "local".into(),
+                                agent_type: AgentType::Pi,
+                                title: id.into(),
+                                status: AgentStatus::Working,
+                                status_since: 10,
+                                seen: true,
+                                tmux_session: None,
+                            });
+                            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+                            let term = MuxlaneApp::create_remote_term(
+                                id.into(),
+                                muxlane_term::VTerm::new_with_clipboard(80, 24),
+                                sender,
+                                &app.font_family,
+                                Theme::for_mode(app.theme_mode),
+                                false,
+                                cx,
+                            );
+                            app.terms.insert(id.into(), term);
+                            app.open_agent(&id.into(), window, cx);
+                        }
+                        if detached {
+                            app.detach_session(&"local-a".into(), cx);
+                        } else {
+                            let pane = app.active_pane.clone();
+                            app.activate_tab(&pane, &"local-a".into(), cx);
+                        }
+                    });
+                })
+                .unwrap();
+                draw(cx, window);
+                cx.update_window(window, |_, window, cx| {
+                    app.update(cx, |app, cx| {
+                        if detached {
+                            let handle = app.floating.windows["local-a"];
+                            app.handle_terminal_focus(
+                                &crate::term_view::TermFocusEvent {
+                                    agent: "local-a".into(),
+                                    window: handle.window_id(),
+                                    focused: true,
+                                },
+                                cx,
+                            );
+                        }
+                        assert_eq!(
+                            app.notification_focused_agent().map(String::as_str),
+                            Some("local-a")
+                        );
+                        app.handle_agent_status(
+                            None,
+                            status_event("local-a", AgentStatus::Working, status, None),
+                            cx,
+                        );
+                        let completed = app.last_snapshot.agent(&"local-a".into()).unwrap();
+                        assert!(completed.seen);
+                        assert_eq!(completed.status, AgentStatus::Idle);
+                        assert_eq!(app.notifications.read(cx).summary().0, 0);
+                        assert!(!app.notifications.read(cx).has_activity());
+
+                        // The server captured this before processing our acknowledgement.
+                        let mut late_snapshot = app.last_snapshot.clone();
+                        let result = late_snapshot.agent_mut(&"local-a".into()).unwrap();
+                        result.status = status;
+                        result.status_since = 20;
+                        result.seen = false;
+                        if detached {
+                            app.handle_terminal_focus(
+                                &crate::term_view::TermFocusEvent {
+                                    agent: "local-b".into(),
+                                    window: window.window_handle().window_id(),
+                                    focused: true,
+                                },
+                                cx,
+                            );
+                        } else {
+                            let pane = app.active_pane.clone();
+                            app.activate_tab(&pane, &"local-b".into(), cx);
+                        }
+                        assert_eq!(
+                            app.notification_focused_agent().map(String::as_str),
+                            Some("local-b")
+                        );
+                        app.apply_local_snapshot(late_snapshot.clone(), cx);
+                        app.handle_agent_status(
+                            None,
+                            status_event("local-a", status, status, Some("late summary")),
+                            cx,
+                        );
+                        // The original transition can also still be queued after a
+                        // snapshot was shown and read in the previous native window.
+                        app.handle_agent_status(
+                            None,
+                            status_event(
+                                "local-a",
+                                AgentStatus::Working,
+                                status,
+                                Some("delayed transition"),
+                            ),
+                            cx,
+                        );
+                        app.apply_local_snapshot(late_snapshot.clone(), cx);
+                        let completed = app.last_snapshot.agent(&"local-a".into()).unwrap();
+                        assert!(
+                            completed.seen,
+                            "switching windows must not restore old attention"
+                        );
+                        assert_eq!(completed.status, AgentStatus::Idle);
+                        assert_eq!(app.notifications.read(cx).summary().0, 0);
+                        assert!(!app.notifications.read(cx).has_activity());
+
+                        // A distinct result missed while disconnected must still be unread.
+                        late_snapshot
+                            .agent_mut(&"local-a".into())
+                            .unwrap()
+                            .status_since = 30;
+                        app.apply_local_snapshot(late_snapshot, cx);
+                        assert!(!app.last_snapshot.agent(&"local-a".into()).unwrap().seen);
+                        // A fresh run event resets acknowledgements even if timestamps coincide.
+                        app.handle_agent_status(
+                            None,
+                            status_event("local-a", status, AgentStatus::Working, None),
+                            cx,
+                        );
+                        app.handle_agent_status(
+                            None,
+                            status_event("local-a", AgentStatus::Working, status, Some("new run")),
+                            cx,
+                        );
+                        assert_eq!(app.notifications.read(cx).summary().0, 1);
+                    });
+                })
+                .unwrap();
+            });
+        }
+    }
+}
+
+#[test]
+fn same_status_remote_enrichment_does_not_reopen_read_results() {
+    with_app(|cx, _window, app| {
+        remote_event(
+            cx,
+            &app,
+            remote_online(remote_snapshot(AgentStatus::Working, 10)),
+        );
+        remote_event(
+            cx,
+            &app,
+            muxlane_client::ClientEvent::StatusChanged {
+                host: "remote".into(),
+                agent: "remote-a".into(),
+                agent_type: Some(AgentType::Pi),
+                from: AgentStatus::Working,
+                to: AgentStatus::Done,
+                message: None,
+            },
+        );
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(app.notifications.read(cx).summary().0, 1);
+                let pane = app.active_pane.clone();
+                app.activate_tab(&pane, &"remote-a".into(), cx);
+                app.activate_tab(&pane, &"remote-b".into(), cx);
+                assert_eq!(app.notifications.read(cx).summary().0, 0);
+            })
+        });
+        remote_event(
+            cx,
+            &app,
+            muxlane_client::ClientEvent::StatusChanged {
+                host: "remote".into(),
+                agent: "remote-a".into(),
+                agent_type: Some(AgentType::Pi),
+                from: AgentStatus::Done,
+                to: AgentStatus::Done,
+                message: Some("late summary".into()),
+            },
+        );
+        cx.update(|cx| {
+            let app = app.read(cx);
+            assert!(
+                app.remote_snaps["remote"]
+                    .agent(&"remote-a".into())
+                    .unwrap()
+                    .seen
+            );
+            assert_eq!(app.notifications.read(cx).summary().0, 0);
+            assert!(!app.notifications.read(cx).has_activity());
+        });
+        // A new transition is not enrichment, even in the same timestamp second.
+        remote_event(
+            cx,
+            &app,
+            muxlane_client::ClientEvent::StatusChanged {
+                host: "remote".into(),
+                agent: "remote-a".into(),
+                agent_type: Some(AgentType::Pi),
+                from: AgentStatus::Working,
+                to: AgentStatus::Done,
+                message: Some("new result".into()),
+            },
+        );
+        cx.update(|cx| {
+            let app = app.read(cx);
+            assert!(
+                !app.remote_snaps["remote"]
+                    .agent(&"remote-a".into())
+                    .unwrap()
+                    .seen
+            );
+            assert_eq!(app.notifications.read(cx).summary().0, 1);
+        });
+    });
+}
+
+#[test]
+fn main_native_window_focus_acknowledges_its_finished_agent() {
+    with_app(|cx, window, app| {
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                let mut snapshot = remote_snapshot(AgentStatus::Done, 10);
+                snapshot.agents.truncate(1);
+                app.last_snapshot = snapshot;
+                app.active = Some("remote-a".into());
+                app.handle_terminal_focus(
+                    &crate::term_view::TermFocusEvent {
+                        agent: "remote-a".into(),
+                        window: window.window_handle().window_id(),
+                        focused: true,
+                    },
+                    cx,
+                );
+                let agent = app.last_snapshot.agent(&"remote-a".into()).unwrap();
+                assert!(agent.seen);
+                assert_eq!(agent.status, AgentStatus::Idle);
+            })
+        })
+        .unwrap();
+    });
+}
+
 #[test]
 fn terminal_enter_marks_only_the_current_shell_as_working() {
     for remote in [false, true] {

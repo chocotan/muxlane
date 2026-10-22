@@ -268,15 +268,8 @@ pub struct PersistedApp {
     /// When false, keep the saved URL but do not connect. Missing means on if a URL exists.
     #[serde(default)]
     pub relay_enabled: Option<bool>,
-    /// Notebooks enabled from a machine or project context menu.
-    #[serde(default)]
-    pub notebooks: Vec<PersistedNotebook>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PersistedNotebook {
-    pub scope: String,
-}
 
 impl PersistedApp {
     /// A snapshot that lists every saved session as an idle agent under its project, so the
@@ -366,7 +359,6 @@ impl PersistedApp {
         self.project_order = previous.project_order.clone();
         self.relay_url = previous.relay_url.clone();
         self.relay_enabled = previous.relay_enabled;
-        self.notebooks = previous.notebooks.clone();
         self
     }
 }
@@ -403,7 +395,6 @@ impl Default for PersistedApp {
             project_order: Default::default(),
             relay_url: None,
             relay_enabled: None,
-            notebooks: vec![],
         }
     }
 }
@@ -1290,26 +1281,6 @@ mod tests {
             PersistedApp::from_snapshot(&Snapshot::default()).with_ui_prefs_from(&previous);
         assert_eq!(merged.relay_enabled, Some(false));
     }
-
-    #[test]
-    fn notebooks_survive_load_and_ui_preference_merge() {
-        let legacy: PersistedApp = serde_json::from_str(r#"{"version":3}"#).unwrap();
-        assert!(legacy.notebooks.is_empty());
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        let previous = PersistedApp {
-            notebooks: vec![PersistedNotebook {
-                scope: "machine:local".into(),
-            }],
-            ..Default::default()
-        };
-        save(&path, &previous).unwrap();
-        let restored = load(&path).unwrap();
-        let merged =
-            PersistedApp::from_snapshot(&Snapshot::default()).with_ui_prefs_from(&restored);
-        assert_eq!(merged.notebooks, previous.notebooks);
-    }
-
     #[test]
     fn default_terminal_preset_survives_load_and_ui_preference_merge() {
         let legacy: PersistedApp = serde_json::from_str(r#"{"version":3}"#).unwrap();

@@ -478,7 +478,7 @@ fn default_terminal_settings_select_all_presets_and_persist_without_installed_fi
         draw(cx, window);
         draw(cx, window);
         for id in [
-            "shell", "claude", "codex", "pi", "opencode", "agy", "qwen", "kimi",
+            "shell", "claude", "codex", "pi", "pie", "opencode", "agy", "qwen", "kimi",
         ] {
             activate_settings_control(cx, window, &view, "settings-terminal-preset-select");
             activate_settings_control(

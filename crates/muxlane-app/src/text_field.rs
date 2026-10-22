@@ -62,6 +62,18 @@ fn line_of(lines: &[(usize, usize)], cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
+fn click_offset(content: &str, x: f32, y: f32, origin_x: f32, origin_y: f32) -> usize {
+    let lines = visual_lines(content);
+    let line_h = 20.0 * crate::ui_scale::factor();
+    let index = ((y - origin_y) / line_h).floor().max(0.0) as usize;
+    let index = index.min(lines.len().saturating_sub(1));
+    let (start, end) = lines[index];
+    let column = ((x - origin_x - 12.0 * crate::ui_scale::factor()) / (7.2 * crate::ui_scale::factor()))
+        .round()
+        .max(0.0) as usize;
+    offset_at_column(content, start, end, column)
+}
+
 fn offset_at_column(content: &str, start: usize, end: usize, column: usize) -> usize {
     content[start..end]
         .char_indices()
@@ -105,6 +117,7 @@ pub struct TextField {
     secure: bool,
     multiline: bool,
     theme_mode: ThemeMode,
+    click_origin: Option<(f32, f32)>,
     _focus_subscription: Subscription,
 }
 
@@ -127,6 +140,7 @@ impl TextField {
             secure: false,
             multiline: false,
             theme_mode: ThemeMode::Light,
+            click_origin: None,
             _focus_subscription: focus_subscription,
         }
     }
@@ -713,12 +727,28 @@ impl Render for TextField {
             .border_color(rgba(border_c))
             .bg(rgba(bg_c))
             .text_size(ui_px(12.))
-            .on_click(cx.listener(|this, _event, window, cx| {
-                this.focus.focus(window, cx);
-                window.invalidate_character_coordinates();
-                cx.stop_propagation();
-                cx.notify();
-            }))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.focus.focus(window, cx);
+                    if this.multiline {
+                        if let Some((origin_x, origin_y)) = this.click_origin {
+                            let offset = click_offset(
+                                &this.content,
+                                f32::from(event.position.x),
+                                f32::from(event.position.y),
+                                origin_x,
+                                origin_y,
+                            );
+                            this.selected_range = offset..offset;
+                            this.marked_range = None;
+                        }
+                    }
+                    window.invalidate_character_coordinates();
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let ctrl = event.keystroke.modifiers.control;
@@ -859,7 +889,17 @@ impl Render for TextField {
             .child(content_el)
             .child(
                 canvas(
-                    |_bounds, _window, _cx| {},
+                    {
+                        let entity = cx.entity().clone();
+                        move |bounds, _window, cx| {
+                            entity.update(cx, |this, _cx| {
+                                this.click_origin = Some((
+                                    f32::from(bounds.origin.x),
+                                    f32::from(bounds.origin.y),
+                                ));
+                            });
+                        }
+                    },
                     move |bounds, _state, window, cx| {
                         window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx);
                     },
@@ -906,5 +946,7 @@ mod tests {
         assert_eq!(line_edge(content, 4, true), 3);
         assert_eq!(line_edge(content, 4, false), 5);
         assert_eq!(visual_lines("a\n\nb"), vec![(0, 1), (2, 2), (3, 4)]);
+        assert_eq!(click_offset("ab\ncd", 12.0, 0.0, 0.0, 0.0), 0);
+        assert_eq!(click_offset("ab\ncd", 12.0 + 7.2, 20.0, 0.0, 0.0), 4);
     }
 }

@@ -17,6 +17,8 @@ pub struct ServerState {
     /// 状态检测
     pub(crate) detector: DetectionEngine,
     shell_identities: std::collections::HashMap<AgentId, ShellIdentity>,
+    /// Finished hooks already acknowledged by a viewer, until the next run starts.
+    read_results: std::collections::HashMap<AgentId, AgentStatus>,
     /// 全局状态事件广播（app 内部路径与 wire 协议共用）
     pub(crate) events: tokio::sync::broadcast::Sender<muxlane_core::protocol::EventMsg>,
 }
@@ -34,6 +36,7 @@ impl ServerState {
             agents: vec![],
             detector,
             shell_identities: Default::default(),
+            read_results: Default::default(),
             events,
         }
     }
@@ -115,6 +118,7 @@ impl ServerState {
         self.agents.retain(|a| &a.id != agent);
         self.detector.forget(agent);
         self.shell_identities.remove(agent);
+        self.read_results.remove(agent);
         // 项目空了也保留（历史项目还在）；v1 不做清理
     }
 
@@ -177,7 +181,7 @@ impl ServerState {
         } else {
             muxlane_core::builtin_presets("")
                 .into_iter()
-                .find(|preset| preset.agent_type == foreground.agent_type)
+                .find(|preset| preset.program == foreground.agent_type.program())
                 .map(|preset| preset.label)
                 .unwrap_or_else(|| foreground.agent_type.as_str().into())
         };
@@ -188,6 +192,7 @@ impl ServerState {
         instance.seen = true;
         instance.status_since = muxlane_core::model::now_secs();
         self.detector.forget(agent);
+        self.read_results.remove(agent);
         true
     }
 
@@ -255,6 +260,7 @@ impl ServerState {
         };
         inst.seen = true;
         if inst.status.is_finished() {
+            self.read_results.insert(agent.clone(), inst.status);
             return self.apply_status(agent, AgentStatus::Idle, None);
         }
         vec![]
@@ -276,9 +282,14 @@ impl ServerState {
         }
         let current = inst.status;
         let target = ev.to_status();
-        if let Some(upd) = self.detector.report(&params.agent, current, ev) {
-            self.apply_status(&params.agent, upd.to, params.message.clone())
-        } else if current == target
+        let dismissed =
+            current == AgentStatus::Idle && self.read_results.get(&params.agent) == Some(&target);
+        if !dismissed {
+            if let Some(upd) = self.detector.report(&params.agent, current, ev) {
+                return self.apply_status(&params.agent, upd.to, params.message.clone());
+            }
+        }
+        if (current == target || dismissed)
             && params
                 .message
                 .as_deref()
@@ -289,8 +300,8 @@ impl ServerState {
                 serde_json::to_value(muxlane_core::protocol::AgentStatusEvent {
                     agent: params.agent.clone(),
                     agent_type: Some(inst.agent_type),
-                    from: current,
-                    to: current,
+                    from: target,
+                    to: target,
                     message: params.message.clone(),
                 })
                 .unwrap_or_default(),
@@ -314,6 +325,11 @@ impl ServerState {
         else {
             return vec![];
         };
+        // A completed hook still protects against stale spinner/prompt replay.
+        // Actual terminal input starts a new run, including for done-only hooks.
+        if self.read_results.contains_key(agent) {
+            self.detector.forget(agent);
+        }
         if let Some(update) = self.detector.mark_working(agent, current) {
             self.apply_status(agent, update.to, None)
         } else {
@@ -336,6 +352,9 @@ impl ServerState {
         }
         inst.status = to;
         inst.status_since = muxlane_core::model::now_secs();
+        if matches!(to, AgentStatus::Working | AgentStatus::Blocked) {
+            self.read_results.remove(agent);
+        }
         if to.is_finished() {
             inst.seen = false;
         }
@@ -491,6 +510,80 @@ mod tests {
             state.report_hook(&report).await[0].params["agent_type"],
             "codex"
         );
+    }
+
+    #[tokio::test]
+    async fn acknowledged_result_hooks_only_enrich_until_the_next_run() {
+        for event in ["done", "failed"] {
+            let mut state = ServerState::new(MachineInfo {
+                machine_id: "test".into(),
+                name: "test".into(),
+                os: "test".into(),
+                version: "test".into(),
+            });
+            let agent = "hook-result".to_string();
+            state.add_agent(
+                Project {
+                    id: "p".into(),
+                    name: "p".into(),
+                    path: "/tmp".into(),
+                    branch: None,
+                    agents: vec![],
+                },
+                AgentInstance {
+                    id: agent.clone(),
+                    project: "p".into(),
+                    agent_type: AgentType::Pi,
+                    title: "Pi".into(),
+                    status: AgentStatus::Idle,
+                    status_since: 0,
+                    seen: true,
+                    tmux_session: None,
+                },
+            );
+            let report = AgentReportParams {
+                token: "unused".into(),
+                agent: agent.clone(),
+                event: event.into(),
+                message: None,
+            };
+            assert_eq!(state.report_hook(&report).await.len(), 1);
+            assert!(!state.agents[0].seen);
+            assert_eq!(state.mark_seen(&agent).len(), 1);
+            assert_eq!(state.agents[0].status, AgentStatus::Idle);
+            assert!(state.report_hook(&report).await.is_empty());
+            let enrichment = state
+                .report_hook(&AgentReportParams {
+                    message: Some("final summary".into()),
+                    ..report.clone()
+                })
+                .await;
+            assert_eq!(enrichment[0].params["from"], event);
+            assert_eq!(enrichment[0].params["to"], event);
+            assert_eq!(state.agents[0].status, AgentStatus::Idle);
+            assert!(state.agents[0].seen);
+
+            // Done-only hook integrations start their next run via terminal input.
+            assert_eq!(state.mark_screen_working(&agent).len(), 1);
+            assert_eq!(state.report_hook(&report).await.len(), 1);
+            assert!(
+                !state.agents[0].seen,
+                "a genuine new result must still alert"
+            );
+            state.mark_seen(&agent);
+            assert_eq!(
+                state
+                    .report_hook(&AgentReportParams {
+                        event: "working".into(),
+                        ..report.clone()
+                    })
+                    .await
+                    .len(),
+                1
+            );
+            assert_eq!(state.report_hook(&report).await.len(), 1);
+            assert!(!state.agents[0].seen);
+        }
     }
 
     #[test]
