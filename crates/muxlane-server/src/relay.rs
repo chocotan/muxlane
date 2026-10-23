@@ -250,9 +250,16 @@ async fn connect_once(
 
     // Dropping the host connection also cancels its active phone channels.
     let mut channels = JoinSet::new();
+    // Cloudflare and nginx drop an idle WebSocket after about a minute; the host
+    // control socket is idle whenever no phone is open, so keep it warm.
+    let mut ping = tokio::time::interval(Duration::from_secs(20));
+    ping.tick().await;
     loop {
         tokio::select! {
             _ = channels.join_next(), if !channels.is_empty() => {}
+            _ = ping.tick() => {
+                sink.send(Message::Ping(Vec::new().into())).await?;
+            }
             code = code_rx.recv() => {
                 let Some(code) = code else { break };
                 sink.send(Message::Text(code.into())).await?;
