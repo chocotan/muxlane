@@ -248,8 +248,7 @@ pub async fn stream_term(
     let (mut writer, mut reader) = conn.into_split();
     let mut active_replay_id = None;
     let mut next_chunk = 0u32;
-    let mut data_decoder = flate2::Decompress::new(false);
-    let mut data_plain = Vec::new();
+    let mut data_decoder = muxlane_core::protocol::DataStreamDecoder::new();
     let outcome = loop {
         match reader.next().await? {
             Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_DATA => {
@@ -257,23 +256,9 @@ pub async fn stream_term(
                 if d.agent == *agent {
                     let bytes = b64_decode(&d.data_b64)?;
                     let plain = if bytes.first() == Some(&0) {
-                        let before = data_decoder.total_out();
-                        data_plain.resize(bytes.len().saturating_mul(64).max(4096), 0);
-                        loop {
-                            let status = data_decoder.decompress(
-                                &bytes[1..],
-                                &mut data_plain,
-                                flate2::FlushDecompress::Sync,
-                            )?;
-                            if status == flate2::Status::BufError {
-                                data_plain.resize(data_plain.len().saturating_mul(2), 0);
-                                continue;
-                            }
-                            break;
-                        }
-                        let produced = (data_decoder.total_out() - before) as usize;
-                        data_plain.truncate(produced);
-                        std::mem::take(&mut data_plain)
+                        data_decoder
+                            .push(&bytes[1..])
+                            .ok_or_else(|| anyhow::anyhow!("terminal stream decode failed"))?
                     } else {
                         gzip_decode(&bytes)
                     };

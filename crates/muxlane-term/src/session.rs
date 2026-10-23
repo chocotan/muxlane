@@ -335,10 +335,10 @@ impl PtySession {
             .unwrap_or_default()
     }
 
-    /// Tail used when a remote subscriber must rebuild its screen. Full replay
-    /// stays local so reconnects do not resend up to 4MB, including old images.
+    /// Tail used when a remote subscriber must rebuild its screen. One screen is
+    /// all a viewer needs; older output only costs bandwidth on every open.
     pub fn resync_snapshot(&self) -> bytes::Bytes {
-        self.replay_tail(256 * 1024)
+        self.replay_tail(64 * 1024)
     }
 
     /// 回放尾部 n 字节：锁内只拷尾部，供屏幕采样等热路径使用

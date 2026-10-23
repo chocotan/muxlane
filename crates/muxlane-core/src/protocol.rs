@@ -283,40 +283,103 @@ impl DataStreamEncoder {
         self.encoder.write_all(data).ok()?;
         std::io::Write::flush(&mut self.encoder).ok()?;
         let mut payload = vec![0];
-        payload.extend_from_slice(&self.encoder.get_ref()[start..]);
+        let sink = self.encoder.get_mut();
+        payload.extend_from_slice(&sink[start..]);
+        // The dictionary lives in the compressor, so the emitted bytes can go.
+        // Keeping them would grow the buffer for the whole subscription.
+        sink.clear();
         Some(payload)
+    }
+
+    /// Emitted bytes still held by the sink; a memory bound check.
+    pub fn buffered_len(&self) -> usize {
+        self.encoder.get_ref().len()
+    }
+}
+
+/// Decodes the frames `DataStreamEncoder` produces. One instance per subscription.
+pub struct DataStreamDecoder {
+    decoder: flate2::Decompress,
+}
+
+impl DataStreamDecoder {
+    pub fn new() -> Self {
+        Self {
+            decoder: flate2::Decompress::new(false),
+        }
+    }
+
+    /// Plain bytes carried by one frame. Frames vary from 1 byte to thousands of
+    /// times their size, so keep consuming input until it is drained.
+    pub fn push(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut input = frame;
+        let mut chunk = vec![0u8; 16 * 1024];
+        loop {
+            let before_in = self.decoder.total_in();
+            let before_out = self.decoder.total_out();
+            let status = self
+                .decoder
+                .decompress(input, &mut chunk, flate2::FlushDecompress::Sync)
+                .ok()?;
+            let used = (self.decoder.total_in() - before_in) as usize;
+            let made = (self.decoder.total_out() - before_out) as usize;
+            out.extend_from_slice(&chunk[..made]);
+            input = &input[used..];
+            let drained = input.is_empty() && made < chunk.len();
+            if drained || (used == 0 && made == 0) {
+                return Some(out);
+            }
+            if status == flate2::Status::StreamEnd {
+                return Some(out);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod data_stream_tests {
-    use super::DataStreamEncoder;
+    use super::{DataStreamDecoder, DataStreamEncoder};
+
+    /// One frame can decode to far more than its own size; a fixed output buffer
+    /// silently truncated such frames and the terminal showed garbage.
+    #[test]
+    fn a_highly_compressed_frame_round_trips_exactly() {
+        let line = b"/tmp/muxlane-paste-image_01M5K83FSNB2E2JK44SZ4XJ6PE.png\n";
+        let burst: Vec<u8> = line.iter().copied().cycle().take(line.len() * 8000).collect();
+        let mut encoder = DataStreamEncoder::new();
+        let mut decoder = DataStreamDecoder::new();
+        let payload = encoder.push(&burst).unwrap();
+        assert_eq!(payload[0], 0);
+        assert!(payload.len() * 100 < burst.len(), "burst must be extreme");
+        assert_eq!(decoder.push(&payload[1..]).unwrap(), burst);
+    }
 
     #[test]
-    fn repeated_frames_shrink_after_the_dictionary_warms() {
+    fn repeated_frames_shrink_and_each_one_decodes() {
         let frame = b"\x1b[2J\x1b[Hstatus: compiling the same screen again\n";
         let mut encoder = DataStreamEncoder::new();
-        let mut decoder = flate2::Decompress::new(false);
+        let mut decoder = DataStreamDecoder::new();
         let mut first = 0;
         for index in 0..8 {
             let payload = encoder.push(frame).unwrap();
             assert_eq!(payload[0], 0);
-            let before = decoder.total_out();
-            let mut plain = vec![0u8; frame.len()];
-            decoder.decompress(
-                &payload[1..],
-                &mut plain,
-                flate2::FlushDecompress::Sync,
-            ).unwrap();
-            let produced = (decoder.total_out() - before) as usize;
-            plain.truncate(produced);
-            assert_eq!(plain, frame);
+            assert_eq!(decoder.push(&payload[1..]).unwrap(), frame);
             if index == 0 {
                 first = payload.len();
             } else {
                 assert!(payload.len() < first, "repeat {index}: {} >= {first}", payload.len());
             }
         }
+    }
+
+    #[test]
+    fn encoder_does_not_keep_emitted_bytes() {
+        let mut encoder = DataStreamEncoder::new();
+        for _ in 0..200 {
+            encoder.push(&[b'x'; 4096]).unwrap();
+        }
+        assert!(encoder.buffered_len() < 64 * 1024, "{}", encoder.buffered_len());
     }
 }
 
