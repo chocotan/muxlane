@@ -295,7 +295,6 @@ impl MuxlaneApp {
         } else {
             Some(pane.clone())
         };
-        self.prune_hidden_remote_terminals();
         self.persist();
         cx.notify();
     }

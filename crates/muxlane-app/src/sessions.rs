@@ -11,6 +11,13 @@ use muxlane_term::VTerm;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Resolves once a dropped terminal view asks its stream to stop.
+async fn wait_for_cancel(flag: &std::sync::atomic::AtomicBool) {
+    while !flag.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TerminalLocation {
     Local,
@@ -408,23 +415,32 @@ impl MuxlaneApp {
                                 }
                             }
                         });
-                        let result = muxlane_client::stream_term(&sock, &agent2, move |update| {
-                            let update = match update {
-                                muxlane_client::TermUpdate::Resync(bytes) => {
-                                    RemoteTermUpdate::Resync(bytes)
-                                }
-                                muxlane_client::TermUpdate::ResyncChunk(bytes) => {
-                                    RemoteTermUpdate::ResyncChunk(bytes)
-                                }
-                                muxlane_client::TermUpdate::Data(bytes) => {
-                                    RemoteTermUpdate::Data(bytes)
-                                }
-                            };
-                            // 网络读取不能被 VTerm 解析阻塞；解析器按顺序批量消费。
-                            let _ = update_tx.send(update);
-                        })
-                        .await;
+                        let result = {
+                            let stream = muxlane_client::stream_term(&sock, &agent2, move |update| {
+                                let update = match update {
+                                    muxlane_client::TermUpdate::Resync(bytes) => {
+                                        RemoteTermUpdate::Resync(bytes)
+                                    }
+                                    muxlane_client::TermUpdate::ResyncChunk(bytes) => {
+                                        RemoteTermUpdate::ResyncChunk(bytes)
+                                    }
+                                    muxlane_client::TermUpdate::Data(bytes) => {
+                                        RemoteTermUpdate::Data(bytes)
+                                    }
+                                };
+                                // 网络读取不能被 VTerm 解析阻塞；解析器按顺序批量消费。
+                                let _ = update_tx.send(update);
+                            });
+                            tokio::pin!(stream);
+                            // A dropped view must close its socket now, not on the next
+                            // reconnect: otherwise every visited tab keeps streaming.
+                            tokio::select! {
+                                result = &mut stream => Some(result),
+                                _ = wait_for_cancel(&cancelled) => None,
+                            }
+                        };
                         parser.abort();
+                        let Some(result) = result else { break };
 
                         if result.is_ok() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
                             break;
@@ -540,47 +556,7 @@ impl MuxlaneApp {
         if self.ensure_agent_terminal(agent, cx) {
             self.focus_agent(agent, window, cx);
         }
-        self.prune_hidden_remote_terminals();
         cx.notify();
-    }
-
-    /// Agents the current layout actually shows: one active tab per pane, every
-    /// detached window, and only the zoomed pane when one is maximized.
-    fn visible_agents(&self) -> std::collections::HashSet<AgentId> {
-        let mut visible = std::collections::HashSet::new();
-        match &self.maximized_pane {
-            Some(pane) => visible.extend(self.pane_tree.group(pane).and_then(|g| g.active.clone())),
-            None => {
-                for group in self.pane_tree.all_groups() {
-                    visible.extend(group.active.clone());
-                }
-            }
-        }
-        visible.extend(self.floating.windows.keys().cloned());
-        visible
-    }
-
-    /// A hidden remote terminal keeps its subscription streaming, so drop it and
-    /// rebuild from replay on return. Local terminals cost no bandwidth; keep them.
-    pub(crate) fn prune_hidden_remote_terminals(&mut self) {
-        let visible = self.visible_agents();
-        let hidden: Vec<AgentId> = self
-            .terms
-            .keys()
-            .filter(|agent| !visible.contains(*agent))
-            .filter(|agent| {
-                self.remote_snaps
-                    .values()
-                    .any(|snapshot| snapshot.agents.iter().any(|known| &known.id == *agent))
-            })
-            .cloned()
-            .collect();
-        for agent in hidden {
-            self.terms.remove(&agent);
-            if let Some(cancel) = self.mirror_cancel.remove(&agent) {
-                cancel.store(true, std::sync::atomic::Ordering::Release);
-            }
-        }
     }
 
     pub(crate) fn focus_agent(
