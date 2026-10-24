@@ -31,7 +31,7 @@ pub(crate) async fn sample() -> HashMap<String, ShellForeground> {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name}\t#{pane_pid}"
+                "#{session_name} #{pane_pid}"
             ]
         ),
         output("ps", &["-axo", "pid=,ppid=,pgid=,tpgid=,args="])
@@ -70,7 +70,8 @@ fn identify_panes(panes: &str, process_list: &str) -> HashMap<String, ShellForeg
     panes
         .lines()
         .filter_map(|line| {
-            let (name, pid) = line.split_once('\t')?;
+            // tmux replaces literal tabs with underscores in a non-UTF-8 locale.
+            let (name, pid) = line.rsplit_once(' ')?;
             let root = processes.get(&pid.trim().parse::<u32>().ok()?)?;
             let shell = executable(&root.command);
             if !matches!(
@@ -218,7 +219,7 @@ mod tests {
 
     #[test]
     fn foreground_agent_switches_back_to_shell_and_ignores_background_jobs() {
-        let panes = "muxlane-shell_test\t100\n";
+        let panes = "muxlane-shell_test 100\n";
         let running = "100 1 100 200 /bin/zsh\n200 100 200 200 node /opt/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js\n300 100 300 200 codex\n";
         assert_eq!(
             identify_panes(panes, running)["muxlane-shell_test"].agent_type,
@@ -240,8 +241,19 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_pie_in_sessions_with_spaces() {
+        let panes = "muxlane-shell test 2430944\n";
+        let processes =
+            "2430944 860104 2430944 2431410 /usr/bin/zsh\n2431410 2430944 2431410 2431410 pie\n";
+        assert_eq!(
+            identify_panes(panes, processes)["muxlane-shell test"].agent_type,
+            AgentType::Pie
+        );
+    }
+
+    #[test]
     fn incomplete_samples_and_non_shell_presets_are_not_reset() {
-        let panes = "test\t100\n";
+        let panes = "test 100\n";
         for ps in [
             "",
             "100 1 100 -1 /bin/zsh",
@@ -262,7 +274,7 @@ mod tests {
             Some(AgentType::Pie)
         );
         assert_eq!(command_agent("pie"), Some(AgentType::Pie));
-        let panes = "muxlane-shell_test\t100\n";
+        let panes = "muxlane-shell_test 100\n";
         let busybox = "100 1 100 200/bin/bash\n200 100 200 200/usr/bin/node /opt/pi-coding-agent/dist/cli.js\n";
         assert_eq!(
             identify_panes(panes, busybox)["muxlane-shell_test"].agent_type,

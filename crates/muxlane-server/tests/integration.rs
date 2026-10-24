@@ -1196,6 +1196,11 @@ async fn shell_foreground_agent_identity_tracks_process_entry_exit_and_reentry()
             "Pi",
         ),
         (
+            "/bin/bash -c 'exec -a pie /bin/sleep 30'\r",
+            AgentType::Pie,
+            "Pie",
+        ),
+        (
             "/bin/bash -c 'exec -a codex /bin/sleep 30'\r",
             AgentType::Codex,
             "Codex",
