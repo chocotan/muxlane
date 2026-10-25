@@ -357,6 +357,7 @@ impl ShapeCache {
             family: font_family.to_string().into(),
             features: FontFeatures::disable_ligatures(),
             fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "Noto Sans Symbols 2".into(),
                 "DejaVu Sans Mono".into(),
                 "Noto Sans Mono".into(),
                 "Noto Sans CJK SC".into(),
