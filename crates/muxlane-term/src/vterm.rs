@@ -516,14 +516,11 @@ impl VTerm {
             .unwrap_or(false)
     }
 
-    pub fn mouse_motion_reporting(&self) -> bool {
+    /// Any-motion tracking (DECSET 1003): the application wants hover events, not
+    /// just drags. `MOUSE_DRAG` (1002) only reports while a button is held.
+    pub fn mouse_any_motion_reporting(&self) -> bool {
         self.lock_inner()
-            .map(|guard| {
-                guard
-                    .term
-                    .mode()
-                    .intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG)
-            })
+            .map(|guard| guard.term.mode().contains(TermMode::MOUSE_MOTION))
             .unwrap_or(false)
     }
 

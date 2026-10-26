@@ -572,6 +572,8 @@ pub struct TermView {
     scrollbar_drag: Option<f32>,
     selecting: bool,
     forwarding_mouse: bool,
+    /// Last cell already reported as hovered, so motion is sent once per cell.
+    hover_cell: Option<(i32, usize)>,
     pending_link: Option<(Point<Pixels>, LinkTarget)>,
     link_hovered: bool,
     marked_text: Arc<std::sync::Mutex<Option<String>>>,
@@ -849,6 +851,7 @@ impl TermView {
             scrollbar_drag: None,
             selecting: false,
             forwarding_mouse: false,
+            hover_cell: None,
             pending_link: None,
             link_hovered: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
@@ -907,6 +910,7 @@ impl TermView {
             scrollbar_drag: None,
             selecting: false,
             forwarding_mouse: false,
+            hover_cell: None,
             pending_link: None,
             link_hovered: false,
             marked_text: Arc::new(std::sync::Mutex::new(None)),
@@ -2085,6 +2089,29 @@ impl Render for TermView {
                                 cx.stop_propagation();
                                 return;
                             }
+                            // Hover: only apps that enabled any-motion tracking (1003)
+                            // ask for motion without a button. Report once per cell.
+                            if event.pressed_button.is_none()
+                                && this.vterm.mouse_any_motion_reporting()
+                            {
+                                if let Some((line, col, _)) = this.grid_point(event.position) {
+                                    if this.hover_cell != Some((line, col)) {
+                                        this.hover_cell = Some((line, col));
+                                        this.report_mouse(
+                                            3,
+                                            col,
+                                            line,
+                                            true,
+                                            true,
+                                            event.modifiers.shift,
+                                            event.modifiers.alt,
+                                            event.modifiers.control,
+                                        );
+                                    }
+                                }
+                            } else {
+                                this.hover_cell = None;
+                            }
                             let link_hovered = !event.modifiers.shift
                                 && this.link_target(event.position).is_some();
                             if this.link_hovered != link_hovered {
@@ -2632,6 +2659,11 @@ mod tests {
         assert_eq!(
             mouse_report(0, 1, 2, false, false, false, false, false, false),
             vec![0x1b, b'[', b'M', 35, 34, 35]
+        );
+        // Hover (no button) motion uses button 3 + the motion bit.
+        assert_eq!(
+            mouse_report(3, 1, 2, true, true, false, false, false, true),
+            b"\x1b[<35;2;3M"
         );
     }
 
