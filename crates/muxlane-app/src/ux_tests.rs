@@ -1211,3 +1211,93 @@ fn sidebar_width_and_custom_scale_are_independent() {
     });
 }
 
+
+mod remote_stream_pausing {
+    use super::*;
+    use muxlane_core::model::{AgentInstance, AgentType, MachineInfo, Project, Snapshot};
+
+    fn agent(id: &str, project: &str) -> AgentInstance {
+        AgentInstance {
+            id: id.into(),
+            project: project.into(),
+            agent_type: AgentType::Shell,
+            title: id.into(),
+            status: muxlane_core::model::AgentStatus::Idle,
+            status_since: 0,
+            seen: true,
+            tmux_session: None,
+        }
+    }
+
+    #[test]
+    fn only_the_focused_remote_tab_streams() {
+        with_app(|cx, window, view| {
+            let _ = cx.update_window(window, |_, _window, cx| {
+                view.update(cx, |app, cx| {
+                    app.remote_snaps.insert(
+                        "host".into(),
+                        Snapshot {
+                            machine: Some(MachineInfo {
+                                machine_id: "host".into(),
+                                name: "host".into(),
+                                os: "test".into(),
+                                version: "test".into(),
+                            }),
+                            projects: vec![Project {
+                                id: "p".into(),
+                                name: "p".into(),
+                                path: "/unused".into(),
+                                branch: None,
+                                agents: vec![],
+                            }],
+                            agents: vec![agent("host-1", "p"), agent("host-2", "p")],
+                        },
+                    );
+                    let mut flags = Vec::new();
+                    for id in ["host-1", "host-2"] {
+                        let (vterm, clipboard) = muxlane_term::VTerm::new_with_clipboard(80, 24);
+                        let (input, _rx) = tokio::sync::mpsc::unbounded_channel();
+                        let term = MuxlaneApp::create_remote_term(
+                            id.into(),
+                            (vterm, clipboard),
+                            input,
+                            &app.font_family,
+                            Theme::for_mode(app.theme_mode),
+                            false,
+                            cx,
+                        );
+                        app.terms.insert(id.into(), term);
+                        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        app.remote_streams.insert(
+                            id.into(),
+                            crate::sessions::RemoteStreamCtl::for_test(
+                                &id.into(),
+                                std::sync::Arc::clone(&flag),
+                            ),
+                        );
+                        flags.push(flag);
+                    }
+                    let pane = app.active_pane.clone();
+                    app.pane_tree.open_tab(&pane, "host-1".into());
+                    if let Some(group) = app.pane_tree.group_mut(&pane) {
+                        group.active = Some("host-1".into());
+                    }
+                    app.active = Some("host-1".into());
+                    app.sync_remote_streams();
+                    assert!(
+                        !flags[0].load(std::sync::atomic::Ordering::Acquire),
+                        "visible tab keeps streaming"
+                    );
+                    assert!(
+                        flags[1].load(std::sync::atomic::Ordering::Acquire),
+                        "hidden remote tab pauses its stream"
+                    );
+                    assert!(
+                        app.terms.contains_key("host-2"),
+                        "hidden tab keeps its view and scrollback"
+                    );
+                });
+            });
+        });
+    }
+}

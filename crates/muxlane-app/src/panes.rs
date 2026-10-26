@@ -295,6 +295,7 @@ impl MuxlaneApp {
         } else {
             Some(pane.clone())
         };
+        self.sync_remote_streams();
         self.persist();
         cx.notify();
     }

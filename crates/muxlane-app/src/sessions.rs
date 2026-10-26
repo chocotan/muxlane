@@ -18,6 +18,39 @@ async fn wait_for_cancel(flag: &std::sync::atomic::AtomicBool) {
     }
 }
 
+/// Everything needed to (re)start a remote terminal stream without rebuilding its view.
+pub(crate) struct RemoteStreamCtl {
+    remote: Arc<muxlane_client::RemoteHost>,
+    vterm: VTerm,
+    notify: tokio::sync::mpsc::Sender<()>,
+    /// `Some` while the stream task is running; `None` while hidden.
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+#[cfg(test)]
+impl RemoteStreamCtl {
+    pub(crate) fn for_test(agent: &AgentId, cancel: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        let (vterm, _clipboard) = VTerm::new_with_clipboard(80, 24);
+        let (notify, _notify_rx) = tokio::sync::mpsc::channel(1);
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel(1);
+        let remote = muxlane_client::RemoteHost::new(
+            muxlane_client::HostCfg {
+                name: "test".into(),
+                target: muxlane_client::Target::Socket(format!("/tmp/muxlane-test-{agent}.sock")),
+                auth: muxlane_client::SshAuth::default(),
+                retry_base_ms: 500,
+            },
+            events_tx,
+        );
+        Self {
+            remote,
+            vterm,
+            notify,
+            cancel: Some(cancel),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TerminalLocation {
     Local,
@@ -355,110 +388,160 @@ impl MuxlaneApp {
                     }
                 });
 
-                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                self.mirror_cancel
-                    .insert(agent.clone(), Arc::clone(&cancelled));
-                let agent2 = agent.clone();
-                let vterm2 = vterm.clone();
-                let language = self.language;
-                self.server.rt_spawn(async move {
-                    enum RemoteTermUpdate {
-                        Resync(Vec<u8>),
-                        ResyncChunk(Vec<u8>),
-                        Data(Vec<u8>),
-                    }
-                    let mut backoff = 250u64;
-                    loop {
-                        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                            break;
-                        }
-                        let Some(sock) = remote.endpoint_now() else {
-                            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                            backoff = (backoff * 2).min(5_000);
-                            continue;
-                        };
-                        let vterm3 = vterm2.clone();
-                        let notify = mirror_notify.clone();
-                        let (update_tx, mut update_rx) =
-                            tokio::sync::mpsc::unbounded_channel::<RemoteTermUpdate>();
-                        let parser = tokio::spawn(async move {
-                            while let Some(first) = update_rx.recv().await {
-                                let mut batch = vec![first];
-                                while let Ok(update) = update_rx.try_recv() {
-                                    batch.push(update);
-                                    if batch.len() >= 64 {
-                                        break;
-                                    }
-                                }
-                                let vterm = vterm3.clone();
-                                let changed = tokio::task::spawn_blocking(move || {
-                                    for update in batch {
-                                        match update {
-                                            RemoteTermUpdate::Resync(bytes) => {
-                                                vterm.feed(b"\x1bc");
-                                                // 历史回放，里面的终端查询早已回答过，不能再答一次。
-                                                vterm.feed_silent(&bytes);
-                                            }
-                                            RemoteTermUpdate::ResyncChunk(bytes) => {
-                                                // Chunked replay continues without resetting the terminal.
-                                                vterm.feed_silent(&bytes);
-                                            }
-                                            RemoteTermUpdate::Data(bytes) => vterm.feed(&bytes),
-                                        }
-                                    }
-                                    vterm.has_pending_damage()
-                                })
-                                .await
-                                .unwrap_or(true);
-                                if changed {
-                                    let _ = notify.try_send(());
-                                }
-                            }
-                        });
-                        let result = {
-                            let stream = muxlane_client::stream_term(&sock, &agent2, move |update| {
-                                let update = match update {
-                                    muxlane_client::TermUpdate::Resync(bytes) => {
-                                        RemoteTermUpdate::Resync(bytes)
-                                    }
-                                    muxlane_client::TermUpdate::ResyncChunk(bytes) => {
-                                        RemoteTermUpdate::ResyncChunk(bytes)
-                                    }
-                                    muxlane_client::TermUpdate::Data(bytes) => {
-                                        RemoteTermUpdate::Data(bytes)
-                                    }
-                                };
-                                // 网络读取不能被 VTerm 解析阻塞；解析器按顺序批量消费。
-                                let _ = update_tx.send(update);
-                            });
-                            tokio::pin!(stream);
-                            // A dropped view must close its socket now, not on the next
-                            // reconnect: otherwise every visited tab keeps streaming.
-                            tokio::select! {
-                                result = &mut stream => Some(result),
-                                _ = wait_for_cancel(&cancelled) => None,
-                            }
-                        };
-                        parser.abort();
-                        let Some(result) = result else { break };
-
-                        if result.is_ok() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                            break;
-                        }
-                        vterm2.feed(
-                            format!(
-                                "\u{1b}[31m{}\u{1b}[0m\r\n",
-                                i18n::text(language, "terminal.reconnecting")
-                            )
-                            .as_bytes(),
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                        backoff = (backoff * 2).min(5_000);
-                    }
-                });
+                self.remote_streams.insert(
+                    agent.clone(),
+                    RemoteStreamCtl {
+                        remote,
+                        vterm: vterm.clone(),
+                        notify: mirror_notify,
+                        cancel: None,
+                    },
+                );
+                self.start_remote_stream(agent);
             }
         }
         self.terms.contains_key(agent)
+    }
+
+    /// Stream a remote terminal only while it is on screen. A hidden tab keeps its
+    /// view and scrollback; on return the server replays one screen.
+    fn start_remote_stream(&mut self, agent: &AgentId) {
+        let Some(ctl) = self.remote_streams.get_mut(agent) else {
+            return;
+        };
+        if ctl.cancel.is_some() {
+            return;
+        }
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ctl.cancel = Some(Arc::clone(&cancelled));
+        let remote = Arc::clone(&ctl.remote);
+        let vterm2 = ctl.vterm.clone();
+        let mirror_notify = ctl.notify.clone();
+        let agent2 = agent.clone();
+        let language = self.language;
+        self.server.rt_spawn(async move {
+            enum RemoteTermUpdate {
+                Resync(Vec<u8>),
+                ResyncChunk(Vec<u8>),
+                Data(Vec<u8>),
+            }
+            let mut backoff = 250u64;
+            loop {
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                let Some(sock) = remote.endpoint_now() else {
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                    backoff = (backoff * 2).min(5_000);
+                    continue;
+                };
+                let vterm3 = vterm2.clone();
+                let notify = mirror_notify.clone();
+                let (update_tx, mut update_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<RemoteTermUpdate>();
+                let parser = tokio::spawn(async move {
+                    while let Some(first) = update_rx.recv().await {
+                        let mut batch = vec![first];
+                        while let Ok(update) = update_rx.try_recv() {
+                            batch.push(update);
+                            if batch.len() >= 64 {
+                                break;
+                            }
+                        }
+                        let vterm = vterm3.clone();
+                        let changed = tokio::task::spawn_blocking(move || {
+                            for update in batch {
+                                match update {
+                                    RemoteTermUpdate::Resync(bytes) => {
+                                        vterm.feed(b"\x1bc");
+                                        // 历史回放，里面的终端查询早已回答过，不能再答一次。
+                                        vterm.feed_silent(&bytes);
+                                    }
+                                    RemoteTermUpdate::ResyncChunk(bytes) => {
+                                        // Chunked replay continues without resetting the terminal.
+                                        vterm.feed_silent(&bytes);
+                                    }
+                                    RemoteTermUpdate::Data(bytes) => vterm.feed(&bytes),
+                                }
+                            }
+                            vterm.has_pending_damage()
+                        })
+                        .await
+                        .unwrap_or(true);
+                        if changed {
+                            let _ = notify.try_send(());
+                        }
+                    }
+                });
+                let result = {
+                    let stream = muxlane_client::stream_term(&sock, &agent2, move |update| {
+                        let update = match update {
+                            muxlane_client::TermUpdate::Resync(bytes) => {
+                                RemoteTermUpdate::Resync(bytes)
+                            }
+                            muxlane_client::TermUpdate::ResyncChunk(bytes) => {
+                                RemoteTermUpdate::ResyncChunk(bytes)
+                            }
+                            muxlane_client::TermUpdate::Data(bytes) => {
+                                RemoteTermUpdate::Data(bytes)
+                            }
+                        };
+                        // 网络读取不能被 VTerm 解析阻塞；解析器按顺序批量消费。
+                        let _ = update_tx.send(update);
+                    });
+                    tokio::pin!(stream);
+                    // A hidden tab must close its socket now, not on the next
+                    // reconnect: otherwise every visited tab keeps streaming.
+                    tokio::select! {
+                        result = &mut stream => Some(result),
+                        _ = wait_for_cancel(&cancelled) => None,
+                    }
+                };
+                parser.abort();
+                let Some(result) = result else { break };
+
+                if result.is_ok() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                vterm2.feed(
+                    format!(
+                        "\u{1b}[31m{}\u{1b}[0m\r\n",
+                        i18n::text(language, "terminal.reconnecting")
+                    )
+                    .as_bytes(),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                backoff = (backoff * 2).min(5_000);
+            }
+        });
+    }
+
+    /// Keep a stream only for the focused remote terminal. Every other tab keeps its
+    /// view and scrollback; returning replays one screen instead of re-attaching tmux.
+    pub(crate) fn sync_remote_streams(&mut self) {
+        let focused = self.active.clone();
+        let pause: Vec<AgentId> = self
+            .remote_streams
+            .iter()
+            .filter(|(agent, ctl)| ctl.cancel.is_some() && focused.as_ref() != Some(agent))
+            .map(|(agent, _)| agent.clone())
+            .collect();
+        for agent in pause {
+            if let Some(ctl) = self.remote_streams.get_mut(&agent) {
+                if let Some(flag) = ctl.cancel.take() {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+        let resume: Vec<AgentId> = self
+            .remote_streams
+            .iter()
+            .filter(|(agent, ctl)| ctl.cancel.is_none() && focused.as_ref() == Some(agent))
+            .map(|(agent, _)| agent.clone())
+            .collect();
+        for agent in resume {
+            self.start_remote_stream(&agent);
+        }
     }
 
     pub(crate) fn ensure_agent_terminal(
@@ -556,6 +639,7 @@ impl MuxlaneApp {
         if self.ensure_agent_terminal(agent, cx) {
             self.focus_agent(agent, window, cx);
         }
+        self.sync_remote_streams();
         cx.notify();
     }
 
@@ -587,6 +671,7 @@ impl MuxlaneApp {
             );
         }
         self.mark_agent_seen(agent, cx);
+        self.sync_remote_streams();
     }
 
     pub(crate) fn mark_agent_seen(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
@@ -804,8 +889,10 @@ impl MuxlaneApp {
             }
         }
         self.terms.remove(agent);
-        if let Some(cancelled) = self.mirror_cancel.remove(agent) {
-            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(ctl) = self.remote_streams.remove(agent) {
+            if let Some(flag) = ctl.cancel {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            }
         }
         self.notifications
             .update(cx, |center, cx| center.remove_agent(agent, cx));
@@ -830,8 +917,10 @@ impl MuxlaneApp {
         self.schedule_session_windows(cx);
         self.terms.retain(|agent, _| !removed.contains(agent));
         for agent in &removed {
-            if let Some(cancelled) = self.mirror_cancel.remove(agent) {
-                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(ctl) = self.remote_streams.remove(agent) {
+                if let Some(flag) = ctl.cancel {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                }
             }
         }
         self.notifications

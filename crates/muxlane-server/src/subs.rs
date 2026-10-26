@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 
 const RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(1);
+/// Upper bound on how often the focused subscription forwards terminal output. A TUI
+/// can repaint far faster than a human needs; coalescing frames cuts message overhead.
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(66);
 
 struct SubHandle {
     agent: AgentId,
@@ -126,6 +129,7 @@ async fn forward(
     registry: Option<Weak<Mutex<SubRegistry>>>,
 ) {
     let mut last_resync: Option<Instant> = None;
+    let mut last_sent: Option<Instant> = None;
     let mut replay_id = 0u64;
     let mut stream = data_stream.then(muxlane_core::protocol::DataStreamEncoder::new);
     if replay_chunks
@@ -159,6 +163,21 @@ async fn forward(
                             Err(_) => break,
                         }
                     }
+                    // Cap the redraw rate at MIN_FRAME_INTERVAL. Only successive frames
+                    // wait; the first frame after idle still goes out immediately.
+                    if let Some(last) = last_sent {
+                        let elapsed = last.elapsed();
+                        if elapsed < MIN_FRAME_INTERVAL {
+                            tokio::time::sleep(MIN_FRAME_INTERVAL - elapsed).await;
+                            while batch.len() < 64 * 1024 {
+                                match rx.try_recv() {
+                                    Ok(more) => batch.extend_from_slice(&more),
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                    }
+                    last_sent = Some(Instant::now());
                     let payload = if let Some(encoder) = stream.as_mut() {
                         let Some(payload) = encoder.push(&batch) else {
                             break;

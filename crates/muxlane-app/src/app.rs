@@ -138,7 +138,9 @@ pub struct MuxlaneApp {
 
     // 终端缓存
     pub(crate) terms: HashMap<AgentId, Entity<TermView>>,
-    pub(crate) mirror_cancel: HashMap<AgentId, Arc<std::sync::atomic::AtomicBool>>,
+    /// Live remote terminal streams. Hidden tabs keep their view but drop the
+    /// stream so idle agents stop consuming bandwidth.
+    pub(crate) remote_streams: HashMap<AgentId, crate::sessions::RemoteStreamCtl>,
 
     // 快照/远程镜像
     pub(crate) last_snapshot: Snapshot,
@@ -632,7 +634,7 @@ impl MuxlaneApp {
             // 最大化是瞬时 UI 状态，不跨重启保留
             maximized_pane: None,
             terms: HashMap::new(),
-            mirror_cancel: HashMap::new(),
+            remote_streams: HashMap::new(),
             active: None,
             workspace,
             floating: crate::floating::FloatingState::from_persisted(&persisted),
