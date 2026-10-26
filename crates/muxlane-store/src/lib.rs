@@ -270,7 +270,6 @@ pub struct PersistedApp {
     pub relay_enabled: Option<bool>,
 }
 
-
 impl PersistedApp {
     /// A snapshot that lists every saved session as an idle agent under its project, so the
     /// UI can restore its layout immediately. Sessions that turn out to be dead are removed

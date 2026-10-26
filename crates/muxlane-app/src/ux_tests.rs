@@ -1211,7 +1211,6 @@ fn sidebar_width_and_custom_scale_are_independent() {
     });
 }
 
-
 mod remote_stream_pausing {
     use super::*;
     use muxlane_core::model::{AgentInstance, AgentType, MachineInfo, Project, Snapshot};

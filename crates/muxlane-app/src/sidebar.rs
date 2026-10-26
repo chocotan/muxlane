@@ -13,11 +13,9 @@ use crate::ui_scale::px as ui_px;
 use crate::widgets::*;
 use crate::workspace::ProjectKey;
 use gpui::{
-    div, prelude::*, relative, rgba, size, App, Context, Focusable, MouseButton, ParentElement,
-    Styled, Window,
+    div, prelude::*, relative, rgba, size, Context, Focusable, MouseButton, ParentElement, Styled,
 };
 use muxlane_core::model::AgentId;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 struct SessionRowData {

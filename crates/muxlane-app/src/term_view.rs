@@ -76,6 +76,54 @@ fn link_click_moved(start: Point<Pixels>, end: Point<Pixels>) -> bool {
     f32::from(start.x - end.x).abs() > 4.0 || f32::from(start.y - end.y).abs() > 4.0
 }
 
+fn open_directory(path: PathBuf, cx: &mut App) {
+    #[cfg(target_os = "linux")]
+    cx.background_spawn(async move {
+        let Ok(uri) = gpui::http_client::Url::from_directory_path(&path) else {
+            return;
+        };
+        let folders = format!("['{}']", uri.as_str().replace('\'', "%27"));
+        if std::process::Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.FileManager1",
+                "--object-path",
+                "/org/freedesktop/FileManager1",
+                "--method",
+                "org.freedesktop.FileManager1.ShowFolders",
+                &folders,
+                "",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return;
+        }
+        // Directory MIME handlers may be terminals; fall back to an actual file manager.
+        for program in ["nautilus", "dolphin", "thunar", "nemo", "caja", "pcmanfm"] {
+            match std::process::Command::new(program).arg(&path).spawn() {
+                Ok(mut child) => {
+                    let _ = child.wait();
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(%error, program, "failed to open directory");
+                    return;
+                }
+            }
+        }
+        tracing::warn!(?path, "no file manager available to open directory");
+    })
+    .detach();
+    #[cfg(not(target_os = "linux"))]
+    cx.open_with_system(&path);
+}
+
 fn inner_extent(outer_width: f32, outer_height: f32, padding_x: f32, padding_y: f32) -> (f32, f32) {
     (
         (outer_width - padding_x * 2.0).max(1.0),
@@ -357,7 +405,8 @@ impl ShapeCache {
             family: font_family.to_string().into(),
             features: FontFeatures::disable_ligatures(),
             fallbacks: Some(FontFallbacks::from_fonts(vec![
-                "Noto Sans Symbols 2".into(),
+                "Adwaita Mono".into(),
+                "DejaVu Sans".into(),
                 "DejaVu Sans Mono".into(),
                 "Noto Sans Mono".into(),
                 "Noto Sans CJK SC".into(),
@@ -589,6 +638,10 @@ pub struct TermView {
     /// 防抖：待应用的 PTY/远端 resize（拖拽期间只留最终帧）。
     pty_resize_pending: Arc<std::sync::Mutex<Option<PendingResize>>>,
     pty_resize_scheduled: Arc<AtomicBool>,
+    /// 焦点/激活事件实时刷新；resize 防抖到期时读它判定本窗口是否 PTY 尺寸属主。
+    /// 不能在调度时快照焦点：首次开窗时激活晚于第一帧，属主会一直是 false，
+    /// 初始 resize 被静默丢弃（PTY 卡在 80 列，直到手动改一次窗口大小）。
+    pty_resize_owner: Arc<AtomicBool>,
     #[cfg(test)]
     renders: std::cell::Cell<usize>,
     selection_flush_scheduled: bool,
@@ -866,6 +919,7 @@ impl TermView {
             pending_selection: None,
             pty_resize_pending: Arc::new(std::sync::Mutex::new(None)),
             pty_resize_scheduled: Arc::new(AtomicBool::new(false)),
+            pty_resize_owner: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             renders: std::cell::Cell::new(0),
             selection_flush_scheduled: false,
@@ -925,6 +979,7 @@ impl TermView {
             pending_selection: None,
             pty_resize_pending: Arc::new(std::sync::Mutex::new(None)),
             pty_resize_scheduled: Arc::new(AtomicBool::new(false)),
+            pty_resize_owner: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             renders: std::cell::Cell::new(0),
             selection_flush_scheduled: false,
@@ -1026,7 +1081,7 @@ impl TermView {
                 self.vterm.stop_selection();
                 match target {
                     LinkTarget::Web(url) => cx.open_url(&url),
-                    LinkTarget::Directory(path) => cx.open_with_system(&path),
+                    LinkTarget::Directory(path) => open_directory(path, cx),
                 }
                 cx.stop_propagation();
                 cx.notify();
@@ -1432,39 +1487,36 @@ impl Render for TermView {
             // the first XIM handshake race on X11/fcitx.
             let focus = self.focus.clone();
             let focus_in = cx.on_focus_in(&focus, window, |this, window, cx| {
+                let focused = window.is_window_active() && this.focus.is_focused(window);
+                this.pty_resize_owner.store(focused, Ordering::Relaxed);
                 cx.emit(TermFocusEvent {
                     agent: this.agent.clone(),
                     window: window.window_handle().window_id(),
-                    focused: window.is_window_active() && this.focus.is_focused(window),
+                    focused,
                 });
-                window.invalidate_character_coordinates();
+                // 只在元素自己得到焦点时挪候选框。窗口激活时 GPUI 已经重建了
+                // XIM context，这里再 focus/invalidate 会再换一次，fcitx 状态被清掉。
+                if window.is_window_active() {
+                    window.invalidate_character_coordinates();
+                }
                 cx.notify();
             });
             let focus_out = cx.on_focus_out(&focus, window, |this, _event, window, cx| {
+                this.pty_resize_owner.store(false, Ordering::Relaxed);
                 cx.emit(TermFocusEvent {
                     agent: this.agent.clone(),
                     window: window.window_handle().window_id(),
                     focused: false,
                 });
-                window.invalidate_character_coordinates();
                 cx.notify();
             });
             let activation = cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() {
-                    let focus = this.focus.clone();
-                    // X11/fcitx 在 FocusIn 时重建 XIM context；等这一轮窗口状态和
-                    // InputHandler 都注册完，再恢复 focus/候选框位置。
-                    window.on_next_frame(move |window, cx| {
-                        if window.is_window_active() {
-                            focus.focus(window, cx);
-                            window.invalidate_character_coordinates();
-                        }
-                    });
-                }
+                let focused = window.is_window_active() && this.focus.is_focused(window);
+                this.pty_resize_owner.store(focused, Ordering::Relaxed);
                 cx.emit(TermFocusEvent {
                     agent: this.agent.clone(),
                     window: window.window_handle().window_id(),
-                    focused: window.is_window_active() && this.focus.is_focused(window),
+                    focused,
                 });
                 cx.notify();
             });
@@ -1483,6 +1535,7 @@ impl Render for TermView {
         let remote_resize = self.remote_input.clone();
         let pty_resize_pending = Arc::clone(&self.pty_resize_pending);
         let pty_resize_scheduled = Arc::clone(&self.pty_resize_scheduled);
+        let pty_resize_owner = Arc::clone(&self.pty_resize_owner);
         let input_sink = self.input_sink();
         let input_focus = self.focus.clone();
         let input_marked = Arc::clone(&self.marked_text);
@@ -1619,7 +1672,7 @@ impl Render for TermView {
                                     let scheduled = Arc::clone(&pty_resize_scheduled);
                                     let writer = writer_resize.clone();
                                     let remote = remote_resize.clone();
-                                    let resize_owner = focused;
+                                    let resize_owner = Arc::clone(&pty_resize_owner);
                                     let executor = cx.background_executor().clone();
                                     let timer = executor.clone();
                                     executor
@@ -1630,7 +1683,7 @@ impl Render for TermView {
                                             else {
                                                 return;
                                             };
-                                            if resize_owner {
+                                            if resize_owner.load(Ordering::Relaxed) {
                                                 if let Some(writer) = &writer {
                                                     // pixel_width/height 不填就只有 rows/cols，Kitty 图形协议的
                                                     // 客户端（如 kitten icat）会因为拿不到像素尺寸直接拒绝发图。

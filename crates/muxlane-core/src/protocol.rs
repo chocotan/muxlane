@@ -297,6 +297,12 @@ impl DataStreamEncoder {
     }
 }
 
+impl Default for DataStreamEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Decodes the frames `DataStreamEncoder` produces. One instance per subscription.
 pub struct DataStreamDecoder {
     decoder: flate2::Decompress,
@@ -337,6 +343,12 @@ impl DataStreamDecoder {
     }
 }
 
+impl Default for DataStreamDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod data_stream_tests {
     use super::{DataStreamDecoder, DataStreamEncoder};
@@ -346,7 +358,12 @@ mod data_stream_tests {
     #[test]
     fn a_highly_compressed_frame_round_trips_exactly() {
         let line = b"/tmp/muxlane-paste-image_01M5K83FSNB2E2JK44SZ4XJ6PE.png\n";
-        let burst: Vec<u8> = line.iter().copied().cycle().take(line.len() * 8000).collect();
+        let burst: Vec<u8> = line
+            .iter()
+            .copied()
+            .cycle()
+            .take(line.len() * 8000)
+            .collect();
         let mut encoder = DataStreamEncoder::new();
         let mut decoder = DataStreamDecoder::new();
         let payload = encoder.push(&burst).unwrap();
@@ -368,7 +385,11 @@ mod data_stream_tests {
             if index == 0 {
                 first = payload.len();
             } else {
-                assert!(payload.len() < first, "repeat {index}: {} >= {first}", payload.len());
+                assert!(
+                    payload.len() < first,
+                    "repeat {index}: {} >= {first}",
+                    payload.len()
+                );
             }
         }
     }
@@ -379,7 +400,11 @@ mod data_stream_tests {
         for _ in 0..200 {
             encoder.push(&[b'x'; 4096]).unwrap();
         }
-        assert!(encoder.buffered_len() < 64 * 1024, "{}", encoder.buffered_len());
+        assert!(
+            encoder.buffered_len() < 64 * 1024,
+            "{}",
+            encoder.buffered_len()
+        );
     }
 }
 
@@ -501,7 +526,7 @@ pub struct DeleteScopeResult {
 pub struct AgentReportParams {
     pub token: String,
     pub agent: AgentId,
-    /// "done" | "blocked" | "working"
+    /// "done" | "failed" | "error" | "blocked" | "working" | "idle"
     pub event: String,
     #[serde(default)]
     pub message: Option<String>,

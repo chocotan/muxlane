@@ -820,7 +820,8 @@ impl MuxlaneApp {
             .retain(|agent, _| snapshot.agent(agent).is_some());
         for agent in &mut snapshot.agents {
             if let Some((status, since)) = self.local_read_results.get_mut(&agent.id) {
-                if agent.status == *status && since.is_none_or(|since| since == agent.status_since) {
+                if agent.status == *status && since.is_none_or(|since| since == agent.status_since)
+                {
                     *since = Some(agent.status_since);
                     agent.seen = true;
                     agent.status = muxlane_core::model::AgentStatus::Idle;
@@ -857,7 +858,11 @@ impl MuxlaneApp {
         );
         self.last_snapshot = snapshot;
         if let Some(agent) = self.notification_focused_agent().cloned() {
-            if self.last_snapshot.agent(&agent).is_some_and(|a| a.status.is_finished()) {
+            if self
+                .last_snapshot
+                .agent(&agent)
+                .is_some_and(|a| a.status.is_finished())
+            {
                 self.mark_agent_seen(&agent, cx);
             }
         }
@@ -940,16 +945,21 @@ impl MuxlaneApp {
     ) {
         let focused = self.notification_focused_agent() == Some(&event.agent);
         let acknowledged = host.is_none()
-            && self.local_read_results.get(&event.agent).is_some_and(|(status, _)| {
-                *status == event.to && event.to.is_finished()
-            });
+            && self
+                .local_read_results
+                .get(&event.agent)
+                .is_some_and(|(status, _)| *status == event.to && event.to.is_finished());
         let transition = event.from != event.to && !acknowledged;
         // Same-status events only enrich the message. Reapplying Done/Failed here
         // would undo an acknowledgement made before this late hook arrived.
         if transition {
             if host.is_none()
                 && (event.to.is_finished()
-                    || matches!(event.to, muxlane_core::model::AgentStatus::Working | muxlane_core::model::AgentStatus::Blocked))
+                    || matches!(
+                        event.to,
+                        muxlane_core::model::AgentStatus::Working
+                            | muxlane_core::model::AgentStatus::Blocked
+                    ))
             {
                 self.local_read_results.remove(&event.agent);
             }
@@ -980,7 +990,8 @@ impl MuxlaneApp {
             if host.is_none() && transition {
                 // Status events have no status_since; bind the receipt to the first
                 // matching snapshot, rather than the previous run's timestamp.
-                self.local_read_results.insert(event.agent, (event.to, None));
+                self.local_read_results
+                    .insert(event.agent, (event.to, None));
             }
         }
         cx.notify();

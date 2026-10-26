@@ -26,6 +26,7 @@ pub enum HookEvent {
     Failed,
     Blocked,
     Working,
+    Idle,
 }
 
 impl HookEvent {
@@ -35,6 +36,7 @@ impl HookEvent {
             "failed" | "error" => Some(HookEvent::Failed),
             "blocked" => Some(HookEvent::Blocked),
             "working" => Some(HookEvent::Working),
+            "idle" => Some(HookEvent::Idle),
             _ => None,
         }
     }
@@ -44,6 +46,7 @@ impl HookEvent {
             HookEvent::Failed => AgentStatus::Failed,
             HookEvent::Blocked => AgentStatus::Blocked,
             HookEvent::Working => AgentStatus::Working,
+            HookEvent::Idle => AgentStatus::Idle,
         }
     }
 }

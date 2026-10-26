@@ -616,7 +616,7 @@ set-option -g set-titles off
 set-option -g default-terminal \"xterm-256color\"
 set-option -g terminal-overrides \",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB\"
 set-option -gu terminal-features
-set-option -ga terminal-features \",xterm-256color:RGB:clipboard,tmux-256color:RGB:clipboard,*-256color:RGB:clipboard,*:clipboard\"
+set-option -ga terminal-features \",xterm-256color:RGB:clipboard:hyperlinks,tmux-256color:RGB:clipboard:hyperlinks,*-256color:RGB:clipboard:hyperlinks,*:clipboard:hyperlinks\"
 set-option -g xterm-keys on
 set-option -g history-limit 50000
 set-option -g window-size latest
@@ -1122,6 +1122,43 @@ sleep 1
             }
         }
         session.kill_persistent();
+    }
+
+    #[test]
+    fn tmux_preserves_osc8_links_when_attaching_and_reattaching() {
+        let socket = format!("muxlane-links-test-{}-{}", std::process::id(), now_millis());
+        let cfg = LaunchCfg {
+            agent: "links-test".into(),
+            agent_type: AgentType::Shell,
+            cwd: std::env::temp_dir(),
+            env: vec![],
+            program_override: Some("/bin/sh".into()),
+            args: vec![
+                "-c".into(),
+                r"printf '\033]8;;https://example.com/docs\033\\Read docs\033]8;;\033\\'; exec sleep 10".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            tmux_session: Some("links".into()),
+        };
+        let _cleanup = TmuxServerCleanup::new(socket.clone());
+        for _ in 0..2 {
+            let session = PtySession::spawn_with_tmux_socket(cfg.clone(), &socket).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let terminal = crate::VTerm::new(80, 24);
+                terminal.feed_silent(&session.replay_snapshot());
+                if terminal.link_at(0, 3).as_deref() == Some("https://example.com/docs") {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "tmux discarded OSC8 hyperlink metadata"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            session.kill();
+        }
     }
 
     #[test]

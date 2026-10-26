@@ -343,7 +343,7 @@ impl MuxlaneApp {
                     )
             }
             TreeMenuTarget::Delete(
-                DeleteTarget::LocalProject { .. } | DeleteTarget::RemoteProject { .. },
+                target @ (DeleteTarget::LocalProject { .. } | DeleteTarget::RemoteProject { .. }),
             ) => {
                 let label = match &menu.target {
                     TreeMenuTarget::Delete(DeleteTarget::LocalProject { .. }) => {
@@ -367,15 +367,6 @@ impl MuxlaneApp {
                         })
                         .unwrap_or_default(),
                     _ => Vec::new(),
-                };
-                let (host, project) = match &menu.target {
-                    TreeMenuTarget::Delete(DeleteTarget::RemoteProject { host, project, .. }) => {
-                        (Some(host.as_str()), Some(project.as_str()))
-                    }
-                    TreeMenuTarget::Delete(DeleteTarget::LocalProject { project, .. }) => {
-                        (None, Some(project.as_str()))
-                    }
-                    _ => (None, None),
                 };
                 let mut menu_el = div()
                     .w(ui_px(190.))
@@ -417,9 +408,7 @@ impl MuxlaneApp {
                         .text_color(rgba(theme.red))
                         .hover(|style| style.bg(rgba(theme.bg2)))
                         .on_click(cx.listener({
-                            let TreeMenuTarget::Delete(target) = menu.target.clone() else {
-                                unreachable!("project menu is a delete target");
-                            };
+                            let target = target.clone();
                             move |this, _event, _window, cx| {
                                 let target = target.clone();
                                 this.tree_menu = None;

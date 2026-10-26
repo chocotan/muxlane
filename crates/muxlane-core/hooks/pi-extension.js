@@ -115,9 +115,15 @@ export default function (pi) {
   // 新版 Pi 在所有重试、压缩和排队消息结束后触发；旧版没有此事件。
   pi.on("agent_settled", async (event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
-    // aborted 的一轮由用户取消，不算完成；其余 settled 都要收掉 working。
-    if (doneReported || event?.aborted) return
+    if (doneReported) return
     doneReported = true
+    // 用户取消也要收掉 working，但不能生成完成/失败通知。
+    if (event?.aborted) {
+      latestAssistant = ""
+      lastError = ""
+      await report("idle", "")
+      return
+    }
     let msg = latestAssistant
     if (event?.error || ctx?.error) {
       const err = shortText(event?.error || ctx?.error || "执行出错")

@@ -397,6 +397,86 @@ fn looks_like_tmux_copy_title(title: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_run_returns_idle_without_an_unread_result() {
+        let mut state = ServerState::new(MachineInfo {
+            machine_id: "test".into(),
+            name: "test".into(),
+            os: "test".into(),
+            version: "test".into(),
+        });
+        let agent = "pie_cancelled".to_string();
+        state.add_agent(
+            Project {
+                id: "p".into(),
+                name: "p".into(),
+                path: "/tmp".into(),
+                branch: None,
+                agents: vec![],
+            },
+            AgentInstance {
+                id: agent.clone(),
+                project: "p".into(),
+                agent_type: AgentType::Pie,
+                title: "Pie".into(),
+                status: AgentStatus::Idle,
+                status_since: 0,
+                seen: true,
+                tmux_session: None,
+            },
+        );
+        let report = AgentReportParams {
+            token: "unused".into(),
+            agent: agent.clone(),
+            event: "idle".into(),
+            message: Some(String::new()),
+        };
+        for running in ["working", "blocked"] {
+            state
+                .report_hook(&AgentReportParams {
+                    event: running.into(),
+                    ..report.clone()
+                })
+                .await;
+            let events = state.report_hook(&report).await;
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].params["from"], running);
+            assert_eq!(events[0].params["to"], "idle");
+            assert_eq!(state.agents[0].status, AgentStatus::Idle);
+            assert!(!state.agents[0].status.is_finished());
+            assert!(state.agents[0].seen);
+            assert!(!state.read_results.contains_key(&agent));
+            assert!(state.report_hook(&report).await.is_empty());
+            // Stale spinner output cannot resurrect a cancelled run.
+            let spinner = muxlane_core::detect::ScreenInput {
+                bottom_lines: vec!["Thinking…".into()],
+                ..Default::default()
+            };
+            for _ in 0..3 {
+                assert!(state.observe_screen(&agent, &spinner).is_empty());
+            }
+            assert_eq!(state.agents[0].status, AgentStatus::Idle);
+
+            // The next real completion must still become an unread result.
+            for event in ["working", "done"] {
+                assert_eq!(
+                    state
+                        .report_hook(&AgentReportParams {
+                            event: event.into(),
+                            ..report.clone()
+                        })
+                        .await
+                        .len(),
+                    1
+                );
+            }
+            assert_eq!(state.agents[0].status, AgentStatus::Done);
+            assert!(!state.agents[0].seen);
+            state.mark_seen(&agent);
+        }
+    }
+
     #[tokio::test]
     async fn shell_identity_changes_clear_authority_and_do_not_reuse_old_titles() {
         let mut state = ServerState::new(MachineInfo {
@@ -533,8 +613,8 @@ mod tests {
                 AgentInstance {
                     id: agent.clone(),
                     project: "p".into(),
-                    agent_type: AgentType::Pi,
-                    title: "Pi".into(),
+                    agent_type: AgentType::Shell,
+                    title: "Shell".into(),
                     status: AgentStatus::Idle,
                     status_since: 0,
                     seen: true,
@@ -563,7 +643,7 @@ mod tests {
             assert_eq!(state.agents[0].status, AgentStatus::Idle);
             assert!(state.agents[0].seen);
 
-            // Done-only hook integrations start their next run via terminal input.
+            // Shell input starts the next run; Agent sessions are hook-owned.
             assert_eq!(state.mark_screen_working(&agent).len(), 1);
             assert_eq!(state.report_hook(&report).await.len(), 1);
             assert!(

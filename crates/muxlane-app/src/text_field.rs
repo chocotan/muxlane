@@ -68,9 +68,10 @@ fn click_offset(content: &str, x: f32, y: f32, origin_x: f32, origin_y: f32) -> 
     let index = ((y - origin_y) / line_h).floor().max(0.0) as usize;
     let index = index.min(lines.len().saturating_sub(1));
     let (start, end) = lines[index];
-    let column = ((x - origin_x - 12.0 * crate::ui_scale::factor()) / (7.2 * crate::ui_scale::factor()))
-        .round()
-        .max(0.0) as usize;
+    let column = ((x - origin_x - 12.0 * crate::ui_scale::factor())
+        / (7.2 * crate::ui_scale::factor()))
+    .round()
+    .max(0.0) as usize;
     offset_at_column(content, start, end, column)
 }
 
@@ -105,7 +106,11 @@ fn line_edge(content: &str, cursor: usize, home: bool) -> usize {
     let lines = visual_lines(content);
     let cursor = cursor.min(content.len());
     let (start, end) = lines[line_of(&lines, cursor)];
-    if home { start } else { end }
+    if home {
+        start
+    } else {
+        end
+    }
 }
 
 pub struct TextField {
@@ -143,16 +148,6 @@ impl TextField {
             click_origin: None,
             _focus_subscription: focus_subscription,
         }
-    }
-
-    pub fn new_multiline(
-        placeholder: impl Into<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut field = Self::new(placeholder, window, cx);
-        field.multiline = true;
-        field
     }
 
     pub fn new_secure(
@@ -425,12 +420,7 @@ impl TextField {
         }
     }
 
-    fn render_multiline(
-        &self,
-        focused: bool,
-        theme: Theme,
-        cursor_c: u32,
-    ) -> gpui::AnyElement {
+    fn render_multiline(&self, focused: bool, theme: Theme, cursor_c: u32) -> gpui::AnyElement {
         if self.content.is_empty() {
             return div()
                 .flex()
@@ -439,7 +429,13 @@ impl TextField {
                 .text_color(rgba(theme.fg2))
                 .child(self.placeholder.clone())
                 .when(focused, |el| {
-                    el.child(div().ml(ui_px(1.)).w(ui_px(1.5)).h(ui_px(16.)).bg(rgba(cursor_c)))
+                    el.child(
+                        div()
+                            .ml(ui_px(1.))
+                            .w(ui_px(1.5))
+                            .h(ui_px(16.))
+                            .bg(rgba(cursor_c)),
+                    )
                 })
                 .into_any_element();
         }
@@ -893,10 +889,8 @@ impl Render for TextField {
                         let entity = cx.entity().clone();
                         move |bounds, _window, cx| {
                             entity.update(cx, |this, _cx| {
-                                this.click_origin = Some((
-                                    f32::from(bounds.origin.x),
-                                    f32::from(bounds.origin.y),
-                                ));
+                                this.click_origin =
+                                    Some((f32::from(bounds.origin.x), f32::from(bounds.origin.y)));
                             });
                         }
                     },

@@ -684,7 +684,7 @@ impl VTerm {
             .find(boundary)
             .map_or(text.len(), |index| clicked + index);
         let token = text[start..end].trim_start_matches('(');
-        let ipv6 = token.starts_with("http://[") || token.starts_with("https://[");
+        let ipv6 = token.contains("http://[") || token.contains("https://[");
         let separator = |c: char| boundary(c) || (!ipv6 && "[]".contains(c));
         if text[clicked..].starts_with(separator) {
             return None;
@@ -695,7 +695,19 @@ impl VTerm {
         let end = text[clicked..]
             .find(separator)
             .map_or(text.len(), |index| clicked + index);
-        let token = text[start..end].trim_start_matches('(');
+        let mut token = text[start..end].trim_start_matches('(');
+        if let Some(index) = token.find("https://").or_else(|| token.find("http://")) {
+            let offset = end - token.len() + index;
+            if clicked >= offset {
+                token = &token[index..];
+            }
+        } else if !token.starts_with(['/', '~', '.']) {
+            if let Some((label, path)) = token.split_once([':', '：']) {
+                if path.starts_with(['/', '~', '.']) && clicked > start + label.len() {
+                    token = path;
+                }
+            }
+        }
         let mut token = token.trim_end_matches([',', ';', '。', '，', '；']);
         if token.starts_with("http://") || token.starts_with("https://") {
             token = token.trim_end_matches('.');
@@ -1047,6 +1059,25 @@ mod link_tests {
             );
         }
         assert_eq!(term.link_at(2, 5).as_deref(), Some("/tmp/child"));
+    }
+
+    #[test]
+    fn links_after_labels_do_not_require_whitespace() {
+        let term = VTerm::new(100, 4);
+        term.feed(
+            " - 前端：http://localhost:3001\r\n目录：/tmp/project\r\nweb:http://[::1]:8080/docs"
+                .as_bytes(),
+        );
+        assert_eq!(
+            term.link_at(0, 19).as_deref(),
+            Some("http://localhost:3001")
+        );
+        assert_eq!(term.link_at(1, 9).as_deref(), Some("/tmp/project"));
+        assert_eq!(
+            term.link_at(2, 12).as_deref(),
+            Some("http://[::1]:8080/docs")
+        );
+        assert_ne!(term.link_at(0, 3).as_deref(), Some("http://localhost:3001"));
     }
 }
 

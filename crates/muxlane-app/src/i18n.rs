@@ -605,6 +605,7 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
         "镜像流断开，正在重连…",
         "Mirror stream disconnected. Reconnecting…",
     ),
+    ("theme.ash", "灰白", "Ash"),
     ("theme.dark", "墨渊", "Ink"),
     ("theme.jade", "竹青", "Jade"),
     ("theme.light", "雾白瓷", "Porcelain"),

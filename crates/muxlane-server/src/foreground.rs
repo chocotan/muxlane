@@ -133,7 +133,7 @@ fn parse_process(line: &str) -> Option<Process> {
     let mut values = [0i64; 4];
     let mut cursor = 0;
     for value in &mut values {
-        let bytes = rest[cursor..].as_bytes();
+        let bytes = &rest.as_bytes()[cursor..];
         let start = bytes.iter().position(|byte| !byte.is_ascii_whitespace())?;
         cursor += start;
         let token = rest[cursor..].split_whitespace().next()?;

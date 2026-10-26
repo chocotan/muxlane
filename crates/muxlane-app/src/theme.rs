@@ -10,6 +10,7 @@ pub enum ThemeMode {
     Light,
     Moonstone,
     Paper,
+    Ash,
     Sky,
     Jade,
     Sakura,
@@ -19,10 +20,11 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Light,
         Self::Moonstone,
         Self::Paper,
+        Self::Ash,
         Self::Sky,
         Self::Jade,
         Self::Sakura,
@@ -36,6 +38,7 @@ impl ThemeMode {
             Self::Light => "light",
             Self::Moonstone => "moonstone",
             Self::Paper => "paper",
+            Self::Ash => "ash",
             Self::Sky => "sky",
             Self::Jade => "jade",
             Self::Sakura => "sakura",
@@ -56,6 +59,7 @@ impl ThemeMode {
                 Self::Light => "theme.light",
                 Self::Moonstone => "theme.moonstone",
                 Self::Paper => "theme.paper",
+                Self::Ash => "theme.ash",
                 Self::Sky => "theme.sky",
                 Self::Jade => "theme.jade",
                 Self::Sakura => "theme.sakura",
@@ -164,6 +168,23 @@ impl Theme {
                 green: 0x4e8c62ff,
                 yellow: 0xb8872eff,
                 red: 0xc94b4bff,
+            },
+            // Neutral gray. No hue in surfaces or the accent.
+            ThemeMode::Ash => Self {
+                bg0: 0xf4f4f2ff,
+                bg1: 0xe7e7e4ff,
+                bg2: 0xd9d9d5ff,
+                bg3: 0xccccc7ff,
+                line: 0xbfbfb9ff,
+                fg0: 0x1a1a18ff,
+                fg1: 0x3c3c39ff,
+                fg2: 0x4a4a46ff,
+                accent: 0x3a3a36ff,
+                on_accent: 0xffffffff,
+                on_warning: 0xffffffff,
+                green: 0x1f6b3aff,
+                yellow: 0x6b4306ff,
+                red: 0x6e1826ff,
             },
             ThemeMode::Sky => Self {
                 bg0: 0xf2f7ffff,
@@ -297,6 +318,23 @@ mod tests {
         assert!(ThemeMode::Dark.is_dark());
         assert!(ThemeMode::Synthwave.is_dark());
         assert!(!ThemeMode::Paper.is_dark());
+        assert!(!ThemeMode::Ash.is_dark());
+    }
+
+    #[test]
+    fn ash_is_registered_and_neutral() {
+        let mode = ThemeMode::Ash;
+        assert_eq!(mode.label(Language::Chinese), "灰白");
+        assert_eq!(mode.label(Language::English), "Ash");
+        assert_eq!(serde_json::to_string(&mode).unwrap(), "\"ash\"");
+        let theme = Theme::for_mode(mode);
+        for color in [theme.bg0, theme.bg1, theme.accent, theme.fg0] {
+            let r = (color >> 24) & 0xff;
+            let g = (color >> 16) & 0xff;
+            let b = (color >> 8) & 0xff;
+            assert!((r as i32 - g as i32).abs() <= 4, "{color:#x}");
+            assert!((g as i32 - b as i32).abs() <= 4, "{color:#x}");
+        }
     }
 
     fn srgb_luminance(color: u32) -> f64 {

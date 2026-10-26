@@ -56,7 +56,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_pi_extension_filters_native_subagents_without_hiding_forks() {
+    fn generated_pi_extension_reports_parent_lifecycle() {
         if std::process::Command::new("node")
             .arg("--version")
             .output()
@@ -74,13 +74,12 @@ mod tests {
 import net from "node:net"
 import { pathToFileURL } from "node:url"
 
-let connections = 0
+const reports = []
 net.createConnection = () => {
-  connections++
   const handlers = {}
   const client = {
     setTimeout() {},
-    end() {},
+    end(data) { reports.push(JSON.parse(data).params) },
     destroy() {},
     on(name, callback) {
       handlers[name] = callback
@@ -118,9 +117,53 @@ extension.default({
 assert.equal(handlers.size, 7)
 const event = new Proxy({}, { get() { throw new Error("ignored event was inspected") } })
 for (const callback of handlers.values()) await callback(event, child)
-assert.equal(connections, 0)
-await handlers.get("turn_start")({}, context(undefined, "parent session"))
-assert.equal(connections, 1)
+assert.equal(reports.length, 0)
+const parent = context(undefined, "parent session")
+const emit = (name, event = {}) => handlers.get(name)(event, parent)
+const takeReports = () => reports.splice(0).map(({ event, message }) => ({ event, message }))
+
+await emit("turn_start")
+assert.deepEqual(takeReports(), [{ event: "working", message: "" }])
+await emit("message_end", { message: { role: "assistant", content: "unfinished response" } })
+// Pie's agent_end has no willRetry: it must wait for the final settle event.
+await emit("agent_end", { messages: [] })
+assert.deepEqual(takeReports(), [])
+await emit("agent_settled", { aborted: true })
+await emit("agent_settled", { aborted: true })
+await emit("agent_settled", { aborted: false })
+assert.deepEqual(takeReports(), [{ event: "idle", message: "" }])
+
+// A cancelled retry may leave an error message. Cancellation wins and clears it.
+await emit("agent_start")
+await emit("message_end", { message: {
+  role: "assistant", stopReason: "error", errorMessage: "retry failed", content: "partial answer",
+} })
+await emit("agent_settled", { aborted: true, error: "cancelled" })
+assert.deepEqual(takeReports(), [
+  { event: "working", message: "" }, { event: "idle", message: "" },
+])
+
+// The next run must not inherit the cancelled response or error.
+await emit("agent_start")
+await emit("agent_settled", { aborted: false })
+await emit("agent_settled", { aborted: false })
+assert.deepEqual(takeReports(), [
+  { event: "working", message: "" }, { event: "done", message: "任务已完成" },
+])
+await emit("agent_start")
+await emit("message_end", { message: { role: "assistant", content: "finished response" } })
+await emit("agent_settled", { aborted: false })
+assert.deepEqual(takeReports(), [
+  { event: "working", message: "" }, { event: "done", message: "finished response" },
+])
+await emit("agent_start")
+await emit("message_end", { message: {
+  role: "assistant", stopReason: "error", errorMessage: "real error",
+} })
+await emit("agent_settled", { aborted: false })
+assert.deepEqual(takeReports(), [
+  { event: "working", message: "" }, { event: "failed", message: "任务异常: real error" },
+])
 "#,
         )
         .unwrap();
