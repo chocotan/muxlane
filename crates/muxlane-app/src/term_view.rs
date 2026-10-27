@@ -615,6 +615,10 @@ pub struct TermView {
     writer: Option<Arc<PtySession>>,
     remote_input: Option<tokio::sync::mpsc::UnboundedSender<RemoteTermCommand>>,
     last_dims: Arc<std::sync::Mutex<(u16, u16)>>,
+    /// 强制下一帧 paint 重发终端几何。不能靠把 last_dims 清零实现：
+    /// 焦点/激活事件每次都会触发 request_resize，清零后到重绘前那几毫秒里
+    /// grid_point 全部失效，点击/拖选被静默吞掉（pie 里点不动就是这个）。
+    resize_forced: Arc<AtomicBool>,
     last_bounds: Arc<std::sync::Mutex<Option<Bounds<Pixels>>>>,
     cell_size: Arc<std::sync::Mutex<(f32, f32)>>,
     scroll_accum: Arc<std::sync::Mutex<f32>>,
@@ -702,10 +706,9 @@ fn write_paste_image(image: &gpui::Image) -> Option<std::path::PathBuf> {
 impl TermView {
     /// Make the next layout pass resend this terminal's size after it gains focus.
     /// The focused terminal is the active PTY-size owner when multiple clients are open.
+    /// 只置脏标记，不动 last_dims（清零会吞掉重绘前的鼠标事件）。
     pub fn request_resize(&mut self) {
-        if let Ok(mut dims) = self.last_dims.lock() {
-            *dims = (0, 0);
-        }
+        self.resize_forced.store(true, Ordering::Relaxed);
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -898,6 +901,7 @@ impl TermView {
             writer: Some(session),
             remote_input: None,
             last_dims: Arc::new(std::sync::Mutex::new((120, 32))),
+            resize_forced: Arc::new(AtomicBool::new(false)),
             last_bounds: Arc::new(std::sync::Mutex::new(None)),
             cell_size: Arc::new(std::sync::Mutex::new((FALLBACK_CELL_W, FALLBACK_CELL_H))),
             scroll_accum: Arc::new(std::sync::Mutex::new(0.0)),
@@ -958,6 +962,7 @@ impl TermView {
             writer: None,
             remote_input: Some(remote_input),
             last_dims: Arc::new(std::sync::Mutex::new((120, 32))),
+            resize_forced: Arc::new(AtomicBool::new(false)),
             last_bounds: Arc::new(std::sync::Mutex::new(None)),
             cell_size: Arc::new(std::sync::Mutex::new((FALLBACK_CELL_W, FALLBACK_CELL_H))),
             scroll_accum: Arc::new(std::sync::Mutex::new(0.0)),
@@ -1540,6 +1545,7 @@ impl Render for TermView {
         let input_focus = self.focus.clone();
         let input_marked = Arc::clone(&self.marked_text);
         let dims = Arc::clone(&self.last_dims);
+        let resize_forced = Arc::clone(&self.resize_forced);
         let pane_bounds = Arc::clone(&self.last_bounds);
         let cell_size = Arc::clone(&self.cell_size);
         let shape_cache = Arc::clone(&self.shape_cache);
@@ -1649,7 +1655,10 @@ impl Render for TermView {
                             *size = (f32::from(measured_cell), f32::from(line_height));
                         }
                         if let Ok(mut last) = dims.lock() {
-                            if *last != (cols, rows) {
+                            // 焦点事件置脏：几何没变也要重发（多客户端尺寸属主切换）。
+                            if resize_forced.swap(false, Ordering::Relaxed)
+                                || *last != (cols, rows)
+                            {
                                 *last = (cols, rows);
                                 vt_resize.resize(cols, rows);
                                 let px_w = (f32::from(measured_cell) * cols as f32) as u16;
@@ -2457,6 +2466,49 @@ mod tests {
             "link clicks must not reach the PTY"
         );
         visual.update(|_, cx| assert!(!term.read(cx).selecting));
+    }
+
+    #[test]
+    fn click_right_after_focus_event_is_not_swallowed() {
+        use gpui::{TestAppContext, VisualTestContext};
+
+        let mut cx = TestAppContext::single();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let term = cx.new(|cx| {
+            TermView::new_remote(
+                "click-race".into(),
+                VTerm::new_with_clipboard(80, 24),
+                sender,
+                "monospace".into(),
+                Theme::for_mode(Default::default()),
+                false,
+                cx,
+            )
+        });
+        let handle = cx.add_window(|_, _| TestTermRoot {
+            term: Some(term.clone()),
+            inset: gpui::px(0.),
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), &cx);
+        visual.simulate_resize(size(gpui::px(800.), gpui::px(400.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        while receiver.try_recv().is_ok() {}
+
+        // 每次焦点/激活事件都会触发 request_resize；点击若落在重绘前的那几毫秒里，
+        // 旧实现把 last_dims 清零导致 grid_point 失效，点击被静默吞掉。
+        term.update(&mut cx, |term, cx| term.request_resize());
+        let at = visual.update(|_, cx| {
+            let view = term.read(cx);
+            let bounds = view.last_bounds.lock().unwrap().unwrap();
+            bounds.origin + point(gpui::px(30.), gpui::px(20.))
+        });
+        visual.simulate_click(at, Default::default());
+
+        let forwarded = receiver.try_recv();
+        assert!(
+            forwarded.is_ok(),
+            "click between request_resize and repaint must still reach the PTY"
+        );
     }
 
     #[test]
