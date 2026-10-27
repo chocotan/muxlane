@@ -227,6 +227,32 @@ fn join_url(base: &str, path: &str) -> String {
     }
 }
 
+/// Cloudflare and nginx can drop a peer without a close frame, leaving a socket
+/// where writes never complete. Bound every write so the reconnect loop cannot
+/// hang forever on a half-open connection.
+const RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn send_bounded<S>(sink: &mut S, message: Message) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    send_with_timeout(sink, message, RELAY_SEND_TIMEOUT).await
+}
+
+async fn send_with_timeout<S>(
+    sink: &mut S,
+    message: Message,
+    limit: Duration,
+) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    tokio::time::timeout(limit, sink.send(message))
+        .await
+        .map_err(|_| anyhow::anyhow!("relay write timed out"))??;
+    Ok(())
+}
+
 async fn connect_once(
     server: Arc<MuxlaneServer>,
     ws_url: &str,
@@ -243,7 +269,7 @@ async fn connect_once(
     tracing::info!(%ws_url, "relay host connected");
 
     if let Some(code) = server.relay().pending_code().await {
-        sink.send(Message::Text(code.into())).await?;
+        send_bounded(&mut sink, Message::Text(code.into())).await?;
         wait_ack(&mut stream, &mut sink).await?;
         tracing::debug!("relay pair code registered");
     }
@@ -258,11 +284,11 @@ async fn connect_once(
         tokio::select! {
             _ = channels.join_next(), if !channels.is_empty() => {}
             _ = ping.tick() => {
-                sink.send(Message::Ping(Vec::new().into())).await?;
+                send_bounded(&mut sink, Message::Ping(Vec::new().into())).await?;
             }
             code = code_rx.recv() => {
                 let Some(code) = code else { break };
-                sink.send(Message::Text(code.into())).await?;
+                send_bounded(&mut sink, Message::Text(code.into())).await?;
                 wait_ack(&mut stream, &mut sink).await?;
             }
             message = stream.next() => {
@@ -280,7 +306,7 @@ async fn connect_once(
                         });
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        sink.send(Message::Pong(payload)).await?;
+                        send_bounded(&mut sink, Message::Pong(payload)).await?;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -358,7 +384,7 @@ where
         match stream.next().await {
             Some(Ok(Message::Text(text))) if text == "ok" => return Ok(()),
             Some(Ok(Message::Ping(payload))) => {
-                sink.send(Message::Pong(payload)).await?;
+                send_bounded(sink, Message::Pong(payload)).await?;
             }
             other => anyhow::bail!("unexpected pair ack: {other:?}"),
         }
@@ -390,7 +416,7 @@ where
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        sink.send(Message::Pong(payload)).await?;
+                        send_bounded(sink, Message::Pong(payload)).await?;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -400,7 +426,7 @@ where
             outgoing = session.pop_out() => {
                 let Some(bytes) = outgoing else { break };
                 let text = String::from_utf8_lossy(&bytes).trim_end().to_string();
-                sink.send(Message::Text(text.into())).await?;
+                send_bounded(sink, Message::Text(text.into())).await?;
             }
         }
     }
@@ -511,5 +537,46 @@ impl AsyncWrite for RelaySession {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A socket whose writes never complete, like a half-open TCP connection.
+    struct Stalled;
+
+    impl futures_util::Sink<Message> for Stalled {
+        type Error = tokio_tungstenite::tungstenite::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stalled_relay_write_times_out_instead_of_hanging() {
+        let mut sink = Stalled;
+        let error = send_with_timeout(
+            &mut sink,
+            Message::Ping(Vec::new().into()),
+            Duration::from_millis(20),
+        )
+        .await
+        .expect_err("a write that never completes must not hang");
+        assert!(error.to_string().contains("timed out"), "{error}");
     }
 }
