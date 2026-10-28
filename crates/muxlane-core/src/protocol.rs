@@ -207,6 +207,8 @@ pub mod features {
     pub const AGENT_MARK_SEEN: &str = "agent.mark_seen";
     /// Client asks the server to stream large terminal replays as bounded events.
     pub const TERM_REPLAY_CHUNKS: &str = "term.replay_chunks";
+    /// Server can send only the runs that changed (keyframe + patches).
+    pub const TERM_DIFF: &str = "term.diff";
     pub const PAIR: &str = "pair.begin";
     pub const PRESET_LIST: &str = "preset.list";
 }
@@ -254,6 +256,9 @@ pub struct TermSubscribeParams {
     /// Live term.data is one raw-deflate stream. Repeated screen redraws stay small.
     #[serde(default)]
     pub accept_data_stream: bool,
+    /// Opt in to keyframe + patch frames instead of every raw repaint.
+    #[serde(default)]
+    pub accept_term_diff: bool,
 }
 
 /// gzip 压缩 replay 字节（flate2 已在 workspace 依赖里；TUI 输出典型压缩比 5-10×）。

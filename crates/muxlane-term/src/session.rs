@@ -115,6 +115,9 @@ struct Shared {
     /// 最近一次收到 PTY 输出的时刻（毫秒）；0 = 尚无输出。
     /// 读线程在每个 chunk 上更新，供状态检测做静默兜底。
     last_output_ms: AtomicU64,
+    /// 读线程跟踪的 alt-screen 状态；回放尾部可能不含进入序列，
+    /// 屏差镜像需要它才能知道“当前是全屏应用，不会产生 scrollback”。
+    alt_screen: AtomicBool,
 }
 
 pub struct PtySession {
@@ -127,6 +130,8 @@ pub struct PtySession {
     exit_rx: Mutex<mpsc::Receiver<SessionEvent>>,
     last_input_ms: AtomicU64,
     focused: AtomicBool,
+    /// Current terminal size, packed as cols | rows << 32.
+    size: AtomicU64,
     tmux_server_name: Option<String>,
     tmux_session_name: Option<String>,
 }
@@ -245,12 +250,21 @@ impl PtySession {
         let (exit_tx, exit_rx) = mpsc::channel(8);
 
         let killer = child.clone_killer();
+        // A restored tmux pane may already be on the alternate screen, and the
+        // entering sequence is long gone from the live stream. Ask tmux once so
+        // the screen-diff mirror starts with the right mode.
+        let initial_alt_screen = cfg
+            .tmux_session
+            .as_deref()
+            .and_then(|session| tmux_alternate_on(tmux_server_name, session))
+            .unwrap_or(false);
         let shared = Arc::new(Shared {
             replay: std::sync::Mutex::new(ReplayBuffer::new(REPLAY_CAP)),
             child: std::sync::Mutex::new(child),
             killer: std::sync::Mutex::new(killer),
             stream_gate: std::sync::Mutex::new(()),
             last_output_ms: AtomicU64::new(0),
+            alt_screen: AtomicBool::new(initial_alt_screen),
         });
 
         let session = Arc::new(PtySession {
@@ -263,6 +277,7 @@ impl PtySession {
             shared: Arc::clone(&shared),
             last_input_ms: AtomicU64::new(0),
             focused: AtomicBool::new(false),
+            size: AtomicU64::new(pack_size(cfg.cols, cfg.rows)),
             tmux_server_name: cfg
                 .tmux_session
                 .as_ref()
@@ -290,6 +305,11 @@ impl PtySession {
                             let bytes = bytes::Bytes::copy_from_slice(&chunk[..n]);
                             // replay push + broadcast send 与 subscribe 原子交接，消除首帧丢字节窗口。
                             if let Ok(_gate) = shared_ref.stream_gate.lock() {
+                                let prev = shared_ref.alt_screen.load(Ordering::Relaxed);
+                                let next = scan_alt_screen(prev, &bytes);
+                                if next != prev {
+                                    shared_ref.alt_screen.store(next, Ordering::Relaxed);
+                                }
                                 if let Ok(mut r) = shared_ref.replay.lock() {
                                     r.push(&bytes[..]);
                                 }
@@ -423,7 +443,18 @@ impl PtySession {
                 pixel_width,
                 pixel_height,
             })?;
+        self.size.store(pack_size(cols, rows), Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Current terminal size `(cols, rows)`, kept in sync with `resize`.
+    pub fn size(&self) -> (u16, u16) {
+        unpack_size(self.size.load(Ordering::Relaxed))
+    }
+
+    /// Whether the pane is currently on the alternate screen (full-screen app).
+    pub fn alt_screen(&self) -> bool {
+        self.shared.alt_screen.load(Ordering::Relaxed)
     }
 
     /// 等待退出事件
@@ -676,6 +707,61 @@ fn sanitize_tmux_name(input: &str) -> String {
         .collect()
 }
 
+fn pack_size(cols: u16, rows: u16) -> u64 {
+    (cols as u64) | ((rows as u64) << 32)
+}
+
+fn unpack_size(packed: u64) -> (u16, u16) {
+    ((packed & 0xffff) as u16, ((packed >> 32) & 0xffff) as u16)
+}
+
+/// Ask tmux whether the pane is on the alternate screen right now.
+fn tmux_alternate_on(server: &str, session: &str) -> Option<bool> {
+    let output = std::process::Command::new("tmux")
+        .args([
+            "-L",
+            server,
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{alternate_on}",
+        ])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim() == "1")
+}
+
+/// Track `DECSET/DECRST ?1049/?1047/?47` across chunks. Good enough for the
+/// screen-diff gate, which only needs to know whether scrolling is possible.
+fn scan_alt_screen(mut state: bool, bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 5 < bytes.len() {
+        if bytes[i] != 0x1b || bytes[i + 1] != b'[' || bytes[i + 2] != b'?' {
+            i += 1;
+            continue;
+        }
+        let start = i + 3;
+        let mut j = start;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j < bytes.len() {
+            let alt = matches!(&bytes[start..j], b"1049" | b"1047" | b"47");
+            match bytes[j] {
+                b'h' if alt => state = true,
+                b'l' if alt => state = false,
+                _ => {}
+            }
+        }
+        i = j;
+    }
+    state
+}
+
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -687,6 +773,16 @@ fn now_millis() -> u64 {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn alt_screen_scan_tracks_enter_and_exit() {
+        assert!(scan_alt_screen(false, b"\x1b[?1049h"));
+        assert!(!scan_alt_screen(true, b"\x1b[?1049l"));
+        assert!(scan_alt_screen(false, b"\x1b[?47h"));
+        assert!(!scan_alt_screen(true, b"\x1b[?47l"));
+        assert!(scan_alt_screen(false, b"\x1b[?1047h"));
+        assert!(!scan_alt_screen(false, b"\x1b[?25l"));
+    }
 
     struct TmuxServerCleanup {
         name: String,

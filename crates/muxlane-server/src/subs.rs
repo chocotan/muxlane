@@ -48,6 +48,7 @@ impl SubRegistry {
         replay_gzip: bool,
         data_gzip: bool,
         data_stream: bool,
+        accept_term_diff: bool,
     ) {
         let ending = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(Notify::new());
@@ -62,6 +63,7 @@ impl SubRegistry {
             replay_gzip,
             data_gzip,
             data_stream,
+            accept_term_diff,
             Arc::clone(&ending),
             Arc::clone(&wake),
             self.me.clone(),
@@ -124,6 +126,7 @@ async fn forward(
     replay_gzip: bool,
     data_gzip: bool,
     data_stream: bool,
+    accept_term_diff: bool,
     ending: Arc<AtomicBool>,
     wake: Arc<Notify>,
     registry: Option<Weak<Mutex<SubRegistry>>>,
@@ -132,6 +135,16 @@ async fn forward(
     let mut last_sent: Option<Instant> = None;
     let mut replay_id = 0u64;
     let mut stream = data_stream.then(muxlane_core::protocol::DataStreamEncoder::new);
+    // Keyframe + patch frames: only full-screen apps are safe to re-encode, which
+    // `TermDiff` decides per chunk. The mirror is seeded from the same replay the
+    // viewer gets, so both start from one screen.
+    let mut diff = accept_term_diff.then(|| {
+        let (cols, rows) = session.size();
+        muxlane_term::TermDiff::new(cols, rows)
+    });
+    if let Some(diff) = diff.as_mut() {
+        diff.reset_and_feed(&replay, session.alt_screen());
+    }
     if replay_chunks
         && !send_replay_chunks(&sink, &agent, &sub_id, replay_id, &replay, replay_gzip).await
     {
@@ -178,6 +191,15 @@ async fn forward(
                         }
                     }
                     last_sent = Some(Instant::now());
+                    if let Some(diff) = diff.as_mut() {
+                        let (cols, rows) = session.size();
+                        diff.resize(cols, rows);
+                        batch = diff.feed(&batch).into_bytes();
+                    }
+                    // A patch can be empty when the repaint changed nothing visible.
+                    if batch.is_empty() {
+                        continue;
+                    }
                     let payload = if let Some(encoder) = stream.as_mut() {
                         let Some(payload) = encoder.push(&batch) else {
                             break;
@@ -217,6 +239,9 @@ async fn forward(
                     // 队列满/Lagged 不是可忽略条件：以完整 replay resync 重建无损边界。
                     let (_snapshot, new_rx) = session.subscribe();
                     let snapshot = session.resync_snapshot();
+                    if let Some(diff) = diff.as_mut() {
+                        diff.reset_and_feed(&snapshot, session.alt_screen());
+                    }
                     rx = new_rx;
                     replay_id = replay_id.wrapping_add(1);
                     let sent = if replay_chunks {
@@ -441,6 +466,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
 
         for byte in 0..64u32 {
@@ -477,6 +503,7 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
             false,
             false,
             false,
@@ -535,6 +562,7 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
             false,
             false,
             false,
@@ -600,6 +628,7 @@ mod tests {
             rx,
             Arc::clone(&session),
             Bytes::new(),
+            false,
             false,
             false,
             false,

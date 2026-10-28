@@ -235,6 +235,7 @@ pub async fn stream_term(
                 accept_replay_gzip: true,
                 accept_data_gzip: true,
                 accept_data_stream: true,
+                accept_term_diff: true,
             })?,
         )
         .await?,

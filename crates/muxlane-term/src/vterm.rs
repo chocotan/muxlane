@@ -206,7 +206,7 @@ pub struct ImageCellRef {
     pub col: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderRun {
     pub text: String,
     pub start_col: usize,
@@ -216,7 +216,7 @@ pub struct RenderRun {
     pub image: Option<ImageCellRef>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderRow {
     pub runs: Vec<RenderRun>,
 }
@@ -522,6 +522,14 @@ impl VTerm {
         self.lock_inner()
             .map(|guard| guard.term.mode().contains(TermMode::MOUSE_MOTION))
             .unwrap_or(false)
+    }
+
+    /// Number of scrolled-off lines. A growing history means the output is
+    /// scrolling, so the viewer must receive it raw to keep its scrollback.
+    pub fn history_len(&self) -> usize {
+        self.lock_inner()
+            .map(|guard| guard.term.grid().history_size())
+            .unwrap_or(0)
     }
 
     pub fn modes(&self) -> VTermModes {

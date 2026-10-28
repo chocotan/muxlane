@@ -210,6 +210,7 @@ impl MuxlaneServer {
                     muxlane_core::protocol::features::TERM_INPUT.into(),
                     muxlane_core::protocol::features::TERM_RESIZE.into(),
                     muxlane_core::protocol::features::TERM_REPLAY_CHUNKS.into(),
+                    muxlane_core::protocol::features::TERM_DIFF.into(),
                     muxlane_core::protocol::features::AGENT_MARK_SEEN.into(),
                     muxlane_core::protocol::features::PAIR.into(),
                     muxlane_core::protocol::features::PRESET_LIST.into(),
@@ -277,6 +278,7 @@ impl MuxlaneServer {
             params.accept_replay_gzip,
             params.accept_data_gzip,
             params.accept_data_stream,
+            params.accept_term_diff,
         );
         connection_subs.push(sub_id.clone());
         let replay_payload = if params.accept_replay_gzip {
