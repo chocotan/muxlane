@@ -336,6 +336,44 @@ fn draw(cx: &mut TestAppContext, window: AnyWindowHandle) {
 }
 
 #[test]
+fn spinner_only_ticks_while_some_agent_is_working() {
+    use muxlane_core::model::{AgentInstance, AgentStatus, AgentType, Snapshot};
+
+    let agent = |id: &str, status: AgentStatus| AgentInstance {
+        id: id.into(),
+        project: "p".into(),
+        agent_type: AgentType::Shell,
+        title: id.into(),
+        status,
+        status_since: 0,
+        seen: true,
+        tmux_session: None,
+    };
+
+    with_app(|cx, _window, view| {
+        cx.update(|cx| {
+            view.update(cx, |app, _cx| {
+                assert!(!app.has_working_agent());
+                app.last_snapshot.agents = vec![agent("a", AgentStatus::Idle)];
+                assert!(!app.has_working_agent());
+                app.last_snapshot.agents.push(agent("b", AgentStatus::Working));
+                assert!(app.has_working_agent());
+                // 远端快照里的 Working 同样要驱动 spinner。
+                app.last_snapshot.agents.clear();
+                app.remote_snaps.insert(
+                    "host".into(),
+                    Snapshot {
+                        agents: vec![agent("r", AgentStatus::Working)],
+                        ..Default::default()
+                    },
+                );
+                assert!(app.has_working_agent());
+            })
+        })
+    });
+}
+
+#[test]
 fn terminal_shortcuts_dispatch_to_app_actions_and_disable_without_fixed_aliases() {
     use std::any::TypeId;
     with_app(|cx, window, view| {

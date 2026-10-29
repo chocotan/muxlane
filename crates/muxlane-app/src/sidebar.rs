@@ -528,13 +528,6 @@ impl MuxlaneApp {
         let detached_marker_id = format!("detached-{id}");
         let project_key = self.project_key_for_agent(&id);
         let attention = compute_attention_style(status, seen || active, theme);
-        let animation_id = format!(
-            "sidebar-agent-{}-{id}",
-            project_key
-                .as_ref()
-                .map(|key| key.machine_id.as_str())
-                .unwrap_or(if remote { "remote" } else { "local" }),
-        );
         div()
             .id(gpui::ElementId::Name(id.clone().into()))
             .flex()
@@ -589,7 +582,6 @@ impl MuxlaneApp {
             )
             .child(render_status_indicator(
                 crate::widgets::display_status(status, seen || active),
-                animation_id,
                 theme,
             ))
             .child(

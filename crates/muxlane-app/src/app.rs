@@ -281,6 +281,24 @@ impl MuxlaneApp {
         })
         .detach();
 
+        // spinner 由这里的 8Hz 定时器推进（见 widgets::advance_spinner_step）：
+        // 只在有 Working agent 时才通知重绘，避免 gpui 动画那种每帧全窗口重绘。
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(125))
+                .await;
+            let alive = this.update(cx, |this, cx| {
+                if this.has_working_agent() {
+                    crate::widgets::advance_spinner_step();
+                    cx.notify();
+                }
+            });
+            if alive.is_err() {
+                break;
+            }
+        })
+        .detach();
+
         // 本地状态变更时重拉快照；终端内容由 TermView 独立通知。
         let mut local_dirty = server.subscribe_dirty();
         let server_for_snapshot = Arc::clone(&server);
@@ -935,6 +953,18 @@ impl MuxlaneApp {
             }
         }
         None
+    }
+
+    /// 有 Working agent 时才有 spinner 要看，否则不必每秒 8 次重绘。
+    pub(crate) fn has_working_agent(&self) -> bool {
+        let working = |a: &muxlane_core::model::AgentInstance| {
+            a.status == muxlane_core::model::AgentStatus::Working
+        };
+        self.last_snapshot.agents.iter().any(working)
+            || self
+                .remote_snaps
+                .values()
+                .any(|snap| snap.agents.iter().any(working))
     }
 
     pub(crate) fn handle_agent_status(

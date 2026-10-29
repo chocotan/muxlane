@@ -2,11 +2,10 @@ use crate::i18n::{self, Language};
 use crate::theme::Theme;
 use crate::ui_scale::px as ui_px;
 use gpui::{
-    div, prelude::*, rgba, Animation, AnimationExt, Context, ElementId, Pixels, Point, Render,
-    Role, SharedString, Window,
+    div, prelude::*, rgba, Context, ElementId, Pixels, Point, Render, Role, SharedString, Window,
 };
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) struct DragGhost {
     pub(crate) label: SharedString,
     pub(crate) offset: Point<Pixels>,
@@ -128,21 +127,25 @@ fn render_pi_loading_spinner_frame(frame: usize, theme: Theme) -> gpui::Div {
         .child(render_col([1, 2, 3, 4]))
 }
 
-fn render_pi_loading_spinner(animation_id: impl Into<ElementId>, theme: Theme) -> impl IntoElement {
+/// spinner 的当前帧。由 app 的 8Hz 定时器推进，不用 gpui 的 `with_animation`：
+/// 动画元素每帧都会让整个窗口重绘，一个 14px 的 spinner 就能吃掉 ~14% 单核。
+static SPINNER_STEP: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn advance_spinner_step() {
+    SPINNER_STEP.fetch_add(1, Ordering::Relaxed);
+}
+
+fn render_pi_loading_spinner(theme: Theme) -> gpui::Div {
     div()
         .w(ui_px(14.))
         .h(ui_px(14.))
         .flex()
         .items_center()
         .justify_center()
-        .with_animation(
-            animation_id,
-            Animation::new(Duration::from_millis(800)).repeat(),
-            move |container, delta| {
-                let frame = ((delta * 8.0).floor() as usize).min(7);
-                container.child(render_pi_loading_spinner_frame(frame, theme))
-            },
-        )
+        .child(render_pi_loading_spinner_frame(
+            SPINNER_STEP.load(Ordering::Relaxed),
+            theme,
+        ))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -205,7 +208,6 @@ pub(crate) fn compute_attention_style(
 
 pub(crate) fn render_status_indicator(
     status: muxlane_core::model::AgentStatus,
-    animation_id: impl Into<ElementId>,
     theme: Theme,
 ) -> gpui::Div {
     let container = div()
@@ -218,7 +220,7 @@ pub(crate) fn render_status_indicator(
 
     match status {
         muxlane_core::model::AgentStatus::Working => {
-            container.child(render_pi_loading_spinner(animation_id, theme))
+            container.child(render_pi_loading_spinner(theme))
         }
         muxlane_core::model::AgentStatus::Blocked => {
             container.child(div().w(ui_px(6.)).h(ui_px(6.)).bg(rgba(theme.yellow)))

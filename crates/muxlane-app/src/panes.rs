@@ -670,7 +670,6 @@ impl MuxlaneApp {
                         }))
                         .child(div().flex_none().child(render_status_indicator(
                             crate::widgets::display_status(status, seen),
-                            format!("pane-{pane_id}-agent-{tab_id}"),
                             theme,
                         )))
                         .child(
