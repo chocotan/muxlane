@@ -35,6 +35,8 @@ pub struct RelayHandle {
     config: watch::Sender<RelayConfig>,
     started: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
+    /// UI 观察连接状态用：设置页空闲时不重绘，状态翻转必须主动通知。
+    connected_tx: watch::Sender<bool>,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -64,6 +66,7 @@ impl RelayHandle {
             config: watch::channel(RelayConfig::default()).0,
             started: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(false)),
+            connected_tx: watch::channel(false).0,
         }
     }
 
@@ -111,8 +114,14 @@ impl RelayHandle {
         self.connected.load(Ordering::Relaxed)
     }
 
+    pub fn connected_changes(&self) -> watch::Receiver<bool> {
+        self.connected_tx.subscribe()
+    }
+
     fn set_connected(&self, connected: bool) {
-        self.connected.store(connected, Ordering::Relaxed);
+        if self.connected.swap(connected, Ordering::Relaxed) != connected {
+            let _ = self.connected_tx.send(connected);
+        }
     }
 
     pub async fn url(&self) -> Option<String> {

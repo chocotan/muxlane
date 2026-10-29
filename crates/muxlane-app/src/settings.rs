@@ -158,9 +158,20 @@ impl MuxlaneApp {
             input.set_text(crate::ui_scale::percent().to_string(), cx);
         });
         let relay = self.relay_url.clone().unwrap_or_default();
-        self.settings_relay_input.update(cx, |input, cx| {
-            input.set_text(relay, cx);
-        });
+        // 未应用的输入（验证失败/验证还没完成）不能在重开设置时被静默清掉：
+        // 用和 apply 相同的归一化比较，一致（或为空）才回填已保存值。
+        let current = self
+            .settings_relay_input
+            .read(cx)
+            .text()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        if current.is_empty() || current == relay {
+            self.settings_relay_input.update(cx, |input, cx| {
+                input.set_text(relay, cx);
+            });
+        }
         self.settings_scale_error = false;
         self.palette_open = false;
         cx.notify();

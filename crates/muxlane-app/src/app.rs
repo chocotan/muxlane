@@ -827,6 +827,15 @@ impl MuxlaneApp {
                 app.server.start_relay(url, app.relay_token.clone());
             }
         }
+        // 中继连接是异步建立的：应用后那一刻还看不到“已连接”，而设置页
+        // 空闲时不重绘，状态翻转必须主动通知 UI 刷新。
+        let mut relay_connected = app.server.relay_handle().connected_changes();
+        cx.spawn(async move |this, cx| {
+            while relay_connected.changed().await.is_ok() {
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .detach();
         app.persist();
         app
     }
