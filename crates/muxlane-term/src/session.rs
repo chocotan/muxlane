@@ -118,6 +118,87 @@ struct Shared {
     /// 读线程跟踪的 alt-screen 状态；回放尾部可能不含进入序列，
     /// 屏差镜像需要它才能知道“当前是全屏应用，不会产生 scrollback”。
     alt_screen: AtomicBool,
+    /// 读线程跟踪的输入相关模式（鼠标 / bracketed paste / 应用光标键）。
+    /// tmux 只在客户端 attach 时发一次，之后早被回放环挤掉；后加入的
+    /// 订阅者（远端日志刷新、lag resync）因此会退化成 X10 鼠标、丢掉粘贴模式。
+    input_modes: std::sync::Mutex<InputModes>,
+}
+
+/// PTY 流里出现过的输入模式。回放只有屏幕内容，这些 DECSET 得随回放补上。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InputModes {
+    /// DECSET 1000：只报点击。
+    click: bool,
+    /// DECSET 1002：按住拖动时也报。
+    drag: bool,
+    /// DECSET 1003：任何移动都报。
+    motion: bool,
+    /// DECSET 1006：SGR 编码。应用开了它就只认 SGR，发 X10 会被当成乱码。
+    sgr_mouse: bool,
+    /// DECSET 2004。
+    bracketed_paste: bool,
+    /// DECSET 1。
+    app_cursor: bool,
+}
+
+impl InputModes {
+    /// 重放用的 DECSET 序列，按依赖顺序拼好。
+    fn prefix(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (enabled, code) in [
+            (self.app_cursor, "1"),
+            (self.click, "1000"),
+            (self.drag, "1002"),
+            (self.motion, "1003"),
+            (self.sgr_mouse, "1006"),
+            (self.bracketed_paste, "2004"),
+        ] {
+            if enabled {
+                out.extend_from_slice(format!("\x1b[?{code}h").as_bytes());
+            }
+        }
+        out
+    }
+}
+
+/// Track `DECSET/DECRST` for the input modes a viewer must know about.
+fn scan_input_modes(mut modes: InputModes, bytes: &[u8]) -> InputModes {
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] != 0x1b || bytes[i + 1] != b'[' || bytes[i + 2] != b'?' {
+            i += 1;
+            continue;
+        }
+        let start = i + 3;
+        let mut j = start;
+        while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            break;
+        }
+        let on = match bytes[j] {
+            b'h' => true,
+            b'l' => false,
+            _ => {
+                i = j;
+                continue;
+            }
+        };
+        for param in bytes[start..j].split(|byte| *byte == b';') {
+            match param {
+                b"1" => modes.app_cursor = on,
+                b"1000" => modes.click = on,
+                b"1002" => modes.drag = on,
+                b"1003" => modes.motion = on,
+                b"1006" => modes.sgr_mouse = on,
+                b"2004" => modes.bracketed_paste = on,
+                _ => {}
+            }
+        }
+        i = j;
+    }
+    modes
 }
 
 pub struct PtySession {
@@ -265,6 +346,7 @@ impl PtySession {
             stream_gate: std::sync::Mutex::new(()),
             last_output_ms: AtomicU64::new(0),
             alt_screen: AtomicBool::new(initial_alt_screen),
+            input_modes: std::sync::Mutex::new(InputModes::default()),
         });
 
         let session = Arc::new(PtySession {
@@ -310,6 +392,9 @@ impl PtySession {
                                 if next != prev {
                                     shared_ref.alt_screen.store(next, Ordering::Relaxed);
                                 }
+                                if let Ok(mut modes) = shared_ref.input_modes.lock() {
+                                    *modes = scan_input_modes(*modes, &bytes);
+                                }
                                 if let Ok(mut r) = shared_ref.replay.lock() {
                                     r.push(&bytes[..]);
                                 }
@@ -333,6 +418,23 @@ impl PtySession {
         Ok(session)
     }
 
+    /// 回放前补上读线程记下的输入模式：回放环里早没有这些 DECSET 了。
+    fn with_input_modes(&self, snapshot: bytes::Bytes) -> bytes::Bytes {
+        let prefix = self
+            .shared
+            .input_modes
+            .lock()
+            .map(|modes| modes.prefix())
+            .unwrap_or_default();
+        if prefix.is_empty() {
+            return snapshot;
+        }
+        let mut out = bytes::BytesMut::with_capacity(prefix.len() + snapshot.len());
+        out.extend_from_slice(&prefix);
+        out.extend_from_slice(&snapshot);
+        out.freeze()
+    }
+
     /// 新订阅者：返回（回放快照, 增量流接收端）
     pub fn subscribe(&self) -> (bytes::Bytes, broadcast::Receiver<bytes::Bytes>) {
         let _gate = self.shared.stream_gate.lock().ok();
@@ -344,15 +446,17 @@ impl PtySession {
             .lock()
             .map(|r| r.snapshot())
             .unwrap_or_default();
-        (snap, rx)
+        (self.with_input_modes(snap), rx)
     }
 
     pub fn replay_snapshot(&self) -> bytes::Bytes {
-        self.shared
+        let snap = self
+            .shared
             .replay
             .lock()
             .map(|r| r.snapshot())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.with_input_modes(snap)
     }
 
     /// Tail used when a remote subscriber must rebuild its screen. One screen is
@@ -363,22 +467,18 @@ impl PtySession {
 
     /// 回放尾部 n 字节：锁内只拷尾部，供屏幕采样等热路径使用
     pub fn replay_tail(&self, n: usize) -> bytes::Bytes {
-        self.shared
+        let tail = self
+            .shared
             .replay
             .lock()
             .map(|r| r.tail(n))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.with_input_modes(tail)
     }
 
     /// 回放快照的 base64（wire 协议直发）
     pub fn replay_b64(&self) -> String {
-        let snap = self
-            .shared
-            .replay
-            .lock()
-            .map(|r| r.snapshot())
-            .unwrap_or_default();
-        b64_encode(&snap)
+        b64_encode(&self.replay_snapshot())
     }
 
     /// 低延迟同步写输入：一个 mutex 临界区完成 write+flush，
@@ -773,6 +873,38 @@ fn now_millis() -> u64 {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn input_mode_scan_tracks_mouse_paste_and_cursor_keys() {
+        let modes = scan_input_modes(InputModes::default(), b"\x1b[?1002h\x1b[?1006h");
+        assert!(modes.drag && modes.sgr_mouse && !modes.motion);
+        assert_eq!(modes.prefix(), b"\x1b[?1002h\x1b[?1006h");
+        // 1003 是全覆盖档；2004 / 1 各自独立。
+        let modes = scan_input_modes(modes, b"\x1b[?1003h\x1b[?2004h\x1b[?1h");
+        assert!(modes.motion && modes.bracketed_paste && modes.app_cursor);
+        assert_eq!(
+            modes.prefix(),
+            b"\x1b[?1h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h"
+        );
+        // 关掉 1003 不影响仍在生效的 1002。
+        let modes = scan_input_modes(modes, b"\x1b[?1003l");
+        assert!(!modes.motion && modes.drag);
+        // 应用退出时整组关闭，前缀归空。
+        let modes = scan_input_modes(modes, b"\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1l");
+        assert_eq!(modes, InputModes::default());
+        assert!(modes.prefix().is_empty());
+    }
+
+    /// 回放本身只有屏幕内容；没有模式前缀时，后加入的查看器会退化发 X10 鼠标。
+    #[test]
+    fn replay_prefix_restores_mouse_modes_for_late_viewers() {
+        let modes = scan_input_modes(InputModes::default(), b"\x1b[?1002h\x1b[?1006h");
+        let viewer = crate::VTerm::new(80, 24);
+        assert!(!viewer.modes().mouse);
+        viewer.feed_silent(&modes.prefix());
+        assert!(viewer.modes().mouse, "viewer must learn mouse tracking");
+        assert!(viewer.modes().sgr_mouse, "viewer must send SGR, not X10");
+    }
 
     #[test]
     fn alt_screen_scan_tracks_enter_and_exit() {
