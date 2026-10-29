@@ -779,9 +779,9 @@ bind-key -T copy-mode MouseUp1Pane send-keys -X copy-selection-and-cancel
 bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 5 scroll-down-and-cancel
 bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 5 scroll-down-and-cancel
 bind-key -T copy-mode-vi DoubleClick1Pane send-keys -X select-word \\; send-keys -X copy-pipe
-bind-key -n DoubleClick1Pane select-pane \\; copy-mode -H \\; send-keys -X select-word \\; send-keys -X copy-pipe
+bind-key -n DoubleClick1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { select-pane ; copy-mode -H ; send-keys -X select-word ; send-keys -X copy-pipe }
 bind-key -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X copy-pipe
-bind-key -n TripleClick1Pane select-pane \\; copy-mode -H \\; send-keys -X select-line \\; send-keys -X copy-pipe
+bind-key -n TripleClick1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { select-pane ; copy-mode -H ; send-keys -X select-line ; send-keys -X copy-pipe }
 ";
     if std::fs::read_to_string(&path).ok().as_deref() != Some(CONFIG) {
         let _ = std::fs::write(&path, CONFIG);
@@ -961,12 +961,17 @@ mod tests {
         assert_eq!(config.matches("scroll-down-and-cancel").count(), 2);
         assert!(config.contains("MouseDragEnd1Pane"));
         assert!(config.contains("MouseUp1Pane"));
-        assert!(config.contains(
-            "bind-key -n DoubleClick1Pane select-pane \\; copy-mode -H \\; send-keys -X select-word \\; send-keys -X copy-pipe"
-        ));
-        assert!(config.contains(
-            "bind-key -n TripleClick1Pane select-pane \\; copy-mode -H \\; send-keys -X select-line \\; send-keys -X copy-pipe"
-        ));
+        // 应用自己抓鼠标（pie 就是）时双击/三击也要给应用，不能又被 tmux 抢去选词。
+        for click in ["DoubleClick1Pane", "TripleClick1Pane"] {
+            assert!(
+                config.lines().any(|line| line.starts_with(&format!("bind-key -n {click} "))
+                    && line.contains("mouse_any_flag")
+                    && line.contains("copy-mode -H")),
+                "{click} must yield to mouse-aware apps"
+            );
+        }
+        assert!(config.contains("bind-key -T copy-mode-vi DoubleClick1Pane"));
+        assert!(config.contains("bind-key -T copy-mode-vi TripleClick1Pane"));
     }
 
     #[test]
@@ -1016,12 +1021,11 @@ mod tests {
             assert!(
                 bindings.lines().any(|line| {
                     line.contains(event)
-                        && line.contains("select-pane")
-                        && line.contains("copy-mode -H")
+                        && line.contains("mouse_any_flag")
                         && line.contains(selection)
                         && line.contains("copy-pipe")
                 }),
-                "missing {event} copy binding in root table: {bindings}"
+                "{event} must forward to mouse-aware apps and only copy-mode otherwise: {bindings}"
             );
         }
 

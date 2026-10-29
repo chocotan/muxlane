@@ -2041,61 +2041,56 @@ impl Render for TermView {
                                 return;
                             };
                             this.pending_link = None;
-                            if event.click_count == 1
-                                && !event.modifiers.shift
-                                && !event.modifiers.alt
-                            {
-                                if let Some(target) = this.link_target(event.position) {
-                                    this.pending_link = Some((event.position, target));
-                                    this.vterm.begin_selection(line, col, right);
-                                    this.selecting = true;
-                                    this.forwarding_mouse = false;
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                            }
-                            // 双击选词、三击选行并复制（zed 的 click_count→选区类型映射；
-                            // tmux 的选区不会进系统剪贴板，故不转发）。
-                            if event.click_count >= 2 && !event.modifiers.shift {
-                                if event.click_count >= 3 {
-                                    this.vterm.select_lines_at(line, col);
-                                } else {
-                                    this.vterm.select_word_at(line, col);
+                            // 鼠标只能有一个主人：除 Shift 外全交给 tmux，由它决定是给应用
+                            // 还是进 copy-mode。muxlane 自己只在 Shift 时划选——否则会和
+                            // pie 这类自开鼠标跟踪的应用形成三层选区（本地 / tmux / 应用）
+                            // 互相抢事件，双击、拖动都变得时灵时不灵。
+                            if event.modifiers.shift {
+                                match event.click_count {
+                                    2 => this.vterm.select_word_at(line, col),
+                                    3.. => this.vterm.select_lines_at(line, col),
+                                    _ => this.vterm.begin_selection(line, col, right),
                                 }
                                 // 保持 selecting，拖动可按词/行扩展选区（alacritty 语义）。
                                 this.selecting = true;
                                 this.forwarding_mouse = false;
-                                if let Some(text) = this
-                                    .vterm
-                                    .selection_to_string()
-                                    .filter(|text| !text.is_empty())
-                                {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                    Self::write_primary(cx, text);
+                                if event.click_count >= 2 {
+                                    if let Some(text) = this
+                                        .vterm
+                                        .selection_to_string()
+                                        .filter(|text| !text.is_empty())
+                                    {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.clone(),
+                                        ));
+                                        Self::write_primary(cx, text);
+                                    }
                                 }
                                 cx.stop_propagation();
                                 return;
                             }
-                            // Shift：本地划选。其余拖选/点击交给 tmux（mouse on + copy-mode）。
-                            if event.modifiers.shift {
-                                this.vterm.begin_selection(line, col, right);
-                                this.selecting = true;
-                                this.forwarding_mouse = false;
-                            } else {
-                                this.vterm.stop_selection();
-                                this.selecting = false;
-                                this.forwarding_mouse = true;
-                                this.report_mouse(
-                                    0,
-                                    col,
-                                    line,
-                                    true,
-                                    false,
-                                    false,
-                                    event.modifiers.alt,
-                                    event.modifiers.control,
-                                );
+                            // 单击链接（不拖动）仍然由 muxlane 自己打开；一旦拖动就取消链接、
+                            // 改把这次按下转给 tmux（见 on_mouse_move），不当成本地选区。
+                            if event.click_count == 1 && !event.modifiers.alt {
+                                if let Some(target) = this.link_target(event.position) {
+                                    this.pending_link = Some((event.position, target));
+                                    cx.stop_propagation();
+                                    return;
+                                }
                             }
+                            this.vterm.stop_selection();
+                            this.selecting = false;
+                            this.forwarding_mouse = true;
+                            this.report_mouse(
+                                0,
+                                col,
+                                line,
+                                true,
+                                false,
+                                false,
+                                event.modifiers.alt,
+                                event.modifiers.control,
+                            );
                             cx.stop_propagation();
                         }),
                     )
@@ -2104,12 +2099,25 @@ impl Render for TermView {
                     }))
                     .on_mouse_move(
                         cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                            if this
-                                .pending_link
-                                .as_ref()
-                                .is_some_and(|(start, _)| link_click_moved(*start, event.position))
-                            {
-                                this.pending_link = None;
+                            if let Some(start) = this.pending_link.as_ref().map(|(start, _)| *start) {
+                                if link_click_moved(start, event.position) {
+                                    // 按下在链接上、手却拖走了：不当点击看，把那次按下补报给
+                                    // tmux，后面的移动就按普通拖拽继续。
+                                    this.pending_link = None;
+                                    if let Some((line, col, _)) = this.grid_point(start) {
+                                        this.forwarding_mouse = true;
+                                        this.report_mouse(
+                                            0,
+                                            col,
+                                            line,
+                                            true,
+                                            false,
+                                            false,
+                                            false,
+                                            false,
+                                        );
+                                    }
+                                }
                             }
                             if this.selecting {
                                 if let Some((line, col, right)) = this.grid_point(event.position) {
@@ -2407,7 +2415,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_links_opens_the_browser_while_drag_and_shift_select_text() {
+    fn clicking_links_opens_the_browser_and_only_shift_selects_locally() {
         use gpui::{TestAppContext, VisualTestContext};
 
         let mut cx = TestAppContext::single();
@@ -2443,19 +2451,32 @@ mod tests {
         visual.update(|window, cx| window.draw(cx).clear(cx));
         while receiver.try_recv().is_ok() {}
 
+        // 普通拖动：交给终端（tmux 再决定给应用还是进 copy-mode），muxlane 不自己选。
         visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
         visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
         visual.update(|window, cx| window.simulate_next_frame(cx));
         visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
         assert_eq!(visual.opened_url(), None);
-        visual.update(|_, cx| assert!(term.read(cx).vterm.selection_to_string().is_some()));
+        visual.update(|_, cx| assert!(term.read(cx).vterm.selection_to_string().is_none()));
+        let forwarded = std::iter::from_fn(|| receiver.try_recv().ok()).count();
+        assert!(
+            forwarded >= 3,
+            "press/drag/release must reach the terminal, got {forwarded}"
+        );
 
+        // Shift 拖动：muxlane 本地划选（覆盖应用的鼠标跟踪）。
         let shift = gpui::Modifiers {
             shift: true,
             ..Default::default()
         };
+        visual.simulate_mouse_down(start, MouseButton::Left, shift);
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), shift);
+        visual.update(|window, cx| window.simulate_next_frame(cx));
+        visual.simulate_mouse_up(end, MouseButton::Left, shift);
+        visual.update(|_, cx| assert!(term.read(cx).vterm.selection_to_string().is_some()));
         visual.simulate_click(start, shift);
         assert_eq!(visual.opened_url(), None);
+
         visual.simulate_click(start, Default::default());
         assert_eq!(
             visual.opened_url().as_deref(),
