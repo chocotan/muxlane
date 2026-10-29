@@ -1494,6 +1494,11 @@ impl Render for TermView {
             let focus_in = cx.on_focus_in(&focus, window, |this, window, cx| {
                 let focused = window.is_window_active() && this.focus.is_focused(window);
                 this.pty_resize_owner.store(focused, Ordering::Relaxed);
+                // 失活/失焦期间的窗口缩放只会更新本地网格，PTY 尺寸因不属主被丢弃；
+                // 重新拿到尺寸属主时必须重发一遍，否则 tmux 会停在旧尺寸。
+                if focused {
+                    this.request_resize();
+                }
                 cx.emit(TermFocusEvent {
                     agent: this.agent.clone(),
                     window: window.window_handle().window_id(),
@@ -1518,6 +1523,9 @@ impl Render for TermView {
             let activation = cx.observe_window_activation(window, |this, window, cx| {
                 let focused = window.is_window_active() && this.focus.is_focused(window);
                 this.pty_resize_owner.store(focused, Ordering::Relaxed);
+                if focused {
+                    this.request_resize();
+                }
                 cx.emit(TermFocusEvent {
                     agent: this.agent.clone(),
                     window: window.window_handle().window_id(),
@@ -2487,6 +2495,67 @@ mod tests {
             "link clicks must not reach the PTY"
         );
         visual.update(|_, cx| assert!(!term.read(cx).selecting));
+    }
+
+    #[test]
+    fn regaining_focus_resends_the_size_dropped_while_unfocused() {
+        use gpui::{TestAppContext, VisualTestContext};
+
+        let mut cx = TestAppContext::single();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let term = cx.new(|cx| {
+            TermView::new_remote(
+                "resize-owner".into(),
+                VTerm::new_with_clipboard(80, 24),
+                sender,
+                "monospace".into(),
+                Theme::for_mode(Default::default()),
+                false,
+                cx,
+            )
+        });
+        let handle = cx.add_window(|_, _| TestTermRoot {
+            term: Some(term.clone()),
+            inset: gpui::px(0.),
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), &cx);
+
+        // 未聚焦时缩窗：本地网格跟着变，但 PTY 尺寸因不属主而丢弃。
+        visual.simulate_resize(size(gpui::px(1000.), gpui::px(700.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(PTY_RESIZE_DEBOUNCE * 4);
+        cx.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        while receiver.try_recv().is_ok() {}
+        cx.executor().advance_clock(PTY_RESIZE_DEBOUNCE * 4);
+        cx.run_until_parked();
+        assert!(
+            receiver.try_recv().is_err(),
+            "an unfocused terminal must not drive the shared PTY size"
+        );
+
+        // 拿到尺寸属主（聚焦）后必须补发当前尺寸，否则 tmux 停在旧尺寸。
+        let focus = visual.update(|_, cx| term.read(cx).focus.clone());
+        visual.update(|window, cx| {
+            window.activate_window();
+            window.focus(&focus, cx);
+            window.draw(cx).clear(cx);
+        });
+        let dims = visual.update(|_, cx| *term.read(cx).last_dims.as_ref().lock().unwrap());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(PTY_RESIZE_DEBOUNCE * 4);
+        cx.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let resized = std::iter::from_fn(|| receiver.try_recv().ok())
+            .find_map(|command| match command {
+                RemoteTermCommand::Resize(cols, rows) => Some((cols, rows)),
+                _ => None,
+            });
+        assert_eq!(
+            resized,
+            Some(dims),
+            "focus must resend the size that was dropped while unfocused (dims={dims:?})"
+        );
     }
 
     #[test]
