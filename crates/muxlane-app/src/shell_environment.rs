@@ -1,4 +1,6 @@
-//! Recover the PATH configured by a macOS user's terminal shell before starting workers.
+//! Recover the PATH configured by the user's terminal shell before starting workers.
+//! 桌面启动的进程只拿到会话 PATH（常常只有 /usr/bin），“新建会话”预设里的
+//! which() 会看不到 ~/.local/bin、nvm 等位置的 agent（如 pie），必须补登录 PATH。
 use anyhow::{bail, Context as _};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt;
@@ -14,7 +16,6 @@ const OUTPUT_LIMIT: u64 = 64 * 1024;
 
 /// Call only during single-threaded startup. Do not mutate the process environment
 /// from a GPUI callback or after the server's multi-threaded runtime has started.
-#[cfg(target_os = "macos")]
 pub(crate) fn import_login_path(shell: &str) -> anyhow::Result<()> {
     let inherited = std::env::var_os("PATH");
     let runtime = tokio::runtime::Builder::new_current_thread()
