@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 muxlane-core = { path = "../muxlane-core" }
+muxlane-chat = { path = "../muxlane-chat" }
 muxlane-term = { path = "../muxlane-term" }
 muxlane-server = { path = "../muxlane-server" }
 muxlane-client = { path = "../muxlane-client" }
@@ -25,6 +26,9 @@ notify-rust = "4"
 # 给 Kitty f=24/32 原始像素帧拼 RenderImage 用；feature 与 gpui 统一后实际不额外编译什么。
 image = { version = "0.25", default-features = false, features = ["png"] }
 smallvec = "1"
+base64.workspace = true
+pulldown-cmark.workspace = true
+similar.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

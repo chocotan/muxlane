@@ -248,11 +248,7 @@ where
     send_with_timeout(sink, message, RELAY_SEND_TIMEOUT).await
 }
 
-async fn send_with_timeout<S>(
-    sink: &mut S,
-    message: Message,
-    limit: Duration,
-) -> anyhow::Result<()>
+async fn send_with_timeout<S>(sink: &mut S, message: Message, limit: Duration) -> anyhow::Result<()>
 where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
@@ -546,6 +542,34 @@ impl AsyncWrite for RelaySession {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Poll::Ready(Ok(()))
+    }
+}
+
+pub(crate) fn detect_lan_ipv4() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback()).then_some(ip)
+}
+
+pub(crate) async fn accept_lan_ws(server: Arc<MuxlaneServer>, listener: tokio::net::TcpListener) {
+    while let Ok((stream, addr)) = listener.accept().await {
+        let srv = Arc::clone(&server);
+        tokio::spawn(async move {
+            let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                tracing::debug!(%addr, "lan ws handshake failed");
+                return;
+            };
+            let (mut sink, mut rx_stream) = ws.split();
+            let session = RelaySession::new();
+            let phone = session.clone();
+            let host = Arc::clone(&srv);
+            let task = tokio::spawn(async move { host.handle_rpc(phone, true).await });
+            if let Err(err) = pump_session(&mut sink, &mut rx_stream, session).await {
+                tracing::debug!(%addr, %err, "lan ws session closed");
+            }
+            let _ = task.await;
+        });
     }
 }
 

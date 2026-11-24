@@ -38,6 +38,7 @@ impl MuxlaneServer {
                     &saved.agent_id,
                     saved.agent_type,
                     &saved.title,
+                    saved.title_is_custom,
                     &saved.tmux_session,
                     &project,
                 )
@@ -52,6 +53,60 @@ impl MuxlaneServer {
             .flatten()
         {
             self.restore_agent_quiet(project, instance, session).await;
+        }
+        for saved in &persisted.chat_sessions {
+            let Some(project) = persisted
+                .projects
+                .iter()
+                .find(|project| project.id == saved.project_id)
+                .cloned()
+            else {
+                continue;
+            };
+            if self
+                .state
+                .read()
+                .await
+                .agents
+                .iter()
+                .any(|a| a.id == saved.agent_id)
+            {
+                continue;
+            }
+            let spec = muxlane_chat::DriverLaunchSpec {
+                agent: saved.agent_id.clone(),
+                agent_type: saved.agent_type,
+                driver_kind: saved.driver_kind,
+                program: saved.program.clone(),
+                args: saved.args.clone(),
+                cwd: project.path.clone(),
+                env: Vec::new(),
+                provider_session: saved
+                    .provider_session_file
+                    .clone()
+                    .or_else(|| saved.provider_session_id.clone()),
+                model: None,
+                thinking_level: None,
+            };
+            self.chat
+                .restore_session(
+                    spec,
+                    saved.provider_session_id.clone(),
+                    saved.provider_session_file.clone(),
+                )
+                .await;
+            let instance = AgentInstance {
+                id: saved.agent_id.clone(),
+                project: saved.project_id.clone(),
+                agent_type: saved.agent_type,
+                title: saved.title.clone(),
+                title_is_custom: saved.title_is_custom,
+                status: AgentStatus::Idle,
+                status_since: muxlane_core::model::now_secs(),
+                seen: true,
+                tmux_session: None,
+            };
+            self.state.write().await.add_agent(project, instance);
         }
         // One notification for the whole batch: the UI reconciles against a complete
         // snapshot instead of a half-restored one.
@@ -203,6 +258,7 @@ impl MuxlaneServer {
                 &agent.id,
                 agent.agent_type,
                 &agent.title,
+                agent.title_is_custom,
                 &tmux_session,
                 &project,
             )
@@ -216,6 +272,7 @@ impl MuxlaneServer {
         agent_id: &AgentId,
         agent_type: muxlane_core::model::AgentType,
         title: &str,
+        title_is_custom: bool,
         tmux_session: &str,
         project: &Project,
     ) -> anyhow::Result<(AgentInstance, Arc<muxlane_term::PtySession>)> {
@@ -245,6 +302,7 @@ impl MuxlaneServer {
             project: project.id.clone(),
             agent_type,
             title: title.to_string(),
+            title_is_custom,
             status: AgentStatus::Idle,
             status_since: muxlane_core::model::now_secs(),
             seen: true,

@@ -556,9 +556,340 @@ impl MuxlaneApp {
         }
     }
 
+    pub(crate) fn is_structured_chat_agent(&self, agent: &AgentId) -> bool {
+        self.find_agent(agent).is_some_and(|a| {
+            a.tmux_session.is_none()
+                && a.agent_type != muxlane_core::model::AgentType::Shell
+                && self.agent_supports_chat(agent)
+                && !self.terms.contains_key(agent)
+        })
+    }
+
+    pub(crate) fn agent_supports_chat(&self, agent: &AgentId) -> bool {
+        self.find_agent(agent).is_some_and(|a| {
+            a.agent_type != muxlane_core::model::AgentType::Shell
+                && self
+                    .presets
+                    .iter()
+                    .any(|p| p.agent_type == a.agent_type && p.chat_driver_kind().is_some())
+        })
+    }
+
+    pub(crate) fn agent_view_mode(&self, agent: &AgentId) -> muxlane_core::SessionViewMode {
+        if !self.agent_supports_chat(agent) {
+            return muxlane_core::SessionViewMode::Terminal;
+        }
+        self.session_views.get(agent).copied().unwrap_or_else(|| {
+            if self.is_structured_chat_agent(agent) {
+                muxlane_core::SessionViewMode::Chat
+            } else {
+                muxlane_core::SessionViewMode::Terminal
+            }
+        })
+    }
+
+    pub(crate) fn ensure_agent_chat(
+        &mut self,
+        agent: &AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.chats.contains_key(agent) {
+            return true;
+        }
+        let (backend, project_root) =
+            match terminal_location(&self.last_snapshot, &self.remote_snaps, agent) {
+                Some(TerminalLocation::Local) => {
+                    let root = self
+                        .last_snapshot
+                        .agent(agent)
+                        .and_then(|a| self.last_snapshot.project(&a.project))
+                        .map(|p| p.path.clone());
+                    (
+                        crate::chat::ChatBackend::Local {
+                            server: Arc::clone(&self.server),
+                        },
+                        root,
+                    )
+                }
+                Some(TerminalLocation::Remote(host_name)) => {
+                    let Some(host) = self
+                        .remotes
+                        .iter()
+                        .find(|h| h.cfg.name == host_name)
+                        .cloned()
+                    else {
+                        return false;
+                    };
+                    (
+                        crate::chat::ChatBackend::Remote {
+                            server: Arc::clone(&self.server),
+                            host,
+                        },
+                        None,
+                    )
+                }
+                None => return false,
+            };
+        let chat = cx.new(|cx| {
+            crate::chat::ChatView::new(
+                agent.clone(),
+                backend,
+                project_root,
+                self.font_family.clone().into(),
+                self.theme_mode,
+                self.language,
+                window,
+                cx,
+            )
+        });
+        let aid = agent.clone();
+        cx.subscribe_in(
+            &chat,
+            window,
+            move |this, _, event, window, cx| match event {
+                crate::chat::ChatViewEvent::OpenTerminal => {
+                    this.set_session_view_mode(
+                        &aid,
+                        muxlane_core::SessionViewMode::Terminal,
+                        window,
+                        cx,
+                    );
+                }
+                crate::chat::ChatViewEvent::TakeOverChat => {
+                    this.take_over_native_chat(&aid, window, cx);
+                }
+                crate::chat::ChatViewEvent::SwitchToTerminalDriver => {
+                    this.switch_agent_driver(
+                        &aid,
+                        muxlane_core::SessionDriverMode::TerminalPty,
+                        Some(muxlane_core::SessionViewMode::Terminal),
+                        window,
+                        cx,
+                    );
+                }
+            },
+        )
+        .detach();
+        self.chats.insert(agent.clone(), chat);
+        true
+    }
+
+    pub(crate) fn ensure_active_session_views(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut active_ids: Vec<AgentId> = self
+            .pane_tree
+            .all_groups()
+            .into_iter()
+            .filter_map(|g| g.active.clone())
+            .collect();
+        if let Some(active) = &self.active {
+            if !active_ids.contains(active) {
+                active_ids.push(active.clone());
+            }
+        }
+        for id in active_ids {
+            match self.agent_view_mode(&id) {
+                muxlane_core::SessionViewMode::Chat => {
+                    self.ensure_agent_chat(&id, window, cx);
+                }
+                muxlane_core::SessionViewMode::Split => {
+                    self.ensure_agent_chat(&id, window, cx);
+                    self.ensure_agent_terminal(&id, cx);
+                }
+                muxlane_core::SessionViewMode::Terminal => {
+                    self.ensure_agent_terminal(&id, cx);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_session_view_mode(
+        &mut self,
+        agent: &AgentId,
+        target: muxlane_core::SessionViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let has_pty = self
+            .find_agent(agent)
+            .is_some_and(|a| a.tmux_session.is_some());
+        if !has_pty
+            && matches!(
+                target,
+                muxlane_core::SessionViewMode::Terminal | muxlane_core::SessionViewMode::Split
+            )
+        {
+            self.switch_agent_driver(
+                agent,
+                muxlane_core::SessionDriverMode::TerminalPty,
+                Some(target),
+                window,
+                cx,
+            );
+            return;
+        }
+        self.session_views.insert(agent.clone(), target);
+        if matches!(
+            target,
+            muxlane_core::SessionViewMode::Chat | muxlane_core::SessionViewMode::Split
+        ) {
+            self.ensure_agent_chat(agent, window, cx);
+        }
+        if matches!(
+            target,
+            muxlane_core::SessionViewMode::Terminal | muxlane_core::SessionViewMode::Split
+        ) {
+            self.ensure_agent_terminal(agent, cx);
+        }
+        self.focus_agent(agent, window, cx);
+        self.persist();
+        cx.notify();
+    }
+
+    pub(crate) fn take_over_native_chat(
+        &mut self,
+        agent: &AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target_driver = self
+            .find_agent(agent)
+            .and_then(|a| {
+                self.presets
+                    .iter()
+                    .find(|p| p.agent_type == a.agent_type)
+                    .and_then(|p| p.chat_driver_kind())
+            })
+            .map(|kind| match kind {
+                muxlane_core::ChatDriverKind::PiRpc => muxlane_core::SessionDriverMode::PiRpc,
+                muxlane_core::ChatDriverKind::Acp => muxlane_core::SessionDriverMode::Acp,
+            })
+            .unwrap_or(muxlane_core::SessionDriverMode::PiRpc);
+        self.switch_agent_driver(
+            agent,
+            target_driver,
+            Some(muxlane_core::SessionViewMode::Chat),
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn switch_agent_driver(
+        &mut self,
+        agent: &AgentId,
+        target: muxlane_core::SessionDriverMode,
+        next_view: Option<muxlane_core::SessionViewMode>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let agent_id = agent.clone();
+        match terminal_location(&self.last_snapshot, &self.remote_snaps, agent) {
+            Some(TerminalLocation::Local) => {
+                let server = Arc::clone(&self.server);
+                let agent_for_ui = agent.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            server.switch_chat_mode(&agent_id, target).await?;
+                            let snap = server.snapshot().await;
+                            Ok::<_, anyhow::Error>(snap)
+                        })
+                        .await;
+                    let _ = this.update_in(cx, |this, window, cx| match result {
+                        Ok(snap) => {
+                            this.apply_local_snapshot(snap, cx);
+                            if let Some(view) = next_view {
+                                this.session_views.insert(agent_for_ui.clone(), view);
+                            }
+                            if target == muxlane_core::SessionDriverMode::TerminalPty {
+                                this.ensure_agent_terminal(&agent_for_ui, cx);
+                            } else {
+                                this.terms.remove(&agent_for_ui);
+                                this.ensure_agent_chat(&agent_for_ui, window, cx);
+                            }
+                            if let Some(chat) = this.chats.get(&agent_for_ui).cloned() {
+                                chat.update(cx, |c, cx| c.refresh_after_driver_change(cx));
+                            }
+                            this.focus_agent(&agent_for_ui, window, cx);
+                            this.persist();
+                            cx.notify();
+                        }
+                        Err(err) => {
+                            this.notifications.update(cx, |center, cx| {
+                                center.show_error(format!("Driver switch failed: {err}"), cx);
+                            });
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+            Some(TerminalLocation::Remote(host_name)) => {
+                let Some(remote) = self
+                    .remotes
+                    .iter()
+                    .find(|h| h.cfg.name == host_name)
+                    .cloned()
+                else {
+                    return;
+                };
+                if !remote.supports(muxlane_core::protocol::features::CHAT_TIMELINE) {
+                    return;
+                }
+                let task = self.spawn_remote_operation(async move {
+                    remote.chat_switch_mode(&agent_id, target).await?;
+                    remote.fetch_snapshot().await
+                });
+                let agent_for_ui = agent.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update_in(cx, |this, window, cx| match result {
+                        Ok(snap) => {
+                            this.remote_snaps.insert(host_name.clone(), snap);
+                            if let Some(view) = next_view {
+                                this.session_views.insert(agent_for_ui.clone(), view);
+                            }
+                            if target == muxlane_core::SessionDriverMode::TerminalPty {
+                                this.ensure_agent_terminal(&agent_for_ui, cx);
+                            } else {
+                                this.terms.remove(&agent_for_ui);
+                                this.remote_streams.remove(&agent_for_ui);
+                                this.ensure_agent_chat(&agent_for_ui, window, cx);
+                            }
+                            if let Some(chat) = this.chats.get(&agent_for_ui).cloned() {
+                                chat.update(cx, |c, cx| c.refresh_after_driver_change(cx));
+                            }
+                            this.focus_agent(&agent_for_ui, window, cx);
+                            this.persist();
+                            cx.notify();
+                        }
+                        Err(err) => {
+                            this.notifications.update(cx, |center, cx| {
+                                center
+                                    .show_error(format!("Remote driver switch failed: {err}"), cx);
+                            });
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+            None => {}
+        }
+    }
+
     pub(crate) fn ensure_active_terminal(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.clone() {
-            self.ensure_agent_terminal(&active, cx);
+            if matches!(
+                self.agent_view_mode(&active),
+                muxlane_core::SessionViewMode::Terminal | muxlane_core::SessionViewMode::Split
+            ) {
+                self.ensure_agent_terminal(&active, cx);
+            }
         }
     }
 
@@ -570,13 +901,35 @@ impl MuxlaneApp {
         if self.terminal_focus_suspended(cx) {
             return;
         }
-        let Some(focus) = self
+        let Some(active) = self
             .active
             .as_ref()
             .filter(|agent| !self.is_detached(agent))
-            .and_then(|agent| self.terms.get(agent))
-            .map(|term| term.focus_handle(cx))
         else {
+            return;
+        };
+        let focus = match self.agent_view_mode(active) {
+            muxlane_core::SessionViewMode::Chat => {
+                self.chats.get(active).map(|chat| chat.focus_handle(cx))
+            }
+            muxlane_core::SessionViewMode::Split => {
+                let chat_focused = self
+                    .chats
+                    .get(active)
+                    .is_some_and(|c| c.focus_handle(cx).is_focused(window));
+                if chat_focused {
+                    return;
+                }
+                self.terms
+                    .get(active)
+                    .map(|term| term.focus_handle(cx))
+                    .or_else(|| self.chats.get(active).map(|c| c.focus_handle(cx)))
+            }
+            muxlane_core::SessionViewMode::Terminal => {
+                self.terms.get(active).map(|term| term.focus_handle(cx))
+            }
+        };
+        let Some(focus) = focus else {
             return;
         };
         if focus.is_focused(window) {
@@ -591,6 +944,11 @@ impl MuxlaneApp {
                 // count as "managed" here or the two windows fight over the shared handle.
                 .filter(|(agent, _)| !self.is_detached(agent))
                 .any(|(_, term)| term.focus_handle(cx).is_focused(window))
+            || self
+                .chats
+                .iter()
+                .filter(|(agent, _)| !self.is_detached(agent))
+                .any(|(_, chat)| chat.focus_handle(cx).is_focused(window))
             || [
                 &self.palette_input,
                 &self.connect_input,
@@ -615,6 +973,7 @@ impl MuxlaneApp {
             || self.remote_project_dialog.is_some()
             || self.settings_open
             || self.session_menu.is_some()
+            || self.session_rename.is_some()
             || self.tree_menu.is_some()
             || self.delete_confirm.is_some()
             || self.pending_project_creation.is_some()
@@ -636,7 +995,16 @@ impl MuxlaneApp {
             return;
         }
         self.activate_tab(pane, agent, cx);
-        if self.ensure_agent_terminal(agent, cx) {
+        let ready = match self.agent_view_mode(agent) {
+            muxlane_core::SessionViewMode::Chat => self.ensure_agent_chat(agent, window, cx),
+            muxlane_core::SessionViewMode::Split => {
+                let c = self.ensure_agent_chat(agent, window, cx);
+                let t = self.ensure_agent_terminal(agent, cx);
+                c || t
+            }
+            muxlane_core::SessionViewMode::Terminal => self.ensure_agent_terminal(agent, cx),
+        };
+        if ready {
             self.focus_agent(agent, window, cx);
         }
         self.sync_remote_streams();
@@ -659,7 +1027,16 @@ impl MuxlaneApp {
         {
             return;
         }
-        let focus = self.terms.get(agent).map(|term| term.focus_handle(cx));
+        let focus = match self.agent_view_mode(agent) {
+            muxlane_core::SessionViewMode::Chat => {
+                self.chats.get(agent).map(|chat| chat.focus_handle(cx))
+            }
+            muxlane_core::SessionViewMode::Split | muxlane_core::SessionViewMode::Terminal => self
+                .terms
+                .get(agent)
+                .map(|term| term.focus_handle(cx))
+                .or_else(|| self.chats.get(agent).map(|chat| chat.focus_handle(cx))),
+        };
         if let Some(focus) = &focus {
             focus.focus(window, cx);
             window.invalidate_character_coordinates();
@@ -889,6 +1266,8 @@ impl MuxlaneApp {
             }
         }
         self.terms.remove(agent);
+        self.chats.remove(agent);
+        self.session_views.remove(agent);
         if let Some(ctl) = self.remote_streams.remove(agent) {
             if let Some(flag) = ctl.cancel {
                 flag.store(true, std::sync::atomic::Ordering::Release);
@@ -916,6 +1295,9 @@ impl MuxlaneApp {
         self.floating.remove_agents(&removed);
         self.schedule_session_windows(cx);
         self.terms.retain(|agent, _| !removed.contains(agent));
+        self.chats.retain(|agent, _| !removed.contains(agent));
+        self.session_views
+            .retain(|agent, _| !removed.contains(agent));
         for agent in &removed {
             if let Some(ctl) = self.remote_streams.remove(agent) {
                 if let Some(flag) = ctl.cancel {
@@ -962,16 +1344,67 @@ impl MuxlaneApp {
     }
 }
 
+enum ResolvedSpawnTarget {
+    Remote { host: String, project: String },
+    Local(ProjectKey),
+    None,
+}
+
 impl MuxlaneApp {
+    fn resolve_spawn_target(&mut self) -> ResolvedSpawnTarget {
+        match self.new_session_target.take() {
+            Some(NewSessionTarget::Remote { host, project }) => {
+                ResolvedSpawnTarget::Remote { host, project }
+            }
+            Some(NewSessionTarget::Local(project)) => {
+                if project.is_empty() {
+                    ResolvedSpawnTarget::None
+                } else {
+                    ResolvedSpawnTarget::Local(ProjectKey::new(self.local_machine_id(), project))
+                }
+            }
+            None => {
+                let target_key = self
+                    .workspace
+                    .current_project()
+                    .filter(|_| self.workspace.enabled())
+                    .cloned()
+                    .or_else(|| {
+                        self.active
+                            .as_ref()
+                            .and_then(|agent| self.project_key_for_agent(agent))
+                    })
+                    .or_else(|| {
+                        self.last_snapshot.projects.first().map(|project| {
+                            ProjectKey::new(self.local_machine_id(), project.id.clone())
+                        })
+                    });
+                let Some(key) = target_key.filter(|k| !k.project_id.is_empty()) else {
+                    return ResolvedSpawnTarget::None;
+                };
+                if key.machine_id != self.local_machine_id() {
+                    let Some(host) = self.remote_host_for_key(&key) else {
+                        return ResolvedSpawnTarget::None;
+                    };
+                    ResolvedSpawnTarget::Remote {
+                        host,
+                        project: key.project_id,
+                    }
+                } else {
+                    ResolvedSpawnTarget::Local(key)
+                }
+            }
+        }
+    }
+
     pub(crate) fn spawn_preset(
         &mut self,
         preset: &muxlane_core::AgentPreset,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = self.new_session_target.take();
-        let target_key = match target {
-            Some(NewSessionTarget::Remote { host, project }) => {
+        let target_key = match self.resolve_spawn_target() {
+            ResolvedSpawnTarget::Remote { host, project } => {
                 self.palette_open = false;
                 self.spawn_remote_agent(
                     crate::remotes::RemoteAgentSpawnRequest {
@@ -986,48 +1419,9 @@ impl MuxlaneApp {
                 );
                 return;
             }
-            Some(NewSessionTarget::Local(project)) => {
-                ProjectKey::new(self.local_machine_id(), project)
-            }
-            None => {
-                self.workspace
-                    .current_project()
-                    .filter(|_| self.workspace.enabled())
-                    .cloned()
-                    .or_else(|| {
-                        self.active
-                            .as_ref()
-                            .and_then(|agent| self.project_key_for_agent(agent))
-                    })
-                    .or_else(|| {
-                        self.last_snapshot.projects.first().map(|project| {
-                            ProjectKey::new(self.local_machine_id(), project.id.clone())
-                        })
-                    })
-                    .unwrap_or_else(|| ProjectKey::new(self.local_machine_id(), String::new()))
-            }
+            ResolvedSpawnTarget::Local(key) => key,
+            ResolvedSpawnTarget::None => return,
         };
-        if target_key.project_id.is_empty() {
-            return;
-        }
-        if target_key.machine_id != self.local_machine_id() {
-            let Some(host) = self.remote_host_for_key(&target_key) else {
-                return;
-            };
-            self.palette_open = false;
-            self.spawn_remote_agent(
-                crate::remotes::RemoteAgentSpawnRequest {
-                    host,
-                    project: target_key.project_id,
-                    preset: Some(preset.clone()),
-                    preferred_pane: None,
-                    split_axis: None,
-                },
-                window,
-                cx,
-            );
-            return;
-        }
         let Some(project) = self.last_snapshot.project(&target_key.project_id).cloned() else {
             return;
         };
@@ -1089,6 +1483,82 @@ impl MuxlaneApp {
         })
         .detach();
     }
+
+    pub(crate) fn spawn_chat_preset(
+        &mut self,
+        preset: &muxlane_core::AgentPreset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if preset.chat_driver_kind().is_none() {
+            self.spawn_preset(preset, window, cx);
+            return;
+        }
+        let target_key = match self.resolve_spawn_target() {
+            ResolvedSpawnTarget::Remote { host, project } => {
+                self.palette_open = false;
+                self.spawn_remote_chat_agent(
+                    crate::remotes::RemoteAgentSpawnRequest {
+                        host,
+                        project,
+                        preset: Some(preset.clone()),
+                        preferred_pane: None,
+                        split_axis: None,
+                    },
+                    window,
+                    cx,
+                );
+                return;
+            }
+            ResolvedSpawnTarget::Local(key) => key,
+            ResolvedSpawnTarget::None => return,
+        };
+        let Some(project) = self.last_snapshot.project(&target_key.project_id).cloned() else {
+            return;
+        };
+        let params = local_chat_preset_params(preset, &project);
+        let server = Arc::clone(&self.server);
+        let preferred_pane = self.active_pane.clone();
+        let pane = self.capture_spawn_target(&target_key, Some(&preferred_pane));
+        let collapse_key = format!("local:{}", project.id);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { server.spawn_chat(params).await })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(agent) => {
+                    if !this.project_owner_exists(&target_key)
+                        || agent.project != target_key.project_id
+                    {
+                        return;
+                    }
+                    let agent_id = agent.id.clone();
+                    if !this.last_snapshot.agents.iter().any(|a| a.id == agent_id) {
+                        this.last_snapshot.agents.push(agent);
+                    }
+                    this.collapsed_projects.remove(&collapse_key);
+                    this.session_views
+                        .insert(agent_id.clone(), muxlane_core::SessionViewMode::Chat);
+                    this.ensure_agent_chat(&agent_id, window, cx);
+                    this.palette_open = false;
+                    this.new_session_target = None;
+                    this.jump_to_project_if_needed(&target_key, cx);
+                    this.place_async_agent(&target_key, agent_id, Some(pane), None, window, cx);
+                }
+                Err(error) => {
+                    this.notifications.update(cx, |center, cx| {
+                        center.show_error(
+                            i18n::text(this.language, "error.create_session")
+                                .replace("{error}", &error.to_string()),
+                            cx,
+                        )
+                    });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
 }
 
 pub(crate) fn local_preset_params(
@@ -1110,6 +1580,30 @@ pub(crate) fn local_preset_params(
     }
 }
 
+pub(crate) fn local_chat_preset_params(
+    preset: &muxlane_core::AgentPreset,
+    project: &muxlane_core::model::Project,
+) -> muxlane_core::protocol::ChatSpawnParams {
+    muxlane_core::protocol::ChatSpawnParams {
+        project: project.id.clone(),
+        agent_type: Some(preset.agent_type),
+        program: Some(
+            preset
+                .executable_in(&project.path)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| preset.program.clone()),
+        ),
+        args: preset.chat_launch_args(None),
+        env: Some(preset.env.clone().into_iter().collect()),
+        preset_name: Some(preset.label.clone()),
+        driver: preset.chat_driver_kind(),
+        provider_session: None,
+        initial_prompt: None,
+        model: None,
+        thinking_level: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1122,6 +1616,7 @@ mod tests {
                 project: "project".into(),
                 agent_type: AgentType::Shell,
                 title: "shell".into(),
+                title_is_custom: false,
                 status: AgentStatus::Idle,
                 status_since: 0,
                 seen: true,

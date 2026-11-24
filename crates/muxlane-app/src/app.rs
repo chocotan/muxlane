@@ -23,6 +23,7 @@ use crate::persistence::PersistenceWriter;
 use crate::settings::{SettingsPage, DEFAULT_FONT_FAMILY, FONT_FAMILIES};
 use crate::shortcuts::{ShortcutAction, ShortcutError};
 use crate::sidebar_state::{SidebarState, SIDEBAR_RAIL_WIDTH};
+use crate::sound::{self, SoundKind};
 use crate::term_view::TermView;
 use crate::text_field::TextField;
 use crate::theme::{Theme, ThemeMode};
@@ -141,6 +142,8 @@ pub struct MuxlaneApp {
     /// Live remote terminal streams. Hidden tabs keep their view but drop the
     /// stream so idle agents stop consuming bandwidth.
     pub(crate) remote_streams: HashMap<AgentId, crate::sessions::RemoteStreamCtl>,
+    pub(crate) chats: HashMap<AgentId, Entity<crate::chat::ChatView>>,
+    pub(crate) session_views: std::collections::BTreeMap<AgentId, muxlane_core::SessionViewMode>,
 
     // 快照/远程镜像
     pub(crate) last_snapshot: Snapshot,
@@ -167,6 +170,7 @@ pub struct MuxlaneApp {
 
     // 设置面板
     pub(crate) settings_open: bool,
+    pub(crate) bot_studio: crate::bots::BotStudioState,
     pub(crate) settings_focus: crate::settings::SettingsFocus,
     pub(crate) settings_page: SettingsPage,
     pub(crate) settings_theme_menu: bool,
@@ -223,6 +227,7 @@ pub struct MuxlaneApp {
 
     // 菜单/确认框
     pub(crate) session_menu: Option<SessionMenu>,
+    pub(crate) session_rename: Option<crate::session_rename::SessionRename>,
     pub(crate) tree_menu: Option<TreeMenu>,
     pub(crate) delete_confirm: Option<DeleteConfirm>,
     pub(crate) delete_error: Option<String>,
@@ -653,6 +658,8 @@ impl MuxlaneApp {
             maximized_pane: None,
             terms: HashMap::new(),
             remote_streams: HashMap::new(),
+            chats: HashMap::new(),
+            session_views: persisted.session_views.clone(),
             active: None,
             workspace,
             floating: crate::floating::FloatingState::from_persisted(&persisted),
@@ -665,6 +672,7 @@ impl MuxlaneApp {
             theme_mode,
             font_family,
             settings_open: false,
+            bot_studio: crate::bots::BotStudioState::new(theme_mode, window, cx),
             settings_focus: Default::default(),
             settings_page: SettingsPage::General,
             settings_theme_menu: false,
@@ -721,6 +729,7 @@ impl MuxlaneApp {
             remote_event_tx: tx.clone(),
             new_session_target: None,
             session_menu: None,
+            session_rename: None,
             tree_menu: None,
             delete_confirm: None,
             delete_error: None,
@@ -740,6 +749,10 @@ impl MuxlaneApp {
             project_order: persisted.project_order.clone(),
             bootstrap_progress: HashMap::new(),
         };
+        cx.observe_window_activation(window, |this, window, _cx| {
+            this.floating.main_active = window.is_window_active();
+        })
+        .detach();
         app.floating.remove_agents(&missing_local);
         app.floating.layouts.retain(|key, _| {
             key.machine_id != local_machine_id || available_local_projects.contains(&key.project_id)
@@ -836,6 +849,20 @@ impl MuxlaneApp {
             }
         })
         .detach();
+        let mut bot_events = app.server.subscribe_events();
+        cx.spawn(async move |this, cx| {
+            while let Ok(ev) = bot_events.recv().await {
+                if ev.event == muxlane_core::protocol::events::BOT_UPDATED
+                    || ev.event == muxlane_core::protocol::events::BOT_RUN_UPDATED
+                {
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh_bots(None, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+        app.refresh_bots(None, cx);
         app.persist();
         app
     }
@@ -949,10 +976,11 @@ impl MuxlaneApp {
         app.default_terminal_preset = self.default_terminal_preset.clone();
         app.relay_url = self.relay_url.clone();
         app.relay_enabled = Some(self.relay_enabled);
+        app.session_views = self.session_views.clone();
         self.persistence.submit_app(app);
     }
 
-    fn find_agent(&self, agent: &AgentId) -> Option<muxlane_core::model::AgentInstance> {
+    pub(crate) fn find_agent(&self, agent: &AgentId) -> Option<muxlane_core::model::AgentInstance> {
         if let Some(a) = self.last_snapshot.agent(agent) {
             return Some(a.clone());
         }
@@ -1012,6 +1040,11 @@ impl MuxlaneApp {
                     agent.seen = focused;
                 }
             }
+        }
+        if self.sound_enabled && transition && !acknowledged && event.to.is_finished() {
+            // Completion sound is feedback, not an unread alert: it must also play
+            // for the session the user is currently viewing.
+            sound::play_sound(SoundKind::Done);
         }
         let mut draft = self.notification_draft(
             event.agent.clone(),
@@ -1128,6 +1161,7 @@ impl Render for MuxlaneApp {
         window.set_rem_size(ui_px(16.));
         self.floating.main = Some(window.window_handle());
         self.schedule_session_windows(cx);
+        self.ensure_active_session_views(window, cx);
         self.sync_active_terminal_focus(window, cx);
         self.pane_tab_scrolls
             .retain(|pane, _| self.pane_tree.group(pane).is_some());
@@ -1249,14 +1283,18 @@ impl Render for MuxlaneApp {
                 this.reattach_all_sessions(cx);
             }))
             .on_action(cx.listener(|this, _: &FocusNextPart, window, cx| {
-                if this.settings_open {
+                if this.session_rename.is_some() {
+                    this.cycle_session_rename_focus(false, window, cx);
+                } else if this.settings_open {
                     this.cycle_settings_focus(false, window, cx);
                 } else {
                     window.focus_next(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusPreviousPart, window, cx| {
-                if this.settings_open {
+                if this.session_rename.is_some() {
+                    this.cycle_session_rename_focus(true, window, cx);
+                } else if this.settings_open {
                     this.cycle_settings_focus(true, window, cx);
                 } else {
                     window.focus_prev(cx);
@@ -1267,11 +1305,19 @@ impl Render for MuxlaneApp {
                     .terms
                     .values()
                     .any(|term| term.focus_handle(cx).is_focused(window));
+                let chat_is_focused = this
+                    .chats
+                    .values()
+                    .any(|chat| chat.focus_handle(cx).is_focused(window));
                 if this.settings_open && matches!(ev.keystroke.key.as_str(), "tab" | "f6") {
                     this.cycle_settings_focus(ev.keystroke.modifiers.shift, window, cx);
                     cx.stop_propagation();
                 } else if this.quit_confirm_open {
                     if this.handle_quit_confirmation_key(&ev.keystroke, window, cx) {
+                        cx.stop_propagation();
+                    }
+                } else if this.session_rename.is_some() {
+                    if this.handle_session_rename_key(&ev.keystroke, window, cx) {
                         cx.stop_propagation();
                     }
                 } else if this.palette_open {
@@ -1281,7 +1327,10 @@ impl Render for MuxlaneApp {
                     if handled {
                         cx.stop_propagation();
                     }
-                } else if ev.keystroke.key.as_str() == "tab" && !terminal_is_focused {
+                } else if ev.keystroke.key.as_str() == "tab"
+                    && !terminal_is_focused
+                    && !chat_is_focused
+                {
                     if ev.keystroke.modifiers.shift {
                         window.focus_prev(cx);
                     } else {
@@ -1298,6 +1347,11 @@ impl Render for MuxlaneApp {
                 } else if this.settings_open {
                     if ev.keystroke.key.as_str() == "escape" {
                         this.close_settings(window, cx);
+                        cx.stop_propagation();
+                    }
+                } else if this.bot_studio.open {
+                    if ev.keystroke.key.as_str() == "escape" {
+                        this.close_bot_studio(window, cx);
                         cx.stop_propagation();
                     }
                 } else if ev.keystroke.key.as_str() == "escape"
@@ -1507,6 +1561,9 @@ impl Render for MuxlaneApp {
         if self.tree_menu.is_some() {
             root = root.child(self.render_tree_menu(cx));
         }
+        if self.session_rename.is_some() {
+            root = root.child(self.render_session_rename(cx));
+        }
         if self.delete_confirm.is_some() {
             root = root.child(self.render_delete_confirm(cx));
         }
@@ -1519,6 +1576,9 @@ impl Render for MuxlaneApp {
         root = root.child(self.notifications.clone());
         if self.settings_open {
             root = root.child(self.render_settings(window, cx));
+        }
+        if self.bot_studio.open {
+            root = root.child(self.render_bot_studio(window, cx));
         }
         if self.quit_confirm_open {
             root = root.child(self.render_quit_confirmation(cx));

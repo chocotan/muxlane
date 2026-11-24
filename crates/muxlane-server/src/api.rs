@@ -172,6 +172,32 @@ impl std::fmt::Display for NoSuchProject {
 
 impl std::error::Error for NoSuchProject {}
 
+#[derive(Debug)]
+pub(crate) enum AgentRenameError {
+    InvalidTitle(&'static str),
+    NoSuchAgent(AgentId),
+}
+
+impl AgentRenameError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidTitle(_) => "bad_params",
+            Self::NoSuchAgent(_) => "no_such_agent",
+        }
+    }
+}
+
+impl std::fmt::Display for AgentRenameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidTitle(message) => f.write_str(message),
+            Self::NoSuchAgent(agent) => write!(f, "no such agent: {agent}"),
+        }
+    }
+}
+
+impl std::error::Error for AgentRenameError {}
+
 impl MuxlaneServer {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
@@ -287,6 +313,7 @@ impl MuxlaneServer {
             project: project.id.clone(),
             agent_type,
             title,
+            title_is_custom: false,
             status: AgentStatus::Idle,
             status_since: muxlane_core::model::now_secs(),
             seen: true,
@@ -303,6 +330,44 @@ impl MuxlaneServer {
         self.dirty.bump();
         self.persist_runtime_state().await?;
         Ok(instance)
+    }
+
+    pub async fn rename_agent(
+        &self,
+        agent: &AgentId,
+        title: String,
+    ) -> anyhow::Result<AgentInstance> {
+        if title.chars().any(char::is_control) {
+            return Err(AgentRenameError::InvalidTitle(
+                "title must not contain control characters",
+            )
+            .into());
+        }
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(AgentRenameError::InvalidTitle("title must not be empty").into());
+        }
+        if title.chars().count() > 128 {
+            return Err(
+                AgentRenameError::InvalidTitle("title must be at most 128 characters").into(),
+            );
+        }
+        let _lifecycle = self.lifecycle.lock().await;
+        let mut state = self.state.write().await;
+        let index = state
+            .agents
+            .iter()
+            .position(|item| &item.id == agent)
+            .ok_or_else(|| AgentRenameError::NoSuchAgent(agent.clone()))?;
+        let mut candidate = state.snapshot();
+        candidate.agents[index].title = title.to_string();
+        candidate.agents[index].title_is_custom = true;
+        self.persist_snapshot(&candidate)?;
+        let renamed = candidate.agents[index].clone();
+        state.agents[index] = renamed.clone();
+        drop(state);
+        self.dirty.bump();
+        Ok(renamed)
     }
 
     pub async fn delete_agent(&self, agent: &AgentId) -> anyhow::Result<DeleteScopeResult> {
@@ -520,13 +585,472 @@ impl MuxlaneServer {
         for agent in &destroyed {
             subs.mark_agent_exit(agent);
         }
+        drop(subs);
+        for agent in &destroyed {
+            self.chat.remove_session(agent).await;
+        }
         (destroyed, failed)
+    }
+
+    pub async fn spawn_chat(
+        &self,
+        params: muxlane_core::protocol::ChatSpawnParams,
+    ) -> anyhow::Result<AgentInstance> {
+        self.spawn_chat_in_cwd(params, None).await
+    }
+
+    pub async fn spawn_chat_in_cwd(
+        &self,
+        params: muxlane_core::protocol::ChatSpawnParams,
+        cwd_override: Option<PathBuf>,
+    ) -> anyhow::Result<AgentInstance> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let project = self
+            .state
+            .read()
+            .await
+            .projects
+            .iter()
+            .find(|project| project.id == params.project)
+            .cloned()
+            .ok_or_else(|| NoSuchProject(params.project.clone()))?;
+        let agent_type = params
+            .agent_type
+            .unwrap_or(muxlane_core::model::AgentType::Pi);
+        let agent_id = muxlane_core::model::new_id(agent_type.as_str());
+        let title = params
+            .preset_name
+            .clone()
+            .unwrap_or_else(|| agent_type.as_str().to_string());
+        let working_dir = cwd_override.unwrap_or_else(|| project.path.clone());
+
+        let preset = muxlane_core::builtin_presets(muxlane_term::default_shell_program())
+            .into_iter()
+            .find(|p| p.agent_type == agent_type);
+        let driver_kind = params
+            .driver
+            .or_else(|| preset.as_ref().and_then(|p| p.chat_driver_kind()))
+            .ok_or_else(|| {
+                anyhow::anyhow!("agent type {:?} does not support native chat", agent_type)
+            })?;
+        let program = params
+            .program
+            .or_else(|| {
+                preset
+                    .as_ref()
+                    .and_then(|p| p.executable_in(&working_dir))
+                    .map(|path| path.display().to_string())
+            })
+            .unwrap_or_else(|| agent_type.program().to_string());
+        let args = params
+            .args
+            .or_else(|| {
+                preset
+                    .as_ref()
+                    .and_then(|p| p.chat_launch_args(params.provider_session.as_deref()))
+            })
+            .unwrap_or_else(|| match driver_kind {
+                muxlane_core::ChatDriverKind::PiRpc => vec!["--mode".into(), "rpc".into()],
+                muxlane_core::ChatDriverKind::Acp => {
+                    if agent_type == muxlane_core::model::AgentType::Opencode {
+                        vec!["acp".into()]
+                    } else {
+                        vec!["--acp".into()]
+                    }
+                }
+            });
+
+        let spec = muxlane_chat::DriverLaunchSpec {
+            agent: agent_id.clone(),
+            agent_type,
+            driver_kind,
+            program,
+            args,
+            cwd: working_dir,
+            env: params.env.unwrap_or_default(),
+            provider_session: params.provider_session,
+            model: params.model,
+            thinking_level: params.thinking_level,
+        };
+        self.chat
+            .start_session(spec, false, params.initial_prompt)
+            .await?;
+
+        let instance = AgentInstance {
+            id: agent_id.clone(),
+            project: project.id.clone(),
+            agent_type,
+            title,
+            title_is_custom: false,
+            status: AgentStatus::Idle,
+            status_since: muxlane_core::model::now_secs(),
+            seen: true,
+            tmux_session: None,
+        };
+        self.state
+            .write()
+            .await
+            .add_agent(project, instance.clone());
+        self.dirty.bump();
+        self.persist_runtime_state().await?;
+        Ok(instance)
+    }
+
+    pub async fn chat_history(
+        &self,
+        agent: &AgentId,
+    ) -> anyhow::Result<muxlane_core::protocol::ChatHistoryResult> {
+        if let Some(history) = self.chat.history(agent).await {
+            return Ok(history);
+        }
+        let (inst, project) = {
+            let state = self.state.read().await;
+            let inst = state
+                .agents
+                .iter()
+                .find(|a| &a.id == agent)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no such agent: {agent}"))?;
+            let project = state
+                .projects
+                .iter()
+                .find(|p| p.id == inst.project)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no such project: {}", inst.project))?;
+            (inst, project)
+        };
+        if let Some(history) = self
+            .chat
+            .refresh_pty_transcript_if_needed(
+                agent,
+                inst.agent_type,
+                project.path,
+                inst.status_since.saturating_sub(3600),
+            )
+            .await
+        {
+            return Ok(history);
+        }
+        Ok(muxlane_core::protocol::ChatHistoryResult {
+            agent: agent.clone(),
+            seq: 0,
+            meta: muxlane_core::ChatSessionMeta {
+                driver: muxlane_core::SessionDriverMode::TerminalPty,
+                has_pty: self.session(agent).await.is_some(),
+                supports_chat_input: false,
+                supports_terminal_switch: muxlane_core::builtin_presets("")
+                    .into_iter()
+                    .find(|p| p.agent_type == inst.agent_type)
+                    .and_then(|p| p.chat_driver_kind())
+                    .is_some(),
+                ..Default::default()
+            },
+            entries: Vec::new(),
+            pending_approvals: Vec::new(),
+        })
+    }
+
+    pub async fn switch_chat_mode(
+        &self,
+        agent: &AgentId,
+        target: muxlane_core::SessionDriverMode,
+    ) -> anyhow::Result<muxlane_core::ChatSessionMeta> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let (inst, project) = {
+            let state = self.state.read().await;
+            let inst = state
+                .agents
+                .iter()
+                .find(|a| &a.id == agent)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no such agent: {agent}"))?;
+            let project = state
+                .projects
+                .iter()
+                .find(|p| p.id == inst.project)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no such project: {}", inst.project))?;
+            (inst, project)
+        };
+
+        let preset = muxlane_core::builtin_presets(muxlane_term::default_shell_program())
+            .into_iter()
+            .find(|p| p.agent_type == inst.agent_type);
+
+        match target {
+            muxlane_core::SessionDriverMode::TerminalPty => {
+                if self.session(agent).await.is_some() {
+                    return Ok(self.chat_history(agent).await?.meta);
+                }
+                let resume_info = self.chat.session_resume_info(agent).await;
+                self.chat.detach_driver(agent).await;
+
+                let resume_ref = resume_info.as_ref().and_then(|(_, meta)| {
+                    meta.provider_session_file
+                        .clone()
+                        .or_else(|| meta.provider_session_id.clone())
+                });
+                let program = resume_info
+                    .as_ref()
+                    .map(|(spec, _)| spec.program.clone())
+                    .or_else(|| {
+                        preset
+                            .as_ref()
+                            .and_then(|p| p.executable_in(&project.path))
+                            .map(|p| p.display().to_string())
+                    })
+                    .unwrap_or_else(|| inst.agent_type.program().to_string());
+                let args = match (&preset, resume_ref.as_deref()) {
+                    (Some(p), Some(s)) => p.terminal_resume_args(s),
+                    (Some(p), None) => p.args.clone(),
+                    _ => Vec::new(),
+                };
+                let tmux_name = format!("muxlane-{agent}");
+                let mut cfg = muxlane_term::LaunchCfg {
+                    agent: agent.clone(),
+                    agent_type: inst.agent_type,
+                    cwd: project.path.clone(),
+                    env: Vec::new(),
+                    program_override: Some(program),
+                    args,
+                    cols: 120,
+                    rows: 32,
+                    tmux_session: Some(tmux_name),
+                };
+                cfg.env.push(("MUXLANE_AGENT_ID".into(), agent.clone()));
+                cfg.env.push((
+                    "MUXLANE_SOCKET".into(),
+                    self.socket_path.display().to_string(),
+                ));
+                cfg.env
+                    .push(("MUXLANE_HOOK_TOKEN".into(), self.hook_token(agent)));
+                let session = self
+                    .runtime
+                    .spawn_blocking(move || muxlane_term::PtySession::spawn(cfg))
+                    .await
+                    .context("spawn terminal handoff task")?
+                    .context("spawn terminal handoff")?;
+                let tmux_actual = session.tmux_session_name().map(str::to_string);
+                self.sessions.lock().await.insert(agent.clone(), session);
+                if let Some(a) = self
+                    .state
+                    .write()
+                    .await
+                    .agents
+                    .iter_mut()
+                    .find(|a| &a.id == agent)
+                {
+                    a.tmux_session = tmux_actual;
+                }
+                self.chat.mark_has_pty(agent, true).await;
+                self.dirty.bump();
+                self.persist_runtime_state().await?;
+                Ok(self.chat_history(agent).await?.meta)
+            }
+            muxlane_core::SessionDriverMode::PiRpc | muxlane_core::SessionDriverMode::Acp => {
+                let p =
+                    preset.ok_or_else(|| anyhow::anyhow!("preset unavailable for chat switch"))?;
+                let driver_kind = p.chat_driver_kind().ok_or_else(|| {
+                    anyhow::anyhow!("preset {:?} does not support native chat", p.agent_type)
+                })?;
+                let mut resume_ref = self
+                    .chat
+                    .session_resume_info(agent)
+                    .await
+                    .and_then(|(_, m)| m.provider_session_file.or(m.provider_session_id));
+                if resume_ref.is_none()
+                    && matches!(
+                        inst.agent_type,
+                        muxlane_core::model::AgentType::Pi | muxlane_core::model::AgentType::Pie
+                    )
+                {
+                    resume_ref = muxlane_chat::transcript::discover_pi_session_file(
+                        &project.path,
+                        inst.agent_type == muxlane_core::model::AgentType::Pie,
+                        inst.status_since.saturating_sub(3600),
+                    )
+                    .map(|path| path.display().to_string());
+                }
+
+                // 结束原有 PTY 后接管为原生结构化会话
+                if let Some(old_pty) = self.sessions.lock().await.remove(agent) {
+                    let _ = self
+                        .runtime
+                        .spawn_blocking(move || old_pty.kill_persistent())
+                        .await;
+                    if let Some(a) = self
+                        .state
+                        .write()
+                        .await
+                        .agents
+                        .iter_mut()
+                        .find(|a| &a.id == agent)
+                    {
+                        a.tmux_session = None;
+                    }
+                    self.subs.lock().await.mark_agent_exit(agent);
+                }
+
+                let program = p
+                    .executable_in(&project.path)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| p.program.clone());
+                let args = p
+                    .chat_launch_args(resume_ref.as_deref())
+                    .unwrap_or_default();
+                let meta = self
+                    .chat
+                    .start_session(
+                        muxlane_chat::DriverLaunchSpec {
+                            agent: agent.clone(),
+                            agent_type: inst.agent_type,
+                            driver_kind,
+                            program,
+                            args,
+                            cwd: project.path,
+                            env: Vec::new(),
+                            provider_session: resume_ref,
+                            model: None,
+                            thinking_level: None,
+                        },
+                        false,
+                        None,
+                    )
+                    .await?;
+                self.dirty.bump();
+                self.persist_runtime_state().await?;
+                Ok(meta)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rename_server() -> Arc<MuxlaneServer> {
+        use muxlane_core::model::{AgentType, MachineInfo};
+        let mut state = crate::ServerState::new(MachineInfo {
+            machine_id: "test".into(),
+            name: "test".into(),
+            os: "test".into(),
+            version: "test".into(),
+        });
+        state.fixture_push(
+            Project {
+                id: "p".into(),
+                name: "p".into(),
+                path: "/tmp".into(),
+                branch: None,
+                agents: vec!["a".into()],
+            },
+            AgentInstance {
+                id: "a".into(),
+                project: "p".into(),
+                agent_type: AgentType::Shell,
+                title: "Shell".into(),
+                title_is_custom: false,
+                status: AgentStatus::Working,
+                status_since: 42,
+                seen: false,
+                tmux_session: Some("muxlane-a".into()),
+            },
+        );
+        MuxlaneServer::new(
+            "/tmp/unused-muxlane-rename.sock".into(),
+            Arc::new(tokio::sync::RwLock::new(state)),
+            crate::DirtyFlag::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn rename_validates_titles_and_returns_rpc_errors_without_changing_state() {
+        use muxlane_core::protocol::{methods, Request};
+        let server = rename_server();
+        let before = server.snapshot().await;
+        for title in [
+            "".into(),
+            "   ".into(),
+            "a\nb".into(),
+            "\tname".into(),
+            "name\u{7f}".into(),
+            "名".repeat(129),
+        ] {
+            let response = server
+                .handle_agent_rename(Request {
+                    id: 1,
+                    method: methods::AGENT_RENAME.into(),
+                    params: serde_json::json!({"agent": "a", "title": title}),
+                })
+                .await
+                .unwrap();
+            let error = response.error.unwrap();
+            assert_eq!(error.code, "bad_params");
+            assert!(error.message.contains("title"));
+            assert_eq!(server.snapshot().await, before);
+        }
+        let missing = server
+            .handle_agent_rename(Request {
+                id: 2,
+                method: methods::AGENT_RENAME.into(),
+                params: serde_json::json!({"agent": "missing", "title": "valid"}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(missing.error.unwrap().code, "no_such_agent");
+        let title = "名".repeat(128);
+        let renamed = server
+            .rename_agent(&"a".into(), format!(" {title} "))
+            .await
+            .unwrap();
+        assert_eq!(renamed.title, title);
+        assert!(renamed.title_is_custom);
+        let mut expected = before.agents[0].clone();
+        expected.title = title;
+        expected.title_is_custom = true;
+        assert_eq!(renamed, expected);
+    }
+
+    #[tokio::test]
+    async fn rename_persists_custom_titles_and_rolls_back_on_save_failure() {
+        use muxlane_core::protocol::{methods, Request};
+        let server = rename_server();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        server.set_persistence_path(path.clone());
+        let mut changes = server.subscribe_dirty();
+        for previous_custom in [false, true] {
+            let before = server.snapshot().await;
+            assert_eq!(before.agents[0].title_is_custom, previous_custom);
+            std::fs::write(&path, "broken state").unwrap();
+            let response = server
+                .handle_agent_rename(Request {
+                    id: 1,
+                    method: methods::AGENT_RENAME.into(),
+                    params: serde_json::json!({"agent": "a", "title": "lost rename"}),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                response.error.unwrap().code,
+                muxlane_core::protocol::error_codes::PERSISTENCE_FAILED
+            );
+            assert_eq!(server.snapshot().await, before);
+            assert!(!changes.has_changed().unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken state");
+            std::fs::remove_file(&path).unwrap();
+            server
+                .rename_agent(&"a".into(), "修复登录".into())
+                .await
+                .unwrap();
+            let saved = muxlane_store::load(&path).unwrap();
+            assert_eq!(saved.sessions[0].title, "修复登录");
+            assert!(saved.sessions[0].title_is_custom);
+            assert!(changes.has_changed().unwrap());
+            changes.borrow_and_update();
+        }
+    }
 
     #[test]
     fn project_paths_expand_only_current_user_home() {

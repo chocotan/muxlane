@@ -8,6 +8,9 @@ mod floating_tests;
 
 #[path = "notification_tests.rs"]
 mod notification_tests;
+#[path = "session_rename_tests.rs"]
+mod session_rename_tests;
+
 #[path = "remote_operation_tests.rs"]
 mod remote_operation_tests;
 
@@ -31,6 +34,7 @@ mod sidebar_navigation {
             project: project.into(),
             agent_type: AgentType::Shell,
             title: id.into(),
+            title_is_custom: false,
             status: muxlane_core::model::AgentStatus::Idle,
             status_since: 0,
             seen: true,
@@ -344,6 +348,7 @@ fn spinner_only_ticks_while_some_agent_is_working() {
         project: "p".into(),
         agent_type: AgentType::Shell,
         title: id.into(),
+        title_is_custom: false,
         status,
         status_since: 0,
         seen: true,
@@ -356,7 +361,9 @@ fn spinner_only_ticks_while_some_agent_is_working() {
                 assert!(!app.has_working_agent());
                 app.last_snapshot.agents = vec![agent("a", AgentStatus::Idle)];
                 assert!(!app.has_working_agent());
-                app.last_snapshot.agents.push(agent("b", AgentStatus::Working));
+                app.last_snapshot
+                    .agents
+                    .push(agent("b", AgentStatus::Working));
                 assert!(app.has_working_agent());
                 // 远端快照里的 Working 同样要驱动 spinner。
                 app.last_snapshot.agents.clear();
@@ -891,6 +898,7 @@ fn active_tab_scrolls_into_view_without_resetting_manual_scroll_or_moving_tools(
                             title: format!(
                                 "{id}: a deliberately long session title for tab scrolling"
                             ),
+                            title_is_custom: false,
                             status: muxlane_core::model::AgentStatus::Idle,
                             status_since: 0,
                             seen: true,
@@ -1259,6 +1267,7 @@ mod remote_stream_pausing {
             project: project.into(),
             agent_type: AgentType::Shell,
             title: id.into(),
+            title_is_custom: false,
             status: muxlane_core::model::AgentStatus::Idle,
             status_since: 0,
             seen: true,
@@ -1335,6 +1344,281 @@ mod remote_stream_pausing {
                     );
                 });
             });
+        });
+    }
+}
+
+mod chat_ui_tests {
+    use super::*;
+    use muxlane_core::chat::{
+        ApprovalOption, ApprovalSource, ChatModelInfo, ChatSessionMeta, NoticeLevel,
+        PendingApproval, PlanEntry, PlanEntryStatus, SessionDriverMode, SessionViewMode,
+        TimelineEntry, ToolCallKind, ToolCallState, ToolDiff,
+    };
+    use muxlane_core::model::{AgentInstance, AgentStatus, AgentType, Project};
+    use muxlane_core::protocol::ChatHistoryResult;
+
+    #[test]
+    fn pi_structured_session_renders_rich_chat_timeline_and_focuses_composer() {
+        with_app(|cx, window, view| {
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |app, cx| {
+                    app.presets = muxlane_core::builtin_presets("/bin/sh");
+                    app.last_snapshot.projects.push(Project {
+                        id: "p-chat".into(),
+                        name: "ChatProj".into(),
+                        path: "/tmp".into(),
+                        branch: Some("main".into()),
+                        agents: vec!["pi-chat-1".into()],
+                    });
+                    app.last_snapshot.agents.push(AgentInstance {
+                        id: "pi-chat-1".into(),
+                        project: "p-chat".into(),
+                        agent_type: AgentType::Pi,
+                        title: "Pi Session".into(),
+                        title_is_custom: false,
+                        status: AgentStatus::Blocked,
+                        status_since: 0,
+                        seen: false,
+                        tmux_session: None,
+                    });
+                    app.select_project_workspace_inner(
+                        ProjectKey::new(app.local_machine_id(), "p-chat"),
+                        cx,
+                    );
+                    app.open_agent(&"pi-chat-1".into(), window, cx);
+                    assert_eq!(app.agent_view_mode(&"pi-chat-1".into()), SessionViewMode::Chat);
+                    let chat = app.chats.get("pi-chat-1").expect("ChatView mounted").clone();
+                    assert!(chat.focus_handle(cx).is_focused(window));
+                    chat.update(cx, |view, cx| {
+                        view.apply_test_history(
+                            ChatHistoryResult {
+                                agent: "pi-chat-1".into(),
+                                seq: 7,
+                                meta: ChatSessionMeta {
+                                    driver: SessionDriverMode::PiRpc,
+                                    supports_chat_input: true,
+                                    supports_terminal_switch: true,
+                                    has_pty: false,
+                                    provider_session_id: Some("sess-12345678".into()),
+                                    current_model: Some(ChatModelInfo {
+                                        provider: "openai".into(),
+                                        id: "gpt-5".into(),
+                                        name: "gpt-5".into(),
+                                    }),
+                                    thinking_level: Some("medium".into()),
+                                    is_streaming: false,
+                                    context_used_tokens: Some(12_000),
+                                    context_window_tokens: Some(128_000),
+                                    total_cost_usd: Some(0.025),
+                                    ..Default::default()
+                                },
+                                entries: vec![
+                                    TimelineEntry::UserMessage {
+                                        id: "u1".into(),
+                                        turn_id: None,
+                                        text: "Inspect @Cargo.toml and run cargo test".into(),
+                                        attachments: vec![],
+                                        created_at_ms: 1,
+                                    },
+                                    TimelineEntry::Thinking {
+                                        id: "th1".into(),
+                                        turn_id: None,
+                                        text: "Checking manifest and test target...".into(),
+                                        streaming: false,
+                                        duration_ms: Some(420),
+                                        created_at_ms: 2,
+                                    },
+                                    TimelineEntry::ToolCall {
+                                        id: "r1".into(),
+                                        turn_id: None,
+                                        call_id: "r1".into(),
+                                        name: "read".into(),
+                                        kind: ToolCallKind::Read,
+                                        title: Some("Cargo.toml".into()),
+                                        input: serde_json::json!({"path": "Cargo.toml"}),
+                                        output: Some("[workspace]".into()),
+                                        diff: None,
+                                        exit_code: None,
+                                        locations: vec!["Cargo.toml".into()],
+                                        state: ToolCallState::Completed,
+                                        is_error: false,
+                                        duration_ms: Some(10),
+                                        created_at_ms: 3,
+                                    },
+                                    TimelineEntry::ToolCall {
+                                        id: "s1".into(),
+                                        turn_id: None,
+                                        call_id: "s1".into(),
+                                        name: "search".into(),
+                                        kind: ToolCallKind::Search,
+                                        title: Some("muxlane-chat".into()),
+                                        input: serde_json::json!({"query": "muxlane-chat"}),
+                                        output: Some("Cargo.toml:4".into()),
+                                        diff: None,
+                                        exit_code: None,
+                                        locations: vec![],
+                                        state: ToolCallState::Completed,
+                                        is_error: false,
+                                        duration_ms: Some(8),
+                                        created_at_ms: 4,
+                                    },
+                                    TimelineEntry::ToolCall {
+                                        id: "e1".into(),
+                                        turn_id: None,
+                                        call_id: "e1".into(),
+                                        name: "edit".into(),
+                                        kind: ToolCallKind::Edit,
+                                        title: Some("src/lib.rs".into()),
+                                        input: serde_json::json!({}),
+                                        output: None,
+                                        diff: Some(Box::new(ToolDiff {
+                                            path: Some("src/lib.rs".into()),
+                                            old_text: "fn a() {}\n".into(),
+                                            new_text: "fn a() { println!(\"ok\"); }\n".into(),
+                                        })),
+                                        exit_code: None,
+                                        locations: vec!["src/lib.rs".into()],
+                                        state: ToolCallState::Completed,
+                                        is_error: false,
+                                        duration_ms: Some(15),
+                                        created_at_ms: 5,
+                                    },
+                                    TimelineEntry::ToolCall {
+                                        id: "b1".into(),
+                                        turn_id: None,
+                                        call_id: "b1".into(),
+                                        name: "bash".into(),
+                                        kind: ToolCallKind::Bash,
+                                        title: Some("cargo test".into()),
+                                        input: serde_json::json!({"command": "cargo test -p muxlane-chat"}),
+                                        output: Some("test result: ok. 7 passed".into()),
+                                        diff: None,
+                                        exit_code: Some(0),
+                                        locations: vec![],
+                                        state: ToolCallState::Completed,
+                                        is_error: false,
+                                        duration_ms: Some(320),
+                                        created_at_ms: 6,
+                                    },
+                                    TimelineEntry::Plan {
+                                        id: "p1".into(),
+                                        turn_id: None,
+                                        entries: vec![PlanEntry {
+                                            content: "Verify workspace tests".into(),
+                                            status: PlanEntryStatus::InProgress,
+                                            priority: Some("high".into()),
+                                        }],
+                                        created_at_ms: 7,
+                                    },
+                                    TimelineEntry::AssistantText {
+                                        id: "a1".into(),
+                                        turn_id: None,
+                                        text: "## Summary\n- All **7** tests pass in `muxlane-chat`.".into(),
+                                        streaming: false,
+                                        model: Some("gpt-5".into()),
+                                        created_at_ms: 8,
+                                    },
+                                    TimelineEntry::Notice {
+                                        id: "n1".into(),
+                                        turn_id: None,
+                                        level: NoticeLevel::Info,
+                                        text: "Ready for approval".into(),
+                                        created_at_ms: 9,
+                                    },
+                                ],
+                                pending_approvals: vec![PendingApproval {
+                                    id: "ap1".into(),
+                                    agent: "pi-chat-1".into(),
+                                    source: ApprovalSource::AcpPermission,
+                                    method: "permission".into(),
+                                    title: "Allow running git status?".into(),
+                                    message: Some("Needs read access".into()),
+                                    tool_name: Some("bash".into()),
+                                    command_or_input: Some("git status".into()),
+                                    options: vec![
+                                        ApprovalOption {
+                                            option_id: "allow".into(),
+                                            label: "Allow once".into(),
+                                            kind: Some("allow_once".into()),
+                                        },
+                                        ApprovalOption {
+                                            option_id: "deny".into(),
+                                            label: "Deny".into(),
+                                            kind: Some("reject_once".into()),
+                                        },
+                                    ],
+                                    prefill: None,
+                                    created_at_ms: 10,
+                                }],
+                            },
+                            cx,
+                        );
+                    });
+                });
+            })
+            .unwrap();
+            draw(cx, window);
+        });
+    }
+}
+
+mod bot_studio_ui_tests {
+    use super::*;
+    use crate::bots::BotEditorTab;
+    use muxlane_core::model::AgentType;
+    use muxlane_core::ChatDriverKind;
+
+    #[test]
+    fn bot_studio_opens_creates_pi_draft_and_paints_all_tabs() {
+        with_app(|cx, window, view| {
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |app, cx| {
+                    app.last_snapshot
+                        .projects
+                        .push(muxlane_core::model::Project {
+                            id: "p-bot".into(),
+                            name: "BotProj".into(),
+                            path: "/tmp".into(),
+                            branch: Some("main".into()),
+                            agents: vec![],
+                        });
+                    app.open_bot_studio(window, cx);
+                    assert!(app.bot_studio.open);
+                    app.new_bot_draft(cx);
+                    let draft = app.bot_studio.draft.as_ref().expect("draft created");
+                    assert_eq!(draft.agent_type, AgentType::Pi);
+                    assert_eq!(draft.driver, ChatDriverKind::PiRpc);
+                    assert_eq!(draft.project_id, "p-bot");
+                });
+            })
+            .unwrap();
+            draw(cx, window);
+
+            for tab in [
+                BotEditorTab::SoulMemory,
+                BotEditorTab::Triggers,
+                BotEditorTab::Runs,
+                BotEditorTab::Config,
+            ] {
+                cx.update_window(window, |_, _window, cx| {
+                    view.update(cx, |app, cx| {
+                        app.bot_studio.tab = tab;
+                        cx.notify();
+                    });
+                })
+                .unwrap();
+                draw(cx, window);
+            }
+
+            cx.update_window(window, |_, window, cx| {
+                view.update(cx, |app, cx| {
+                    app.close_bot_studio(window, cx);
+                    assert!(!app.bot_studio.open);
+                });
+            })
+            .unwrap();
+            draw(cx, window);
         });
     }
 }

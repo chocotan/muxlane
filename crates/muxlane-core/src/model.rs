@@ -115,6 +115,8 @@ pub struct AgentInstance {
     pub project: ProjectId,
     pub agent_type: AgentType,
     pub title: String,
+    #[serde(default)]
+    pub title_is_custom: bool,
     pub status: AgentStatus,
     /// 状态起始时间（unix 秒）
     pub status_since: u64,
@@ -191,6 +193,7 @@ mod tests {
                 project: "p_1".into(),
                 agent_type: AgentType::Claude,
                 title: "refactor".into(),
+                title_is_custom: true,
                 status: AgentStatus::Working,
                 status_since: 1700000000,
                 seen: true,
@@ -200,6 +203,13 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, snap);
+        let mut legacy = serde_json::to_value(&snap).unwrap();
+        legacy["agents"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("title_is_custom");
+        let legacy: Snapshot = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.agents[0].title_is_custom);
     }
 
     #[test]

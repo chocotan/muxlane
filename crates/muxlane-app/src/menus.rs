@@ -129,6 +129,23 @@ impl MuxlaneApp {
             .border_1()
             .border_color(rgba(theme.line))
             .shadow_lg()
+            .child(
+                semantic_button(
+                    "session-rename",
+                    i18n::text(self.language, "menu.rename_session"),
+                    theme,
+                )
+                .px_3()
+                .py_2()
+                .text_size(ui_px(12.))
+                .text_color(rgba(theme.fg0))
+                .hover(|style| style.bg(rgba(theme.bg2)))
+                .on_click(cx.listener({
+                    let id = menu.agent.clone();
+                    move |this, _, window, cx| this.begin_session_rename(&id, window, cx)
+                }))
+                .child(i18n::text(self.language, "menu.rename_session")),
+            )
             .child({
                 let detached = self.is_detached(&menu.agent);
                 let key = if detached {

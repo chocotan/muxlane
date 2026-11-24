@@ -45,7 +45,9 @@ fn notification_sender() -> &'static mpsc::Sender<NotificationRequest> {
 }
 
 pub fn play_sound(sound: SoundKind) {
-    if std::env::var_os("MUXLANE_DISABLE_SOUND").is_some() || std::env::var_os("NEXTEST").is_some()
+    if cfg!(test)
+        || std::env::var_os("MUXLANE_DISABLE_SOUND").is_some()
+        || std::env::var_os("NEXTEST").is_some()
     {
         return;
     }

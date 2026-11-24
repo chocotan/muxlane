@@ -24,6 +24,8 @@ pub enum Error {
     Eof,
     #[error("unknown region: {0}")]
     UnknownRegion(String),
+    #[error("invalid frame: {0}")]
+    InvalidFrame(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -176,15 +176,17 @@ impl ServerState {
             return false;
         }
         instance.agent_type = foreground.agent_type;
-        instance.title = if foreground.agent_type == AgentType::Shell {
-            identity.title.clone()
-        } else {
-            muxlane_core::builtin_presets("")
-                .into_iter()
-                .find(|preset| preset.program == foreground.agent_type.program())
-                .map(|preset| preset.label)
-                .unwrap_or_else(|| foreground.agent_type.as_str().into())
-        };
+        if !instance.title_is_custom {
+            instance.title = if foreground.agent_type == AgentType::Shell {
+                identity.title.clone()
+            } else {
+                muxlane_core::builtin_presets("")
+                    .into_iter()
+                    .find(|preset| preset.program == foreground.agent_type.program())
+                    .map(|preset| preset.label)
+                    .unwrap_or_else(|| foreground.agent_type.as_str().into())
+            };
+        }
         // Replay still contains the previous application's OSC and prompt. Do not
         // immediately overwrite the new title with that old output.
         identity.last_osc = osc_title.map(str::to_owned);
@@ -223,7 +225,7 @@ impl ServerState {
                 let Some(instance) = self.agents.iter_mut().find(|item| &item.id == agent) else {
                     return false;
                 };
-                if instance.title == title {
+                if instance.title_is_custom || instance.title == title {
                     false
                 } else {
                     instance.title = title;
@@ -373,6 +375,60 @@ impl ServerState {
         vec![msg]
     }
 
+    /// 结构化 Chat 驱动产生状态变化时同步写入 ServerState 并广播通知事件。
+    pub fn apply_chat_status(
+        &mut self,
+        agent: &AgentId,
+        to: AgentStatus,
+        message: Option<String>,
+        reset_seen: bool,
+    ) -> Vec<EventMsg> {
+        let Some(inst) = self.agents.iter_mut().find(|a| a.id == *agent) else {
+            return vec![];
+        };
+        let from = inst.status;
+        if from == to && message.is_none() {
+            return vec![];
+        }
+        inst.status = to;
+        inst.status_since = muxlane_core::model::now_secs();
+        if matches!(to, AgentStatus::Working | AgentStatus::Blocked) {
+            self.read_results.remove(agent);
+        }
+        if reset_seen && (to.is_finished() || to == AgentStatus::Blocked) {
+            inst.seen = false;
+        }
+        let msg = EventMsg::new(
+            muxlane_core::protocol::events::AGENT_STATUS,
+            serde_json::to_value(muxlane_core::protocol::AgentStatusEvent {
+                agent: agent.clone(),
+                agent_type: Some(inst.agent_type),
+                from,
+                to,
+                message,
+            })
+            .unwrap_or_default(),
+        );
+        let _ = self.events.send(msg.clone());
+        vec![msg]
+    }
+
+    /// 结构化 Chat 驱动传回的自动标题（用户手动重命名后不覆盖）。
+    pub fn apply_chat_title(&mut self, agent: &AgentId, title: String) -> bool {
+        let title = title.trim();
+        if title.is_empty() {
+            return false;
+        }
+        let Some(inst) = self.agents.iter_mut().find(|a| a.id == *agent) else {
+            return false;
+        };
+        if inst.title_is_custom || inst.title == title {
+            return false;
+        }
+        inst.title = title.to_string();
+        true
+    }
+
     /// agent 会话退出 → 移除并返回 TermExit 事件
     pub fn agent_exit(&mut self, agent: &AgentId) -> Vec<EventMsg> {
         self.remove_agent(agent);
@@ -420,6 +476,7 @@ mod tests {
                 project: "p".into(),
                 agent_type: AgentType::Pie,
                 title: "Pie".into(),
+                title_is_custom: false,
                 status: AgentStatus::Idle,
                 status_since: 0,
                 seen: true,
@@ -499,6 +556,7 @@ mod tests {
                 project: "p".into(),
                 agent_type: AgentType::Shell,
                 title: "Shell".into(),
+                title_is_custom: false,
                 status: AgentStatus::Idle,
                 status_since: 0,
                 seen: true,
@@ -593,6 +651,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_titles_survive_foreground_and_osc_updates_without_blocking_detection() {
+        let mut state = ServerState::new(MachineInfo {
+            machine_id: "test".into(),
+            name: "test".into(),
+            os: "test".into(),
+            version: "test".into(),
+        });
+        let id = "shell_custom".to_string();
+        state.agents.push(AgentInstance {
+            id: id.clone(),
+            project: "p".into(),
+            agent_type: AgentType::Shell,
+            title: "修复登录问题".into(),
+            title_is_custom: true,
+            status: AgentStatus::Idle,
+            status_since: 0,
+            seen: true,
+            tmux_session: None,
+        });
+        for agent_type in [AgentType::Pi, AgentType::Shell, AgentType::Codex] {
+            assert!(state.observe_foreground(
+                &id,
+                &crate::foreground::ShellForeground {
+                    shell: "zsh".into(),
+                    agent_type,
+                },
+                None,
+            ));
+            assert_eq!(state.agents[0].agent_type, agent_type);
+            let screen = muxlane_core::detect::ScreenInput {
+                osc_title: Some("automatic title".into()),
+                ..Default::default()
+            };
+            state.observe_screen(&id, &screen);
+            assert_eq!(state.agents[0].title, "修复登录问题");
+            assert!(state.agents[0].title_is_custom);
+        }
+        assert_eq!(
+            state
+                .report_hook(&AgentReportParams {
+                    token: "unused".into(),
+                    agent: id,
+                    event: "working".into(),
+                    message: None,
+                })
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(state.agents[0].status, AgentStatus::Working);
+        assert_eq!(state.agents[0].title, "修复登录问题");
+    }
+
+    #[tokio::test]
     async fn acknowledged_result_hooks_only_enrich_until_the_next_run() {
         for event in ["done", "failed"] {
             let mut state = ServerState::new(MachineInfo {
@@ -615,6 +727,7 @@ mod tests {
                     project: "p".into(),
                     agent_type: AgentType::Shell,
                     title: "Shell".into(),
+                    title_is_custom: false,
                     status: AgentStatus::Idle,
                     status_since: 0,
                     seen: true,
@@ -688,6 +801,7 @@ mod tests {
                     project: project_id.into(),
                     agent_type: muxlane_core::model::AgentType::Shell,
                     title: agent_id.into(),
+                    title_is_custom: false,
                     status: AgentStatus::Idle,
                     status_since: 0,
                     seen: true,
@@ -722,6 +836,7 @@ mod tests {
                 project: "p".into(),
                 agent_type: muxlane_core::model::AgentType::Pi,
                 title: "Pi".into(),
+                title_is_custom: false,
                 status: AgentStatus::Idle,
                 status_since: 0,
                 seen: true,
@@ -812,6 +927,7 @@ mod tests {
             project: "p".into(),
             agent_type: muxlane_core::model::AgentType::Claude,
             title: "Claude".into(),
+            title_is_custom: false,
             status: AgentStatus::Working,
             status_since: 0,
             seen: true,

@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/muxlane-core",
+    "crates/muxlane-chat",
+    "crates/muxlane-bots",
     "crates/muxlane-term",
     "crates/muxlane-server",
     "crates/muxlane-client",
@@ -36,8 +38,14 @@ regex = "1"
 tempfile = "3"
 hmac = "0.12"
 sha2 = "0.10"
+hkdf = "0.12"
+aes-gcm = "0.10"
+p256 = { version = "0.13", features = ["ecdh"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 rand = "0.9"
 fs2 = "0.4"
+pulldown-cmark = { version = "0.13", default-features = false }
+similar = "2"
 
 [profile.release]
 opt-level = 3

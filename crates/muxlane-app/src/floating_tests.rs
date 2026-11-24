@@ -18,6 +18,7 @@ fn populate(app: &mut MuxlaneApp, window: &mut Window, cx: &mut Context<MuxlaneA
             id: id.into(),
             project: project.into(),
             title: id.into(),
+            title_is_custom: false,
             agent_type: AgentType::Shell,
             status: AgentStatus::Idle,
             status_since: 0,
@@ -94,6 +95,16 @@ fn detach_moves_session_to_native_window_and_keeps_main_window_size() {
         let mut visual = gpui::VisualTestContext::from_window(window, cx);
         assert!(visual.debug_bounds("detached-a1").is_some());
         assert!(visual.debug_bounds("detached-a2").is_none());
+        cx.update(|cx| {
+            view.update(cx, |app, cx| {
+                app.last_snapshot.agent_mut(&"a1".into()).unwrap().title = "修复登录".into();
+                cx.notify();
+            });
+        });
+        draw(cx, window);
+        let handle = cx.update(|cx| view.read(cx).floating.windows["a1"]);
+        let mut detached = gpui::VisualTestContext::from_window(handle.into(), cx);
+        assert_eq!(detached.window_title().as_deref(), Some("修复登录"));
     });
 }
 

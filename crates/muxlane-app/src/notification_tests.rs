@@ -31,6 +31,7 @@ fn remote_snapshot(status: AgentStatus, since: u64) -> muxlane_core::model::Snap
                 project: "remote-project".into(),
                 agent_type: AgentType::Shell,
                 title: id.into(),
+                title_is_custom: false,
                 status,
                 status_since: since,
                 seen: false,
@@ -73,6 +74,65 @@ fn status_event(
 }
 
 #[test]
+fn inactive_main_window_does_not_swallow_the_selected_sessions_result() {
+    with_app(|cx, window, app| {
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.sound_enabled = false;
+                app.last_snapshot.projects = vec![project("local")];
+                app.last_snapshot.agents.push(AgentInstance {
+                    id: "selected".into(),
+                    project: "local".into(),
+                    agent_type: AgentType::Pi,
+                    title: "selected".into(),
+                    title_is_custom: false,
+                    status: AgentStatus::Working,
+                    status_since: 10,
+                    seen: true,
+                    tmux_session: None,
+                });
+                let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+                let term = MuxlaneApp::create_remote_term(
+                    "selected".into(),
+                    muxlane_term::VTerm::new_with_clipboard(80, 24),
+                    sender,
+                    &app.font_family,
+                    Theme::for_mode(app.theme_mode),
+                    false,
+                    cx,
+                );
+                app.terms.insert("selected".into(), term);
+                app.open_agent(&"selected".into(), window, cx);
+            });
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, _cx| window.activate_window())
+            .unwrap();
+        draw(cx, window);
+        cx.update(|cx| {
+            assert_eq!(
+                app.read(cx)
+                    .notification_focused_agent()
+                    .map(String::as_str),
+                Some("selected")
+            );
+        });
+        gpui::VisualTestContext::from_window(window, cx).deactivate_window();
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(app.notification_focused_agent(), None);
+                app.handle_agent_status(
+                    None,
+                    status_event("selected", AgentStatus::Working, AgentStatus::Done, None),
+                    cx,
+                );
+                assert!(app.notifications.read(cx).has_activity());
+            });
+        });
+    });
+}
+
+#[test]
 fn focused_local_results_stay_read_after_window_switch_and_late_snapshot() {
     for detached in [false, true] {
         for status in [AgentStatus::Done, AgentStatus::Failed] {
@@ -87,6 +147,7 @@ fn focused_local_results_stay_read_after_window_switch_and_late_snapshot() {
                                 project: "local".into(),
                                 agent_type: AgentType::Pi,
                                 title: id.into(),
+                                title_is_custom: false,
                                 status: AgentStatus::Working,
                                 status_since: 10,
                                 seen: true,
@@ -531,6 +592,7 @@ fn opening_remote_results_then_adding_shell_does_not_restore_attention() {
                     project: "remote-project".into(),
                     agent_type: AgentType::Shell,
                     title: "Shell".into(),
+                    title_is_custom: false,
                     status: AgentStatus::Idle,
                     status_since: 20,
                     seen: true,
@@ -621,6 +683,7 @@ fn terminal_notification_click_keeps_terminal_routing() {
                     project: "b".into(),
                     agent_type: AgentType::Shell,
                     title: "Terminal".into(),
+                    title_is_custom: false,
                     status: AgentStatus::Done,
                     status_since: 0,
                     seen: false,

@@ -192,6 +192,10 @@ pub mod events {
     pub const TERM_RESYNC: &str = "term.resync";
     pub const TERM_REPLAY_CHUNK: &str = "term.replay_chunk";
     pub const TERM_EXIT: &str = "term.exit";
+    pub const CHAT_DELTA: &str = "chat.delta";
+    pub const CHAT_APPROVAL: &str = "chat.approval";
+    pub const BOT_UPDATED: &str = "bot.updated";
+    pub const BOT_RUN_UPDATED: &str = "bot.run_updated";
 }
 
 /// 特性名常量
@@ -199,6 +203,7 @@ pub mod features {
     pub const PROJECT_ADD: &str = "project.add";
     pub const PROJECT_CREATE: &str = "project.create_missing";
     pub const AGENT_SPAWN: &str = "agent.spawn";
+    pub const AGENT_RENAME: &str = "agent.rename";
     pub const TERM_INPUT: &str = "term.input";
     pub const TERM_RESIZE: &str = "term.resize";
     /// 远端支持 agent.mark_seen：已读状态真正写回服务端（Done/Failed→Idle），
@@ -211,6 +216,11 @@ pub mod features {
     pub const TERM_DIFF: &str = "term.diff";
     pub const PAIR: &str = "pair.begin";
     pub const PRESET_LIST: &str = "preset.list";
+    pub const CHAT_TIMELINE: &str = "chat.timeline";
+    pub const CHAT_SEND: &str = "chat.send";
+    pub const CHAT_APPROVAL: &str = "chat.approval";
+    pub const E2EE: &str = "e2ee";
+    pub const BOTS: &str = "bots";
 }
 /// 方法名常量
 pub mod methods {
@@ -224,11 +234,28 @@ pub mod methods {
     pub const AGENT_REPORT: &str = "agent.report";
     pub const AGENT_SPAWN: &str = "agent.spawn";
     pub const AGENT_DELETE: &str = "agent.delete";
+    pub const AGENT_RENAME: &str = "agent.rename";
     pub const AGENT_MARK_SEEN: &str = "agent.mark_seen";
     pub const PROJECT_ADD: &str = "project.add";
     pub const PROJECT_DELETE: &str = "project.delete";
     pub const PAIR_BEGIN: &str = "pair.begin";
+    pub const E2EE_UPGRADE: &str = "e2ee.upgrade";
     pub const PRESET_LIST: &str = "preset.list";
+    pub const CHAT_SPAWN: &str = "chat.spawn";
+    pub const CHAT_LIST: &str = "chat.list";
+    pub const CHAT_HISTORY: &str = "chat.history";
+    pub const CHAT_SUBSCRIBE: &str = "chat.subscribe";
+    pub const CHAT_UNSUBSCRIBE: &str = "chat.unsubscribe";
+    pub const CHAT_SEND: &str = "chat.send";
+    pub const CHAT_ABORT: &str = "chat.abort";
+    pub const CHAT_APPROVE: &str = "chat.approve";
+    pub const CHAT_CONFIGURE: &str = "chat.configure";
+    pub const CHAT_SWITCH_MODE: &str = "chat.switch_mode";
+    pub const BOT_LIST: &str = "bot.list";
+    pub const BOT_SAVE: &str = "bot.save";
+    pub const BOT_DELETE: &str = "bot.delete";
+    pub const BOT_TRIGGER: &str = "bot.trigger";
+    pub const BOT_RUNS: &str = "bot.runs";
 }
 
 // ── 方法参数/结果 ─────────────────────────────
@@ -238,6 +265,8 @@ pub struct HelloResult {
     pub version: String,
     pub protocol: u32,
     pub features: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan_ws_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -487,6 +516,12 @@ pub struct AgentDeleteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRenameParams {
+    pub agent: AgentId,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMarkSeenParams {
     pub agent: AgentId,
 }
@@ -556,11 +591,187 @@ pub struct PairBeginParams {
 pub struct PairBeginResult {
     pub token: String,
     pub machine: crate::model::MachineInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan_ws_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetListParams {
     pub project: ProjectId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSpawnParams {
+    pub project: ProjectId,
+    #[serde(default)]
+    pub agent_type: Option<crate::model::AgentType>,
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    pub preset_name: Option<String>,
+    #[serde(default)]
+    pub driver: Option<crate::chat::ChatDriverKind>,
+    #[serde(default)]
+    pub provider_session: Option<String>,
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub thinking_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSessionSummary {
+    pub agent: AgentId,
+    pub meta: crate::chat::ChatSessionMeta,
+    #[serde(default)]
+    pub pending_approvals: usize,
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatListResult {
+    #[serde(default)]
+    pub sessions: Vec<ChatSessionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatHistoryParams {
+    pub agent: AgentId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatHistoryResult {
+    pub agent: AgentId,
+    pub seq: u64,
+    pub meta: crate::chat::ChatSessionMeta,
+    #[serde(default)]
+    pub entries: Vec<crate::chat::TimelineEntry>,
+    #[serde(default)]
+    pub pending_approvals: Vec<crate::chat::PendingApproval>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSubscribeParams {
+    pub agent: AgentId,
+    #[serde(default)]
+    pub from_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSubscribeResult {
+    pub sub_id: String,
+    pub history: ChatHistoryResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatUnsubscribeParams {
+    pub sub_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSendParams {
+    pub agent: AgentId,
+    pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<crate::chat::ChatAttachment>,
+    #[serde(default)]
+    pub streaming_behavior: Option<crate::chat::StreamingBehavior>,
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAbortParams {
+    pub agent: AgentId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatApproveParams {
+    pub agent: AgentId,
+    pub approval_id: String,
+    pub reply: crate::chat::ApprovalReply,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatConfigureParams {
+    pub agent: AgentId,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub thinking_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSwitchModeParams {
+    pub agent: AgentId,
+    pub target: crate::chat::SessionDriverMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eeUpgradeParams {
+    pub client_pubkey_b64: String,
+    pub client_nonce_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eeUpgradeResult {
+    pub server_pubkey_b64: String,
+    pub server_nonce_b64: String,
+    pub cipher: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatApprovalNoticeEvent {
+    pub agent: AgentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<crate::chat::PendingApproval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotListResult {
+    pub bots: Vec<crate::bot::BotDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotSaveParams {
+    pub bot: crate::bot::BotDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotDeleteParams {
+    pub bot_id: crate::bot::BotId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotTriggerParams {
+    pub bot_id: crate::bot::BotId,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotRunsParams {
+    #[serde(default)]
+    pub bot_id: Option<crate::bot::BotId>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotRunsResult {
+    pub runs: Vec<crate::bot::BotRunRecord>,
 }
 
 // ── newline-JSON 帧编解码 ─────────────────────

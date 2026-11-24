@@ -43,6 +43,7 @@ async fn remote_host_connects_and_receives_events() {
         project: "p1".into(),
         agent_type: AgentType::Shell,
         title: "peer bash".into(),
+        title_is_custom: false,
         status: AgentStatus::Idle,
         status_since: muxlane_core::model::now_secs(),
         seen: true,
@@ -90,6 +91,28 @@ async fn remote_host_connects_and_receives_events() {
     }
     assert!(got_online, "should receive Online snapshot");
     assert!(host.supports(muxlane_core::protocol::features::PROJECT_CREATE));
+    assert!(host.supports(muxlane_core::protocol::features::AGENT_RENAME));
+    let renamed = host
+        .rename_agent(&agent_id, " 修复登录 ".into())
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "修复登录");
+    assert!(renamed.title_is_custom);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(ClientEvent::StateChanged {
+                state: RemoteState::Online(snapshot),
+                ..
+            }) = rx.recv().await
+            {
+                if snapshot.agent(&agent_id).unwrap().title == "修复登录" {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("rename should refresh the remote snapshot");
 
     let created_dir = dir.path().join("created/remotely");
     let created = host
@@ -105,6 +128,7 @@ async fn remote_host_connects_and_receives_events() {
         project: "p1".into(),
         agent_type: AgentType::Shell,
         title: "second".into(),
+        title_is_custom: false,
         status: AgentStatus::Idle,
         status_since: muxlane_core::model::now_secs(),
         seen: true,

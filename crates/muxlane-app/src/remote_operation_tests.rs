@@ -16,7 +16,7 @@ fn wait_for(cx: &mut TestAppContext, mut condition: impl FnMut(&mut TestAppConte
 }
 
 #[test]
-fn remote_mark_seen_writes_through_and_survives_client_restart() {
+fn remote_mark_seen_and_rename_write_through_and_survive_client_restart() {
     // 真实远端 server（非手写 frame），验证 agent.mark_seen 能力协商、真实写回，
     // 且一个完全新的客户端连接（模拟本地客户端重启，无任何内存缓存）仍能看到
     // Idle/seen，不会重新闪烁。
@@ -70,6 +70,7 @@ fn remote_mark_seen_writes_through_and_survives_client_restart() {
                 project: "p1".into(),
                 agent_type: AgentType::Shell,
                 title: "Terminal".into(),
+                title_is_custom: false,
                 status: AgentStatus::Done,
                 status_since: 10,
                 seen: false,
@@ -137,6 +138,28 @@ fn remote_mark_seen_writes_through_and_survives_client_restart() {
                     .seen
             );
         });
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.begin_session_rename(&agent_id, window, cx);
+                app.session_rename
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .update(cx, |input, cx| {
+                        input.set_text("远端修复任务", cx);
+                    });
+                app.submit_session_rename(window, cx);
+            });
+        })
+        .unwrap();
+        wait_for(cx, |cx| {
+            cx.update(|cx| app.read(cx).session_rename.is_none())
+        });
+        cx.update(|cx| {
+            let agent = app.read(cx).remote_snaps["peer"].agent(&agent_id).unwrap();
+            assert_eq!(agent.title, "远端修复任务");
+            assert!(agent.title_is_custom);
+        });
     });
 
     // 等待 RPC 真正写到远端 server 自己的状态（不是客户端缓存）。
@@ -193,6 +216,8 @@ fn remote_mark_seen_writes_through_and_survives_client_restart() {
         "restart must not resurrect Done/Failed"
     );
     assert!(agent.seen, "restart must not resurrect the unread flag");
+    assert_eq!(agent.title, "远端修复任务");
+    assert!(agent.title_is_custom);
 }
 
 #[test]
@@ -224,6 +249,7 @@ fn remote_forget_then_late_spawn_success_does_not_restore_layout() {
             project: "r".into(),
             agent_type: AgentType::Shell,
             title: "late".into(),
+            title_is_custom: false,
             status: AgentStatus::Idle,
             status_since: 0,
             seen: true,
@@ -331,6 +357,7 @@ fn remote_spawn_and_delete_from_gpui_without_tokio_context() {
         project: "remote-project".into(),
         agent_type: AgentType::Shell,
         title: "Terminal".into(),
+        title_is_custom: false,
         status: AgentStatus::Idle,
         status_since: 0,
         seen: true,

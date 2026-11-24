@@ -130,6 +130,7 @@ async fn launch_agent(
         project: "p_test".into(),
         agent_type: AgentType::Shell,
         title: "test".into(),
+        title_is_custom: false,
         status: AgentStatus::Idle,
         status_since: muxlane_core::model::now_secs(),
         seen: true,
@@ -1097,6 +1098,7 @@ async fn restore_sessions_publishes_one_batched_notification_with_all_sessions()
             project_id: project.id.clone(),
             agent_type: AgentType::Shell,
             title: format!("restored {i}"),
+            title_is_custom: i == 0,
             tmux_session: tmux,
         });
     }
@@ -1121,6 +1123,18 @@ async fn restore_sessions_publishes_one_batched_notification_with_all_sessions()
         .unwrap();
     // The very first notification already carries every restored session.
     let snapshot = server.snapshot().await;
+    assert!(
+        snapshot
+            .agent(&"restored_0".into())
+            .unwrap()
+            .title_is_custom
+    );
+    assert!(
+        !snapshot
+            .agent(&"restored_1".into())
+            .unwrap()
+            .title_is_custom
+    );
     let ids: std::collections::BTreeSet<_> = snapshot.agents.iter().map(|a| a.id.clone()).collect();
     assert_eq!(
         ids,
@@ -1244,4 +1258,262 @@ async fn shell_foreground_agent_identity_tracks_process_entry_exit_and_reentry()
         .unwrap()
         .failed_agents
         .is_empty());
+}
+
+#[tokio::test]
+async fn lan_ws_pair_e2ee_upgrade_and_rejects_plaintext_downgrade() {
+    use futures_util::{SinkExt, StreamExt};
+    use muxlane_core::e2ee::{random_nonce16, E2eeEnvelope, E2eeKeyPair, E2eeRole, E2eeSession};
+    use muxlane_core::protocol::{
+        b64_decode, b64_encode, features, E2eeUpgradeParams, E2eeUpgradeResult, HelloResult,
+        PairBeginResult,
+    };
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (server, _sock, _state, _dirty, _dir) = spawn_server().await;
+    let lan_url = server
+        .start_lan_ws_on("127.0.0.1:0", true)
+        .await
+        .unwrap()
+        .expect("loopback-allowed lan url should exist");
+    assert!(lan_url.starts_with("ws://127.0.0.1:"));
+    assert_eq!(server.lan_ws_url().as_deref(), Some(lan_url.as_str()));
+
+    let (ws, _) = tokio_tungstenite::connect_async(&lan_url)
+        .await
+        .expect("connect lan ws");
+    let (mut sink, mut stream) = ws.split();
+
+    let pair_req = Request {
+        id: 1,
+        method: methods::PAIR_BEGIN.into(),
+        params: serde_json::json!({
+            "host_id": "m_test",
+            "device": "android_test",
+        }),
+    };
+    sink.send(Message::Text(
+        serde_json::to_string(&pair_req).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+    let pair_frame = stream.next().await.unwrap().unwrap();
+    let pair_resp: Response = serde_json::from_str(pair_frame.to_text().unwrap()).unwrap();
+    assert!(pair_resp.error.is_none(), "{:?}", pair_resp.error);
+    let pair_res: PairBeginResult = serde_json::from_value(pair_resp.result.unwrap()).unwrap();
+    assert_eq!(pair_res.lan_ws_url.as_deref(), Some(lan_url.as_str()));
+    assert!(!pair_res.token.is_empty());
+
+    let client_kp = E2eeKeyPair::generate();
+    let client_nonce = random_nonce16();
+    let up_req = Request {
+        id: 2,
+        method: methods::E2EE_UPGRADE.into(),
+        params: serde_json::to_value(E2eeUpgradeParams {
+            client_pubkey_b64: b64_encode(client_kp.public_bytes()),
+            client_nonce_b64: b64_encode(&client_nonce),
+        })
+        .unwrap(),
+    };
+    sink.send(Message::Text(
+        serde_json::to_string(&up_req).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+    let up_frame = stream.next().await.unwrap().unwrap();
+    let up_resp: Response = serde_json::from_str(up_frame.to_text().unwrap()).unwrap();
+    assert!(up_resp.error.is_none(), "{:?}", up_resp.error);
+    let up_res: E2eeUpgradeResult = serde_json::from_value(up_resp.result.unwrap()).unwrap();
+    assert_eq!(up_res.cipher, "aes-256-gcm");
+
+    let mut client_e2ee = E2eeSession::derive(
+        E2eeRole::Client,
+        client_kp,
+        &b64_decode(&up_res.server_pubkey_b64).unwrap(),
+        &pair_res.token,
+        &client_nonce,
+        &b64_decode(&up_res.server_nonce_b64).unwrap(),
+    )
+    .unwrap();
+
+    let hello_req = Request {
+        id: 3,
+        method: methods::SYSTEM_HELLO.into(),
+        params: serde_json::json!({}),
+    };
+    let hello_env = client_e2ee.seal_json(&hello_req).unwrap();
+    sink.send(Message::Text(
+        serde_json::to_string(&hello_env).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+    let enc_frame = stream.next().await.unwrap().unwrap();
+    let env: E2eeEnvelope = serde_json::from_str(enc_frame.to_text().unwrap()).unwrap();
+    let pt = client_e2ee.open(&env).unwrap();
+    let hello_resp: Response = serde_json::from_slice(&pt).unwrap();
+    assert!(hello_resp.error.is_none(), "{:?}", hello_resp.error);
+    let hello: HelloResult = serde_json::from_value(hello_resp.result.unwrap()).unwrap();
+    assert_eq!(hello.lan_ws_url.as_deref(), Some(lan_url.as_str()));
+    assert!(hello.features.iter().any(|f| f == features::E2EE));
+
+    // Plaintext downgrade after e2ee.upgrade must be rejected.
+    let plain_req = Request {
+        id: 4,
+        method: methods::STATE_LIST.into(),
+        params: serde_json::json!({}),
+    };
+    sink.send(Message::Text(
+        serde_json::to_string(&plain_req).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+    let err_frame = stream.next().await.unwrap().unwrap();
+    let err_env: E2eeEnvelope = serde_json::from_str(err_frame.to_text().unwrap()).unwrap();
+    let err_pt = client_e2ee.open(&err_env).unwrap();
+    let err_resp: Response = serde_json::from_slice(&err_pt).unwrap();
+    assert_eq!(
+        err_resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("e2ee_required")
+    );
+}
+
+#[tokio::test]
+async fn bot_rpc_lifecycle_save_trigger_runs_and_persists() {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let (server, sock, _state, _dirty, dir) = spawn_server().await;
+    let state_path = dir.path().join("state.json");
+    server.set_persistence_path(state_path.clone());
+
+    let repo = dir.path().join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    let script = dir.path().join("bot_mock_pi.mjs");
+    std::fs::write(
+        &script,
+        r#"
+let buf = "";
+process.stdin.setEncoding("utf8");
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.indexOf("\n")) !== -1) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (!line) continue;
+    const msg = JSON.parse(line);
+    if (msg.type === "get_state") {
+      send({ id: msg.id, type: "response", command: "get_state", success: true, data: { sessionId: "b-rpc", isStreaming: false } });
+    } else if (msg.type === "get_available_models") {
+      send({ id: msg.id, type: "response", command: "get_available_models", success: true, data: { models: [] } });
+    } else if (msg.type === "get_available_thinking_levels") {
+      send({ id: msg.id, type: "response", command: "get_available_thinking_levels", success: true, data: { levels: [] } });
+    } else if (msg.type === "prompt") {
+      send({ id: msg.id, type: "response", command: "prompt", success: true, data: { disposition: "started" } });
+      send({ type: "agent_start" });
+      send({ type: "turn_start" });
+      send({ type: "message_start", message: { role: "assistant", content: [] } });
+      send({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Integration bot done." } });
+      send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Integration bot done." }] } });
+      send({ type: "agent_settled", aborted: false });
+    }
+  }
+});
+"#,
+    )
+    .unwrap();
+
+    let add_resp = rpc_call(
+        &sock,
+        methods::PROJECT_ADD,
+        serde_json::json!({ "path": repo.to_string_lossy(), "create_if_missing": false }),
+    )
+    .await;
+    let project: Project = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let mut bot = muxlane_core::BotDefinition::new(
+        "bot_int".into(),
+        "Integration Bot".into(),
+        project.id.clone(),
+    );
+    bot.program = Some("node".into());
+    bot.args = vec![script.to_string_lossy().into_owned()];
+    bot.permission = muxlane_core::BotPermissionProfile::FullAuto;
+    bot.isolated_worktree = false;
+    bot.triggers = vec![
+        muxlane_core::BotTrigger::Cron {
+            expr: "*/15 * * * *".into(),
+        },
+        muxlane_core::BotTrigger::Webhook {
+            secret: Some("sec".into()),
+        },
+    ];
+
+    let save_resp = rpc_call(
+        &sock,
+        methods::BOT_SAVE,
+        serde_json::to_value(muxlane_core::protocol::BotSaveParams { bot }).unwrap(),
+    )
+    .await;
+    assert!(save_resp.error.is_none(), "{:?}", save_resp.error);
+
+    let list_resp = rpc_call(&sock, methods::BOT_LIST, serde_json::json!({})).await;
+    let list: muxlane_core::protocol::BotListResult =
+        serde_json::from_value(list_resp.result.unwrap()).unwrap();
+    assert_eq!(list.bots.len(), 1);
+    assert_eq!(list.bots[0].id, "bot_int");
+
+    let trig_resp = rpc_call(
+        &sock,
+        methods::BOT_TRIGGER,
+        serde_json::to_value(muxlane_core::protocol::BotTriggerParams {
+            bot_id: "bot_int".into(),
+            source: Some("manual".into()),
+            payload: Some("run smoke".into()),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert!(trig_resp.error.is_none(), "{:?}", trig_resp.error);
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let runs_resp = rpc_call(
+                &sock,
+                methods::BOT_RUNS,
+                serde_json::json!({ "bot_id": "bot_int", "limit": 10 }),
+            )
+            .await;
+            let runs: muxlane_core::protocol::BotRunsResult =
+                serde_json::from_value(runs_resp.result.unwrap()).unwrap();
+            if runs
+                .runs
+                .first()
+                .is_some_and(|r| r.status == muxlane_core::BotRunStatus::Succeeded)
+            {
+                assert_eq!(
+                    runs.runs[0].summary.as_deref(),
+                    Some("Integration bot done.")
+                );
+                assert!(runs.runs[0].agent_id.is_some());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bot run did not complete");
+
+    let del_resp = rpc_call(
+        &sock,
+        methods::BOT_DELETE,
+        serde_json::json!({ "bot_id": "bot_int" }),
+    )
+    .await;
+    assert_eq!(del_resp.result.unwrap()["ok"].as_bool(), Some(true));
 }

@@ -174,6 +174,7 @@ impl MuxlaneApp {
         }
         self.settings_scale_error = false;
         self.palette_open = false;
+        self.bot_studio.open = false;
         cx.notify();
     }
 
@@ -218,12 +219,21 @@ impl MuxlaneApp {
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         self.project_input
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
+        if let Some(rename) = &self.session_rename {
+            rename
+                .input
+                .update(cx, |input, cx| input.set_theme_mode(mode, cx));
+        }
         self.remote_project_input
             .update(cx, |input, cx| input.set_theme_mode(mode, cx));
         let theme = Theme::for_mode(self.theme_mode);
         for term in self.terms.values() {
             term.update(cx, |term, cx| term.set_theme(theme, cx));
         }
+        for chat in self.chats.values() {
+            chat.update(cx, |chat, cx| chat.set_theme_mode(mode, cx));
+        }
+        self.bot_studio.set_theme_mode(mode, cx);
     }
 
     fn dismiss_settings_menus(&mut self) {
@@ -253,6 +263,10 @@ impl MuxlaneApp {
                 term.set_font_family(family, cx);
                 term.set_theme(theme, cx);
             });
+        }
+        for chat in self.chats.values() {
+            let family = family.clone();
+            chat.update(cx, |chat, cx| chat.set_mono_font(family.into(), cx));
         }
         self.persist();
         cx.notify();
@@ -314,6 +328,9 @@ impl MuxlaneApp {
             input.update(cx, |input, cx| {
                 input.set_placeholder(i18n::text(language, key), cx)
             });
+        }
+        for chat in self.chats.values() {
+            chat.update(cx, |chat, cx| chat.set_language(language, cx));
         }
         self.dismiss_settings_menus();
         self.persist();

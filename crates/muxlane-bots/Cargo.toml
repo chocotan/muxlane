@@ -1,0 +1,21 @@
+[package]
+name = "muxlane-bots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+muxlane-core = { path = "../muxlane-core" }
+muxlane-chat = { path = "../muxlane-chat" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+reqwest.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

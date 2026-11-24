@@ -458,6 +458,23 @@ pub async fn delete_agent(
     Ok(())
 }
 
+pub async fn rename_agent(
+    conn: &mut Connection,
+    agent: &muxlane_core::model::AgentId,
+    title: String,
+) -> anyhow::Result<muxlane_core::model::AgentInstance> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::AGENT_RENAME,
+            serde_json::to_value(muxlane_core::protocol::AgentRenameParams {
+                agent: agent.clone(),
+                title,
+            })?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
 pub async fn mark_agent_seen(
     conn: &mut Connection,
     agent: &muxlane_core::model::AgentId,
@@ -470,6 +487,229 @@ pub async fn mark_agent_seen(
     )
     .await?;
     Ok(())
+}
+
+pub async fn spawn_chat(
+    conn: &mut Connection,
+    params: muxlane_core::protocol::ChatSpawnParams,
+) -> anyhow::Result<muxlane_core::model::AgentInstance> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::CHAT_SPAWN,
+            serde_json::to_value(params)?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn list_chat_sessions(
+    conn: &mut Connection,
+) -> anyhow::Result<muxlane_core::protocol::ChatListResult> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::CHAT_LIST,
+            serde_json::json!(null),
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn chat_history(
+    conn: &mut Connection,
+    agent: &muxlane_core::model::AgentId,
+) -> anyhow::Result<muxlane_core::protocol::ChatHistoryResult> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::CHAT_HISTORY,
+            serde_json::to_value(muxlane_core::protocol::ChatHistoryParams {
+                agent: agent.clone(),
+            })?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn chat_send(
+    conn: &mut Connection,
+    params: muxlane_core::protocol::ChatSendParams,
+) -> anyhow::Result<()> {
+    conn.call(
+        muxlane_core::protocol::methods::CHAT_SEND,
+        serde_json::to_value(params)?,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn chat_abort(
+    conn: &mut Connection,
+    agent: &muxlane_core::model::AgentId,
+) -> anyhow::Result<()> {
+    conn.call(
+        muxlane_core::protocol::methods::CHAT_ABORT,
+        serde_json::to_value(muxlane_core::protocol::ChatAbortParams {
+            agent: agent.clone(),
+        })?,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn chat_approve(
+    conn: &mut Connection,
+    params: muxlane_core::protocol::ChatApproveParams,
+) -> anyhow::Result<()> {
+    conn.call(
+        muxlane_core::protocol::methods::CHAT_APPROVE,
+        serde_json::to_value(params)?,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn chat_configure(
+    conn: &mut Connection,
+    params: muxlane_core::protocol::ChatConfigureParams,
+) -> anyhow::Result<()> {
+    conn.call(
+        muxlane_core::protocol::methods::CHAT_CONFIGURE,
+        serde_json::to_value(params)?,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn chat_switch_mode(
+    conn: &mut Connection,
+    agent: &muxlane_core::model::AgentId,
+    target: muxlane_core::SessionDriverMode,
+) -> anyhow::Result<muxlane_core::ChatSessionMeta> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::CHAT_SWITCH_MODE,
+            serde_json::to_value(muxlane_core::protocol::ChatSwitchModeParams {
+                agent: agent.clone(),
+                target,
+            })?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn bot_list(conn: &mut Connection) -> anyhow::Result<Vec<muxlane_core::BotDefinition>> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::BOT_LIST,
+            serde_json::json!({}),
+        )
+        .await?;
+    let res: muxlane_core::protocol::BotListResult = serde_json::from_value(value)?;
+    Ok(res.bots)
+}
+
+pub async fn bot_save(
+    conn: &mut Connection,
+    bot: muxlane_core::BotDefinition,
+) -> anyhow::Result<muxlane_core::BotDefinition> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::BOT_SAVE,
+            serde_json::to_value(muxlane_core::protocol::BotSaveParams { bot })?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn bot_delete(
+    conn: &mut Connection,
+    bot_id: &muxlane_core::BotId,
+) -> anyhow::Result<bool> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::BOT_DELETE,
+            serde_json::to_value(muxlane_core::protocol::BotDeleteParams {
+                bot_id: bot_id.clone(),
+            })?,
+        )
+        .await?;
+    Ok(value["ok"].as_bool().unwrap_or(false))
+}
+
+pub async fn bot_trigger(
+    conn: &mut Connection,
+    params: muxlane_core::protocol::BotTriggerParams,
+) -> anyhow::Result<muxlane_core::BotRunRecord> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::BOT_TRIGGER,
+            serde_json::to_value(params)?,
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn bot_runs(
+    conn: &mut Connection,
+    bot_id: Option<muxlane_core::BotId>,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<muxlane_core::BotRunRecord>> {
+    let value = conn
+        .call(
+            muxlane_core::protocol::methods::BOT_RUNS,
+            serde_json::to_value(muxlane_core::protocol::BotRunsParams { bot_id, limit })?,
+        )
+        .await?;
+    let res: muxlane_core::protocol::BotRunsResult = serde_json::from_value(value)?;
+    Ok(res.runs)
+}
+
+#[derive(Debug, Clone)]
+pub enum ChatStreamUpdate {
+    History(muxlane_core::protocol::ChatHistoryResult),
+    Delta(muxlane_core::ChatDeltaEvent),
+}
+
+/// 订阅单个远端 Chat 时间线，直到连接关闭或取消。
+pub async fn stream_chat(
+    socket: &str,
+    agent: &muxlane_core::model::AgentId,
+    mut on_update: impl FnMut(ChatStreamUpdate) + Send,
+) -> Result<()> {
+    let mut conn = open(socket).await?;
+    let sub: muxlane_core::protocol::ChatSubscribeResult = serde_json::from_value(
+        conn.call(
+            muxlane_core::protocol::methods::CHAT_SUBSCRIBE,
+            serde_json::to_value(muxlane_core::protocol::ChatSubscribeParams {
+                agent: agent.clone(),
+                from_seq: None,
+            })?,
+        )
+        .await?,
+    )?;
+    let sub_id = sub.sub_id;
+    on_update(ChatStreamUpdate::History(sub.history));
+    let (mut writer, mut reader) = conn.into_split();
+    let outcome = loop {
+        match reader.next().await? {
+            Frame::Event(ev) if ev.event == muxlane_core::protocol::events::CHAT_DELTA => {
+                let d: muxlane_core::ChatDeltaEvent = serde_json::from_value(ev.params)?;
+                if d.agent == *agent {
+                    on_update(ChatStreamUpdate::Delta(d));
+                }
+            }
+            Frame::Event(ev) if ev.event == muxlane_core::protocol::events::TERM_EXIT => {
+                break Ok(());
+            }
+            Frame::Event(_) | Frame::Response(_) => {}
+        }
+    };
+    let _ = writer
+        .call(
+            muxlane_core::protocol::methods::CHAT_UNSUBSCRIBE,
+            serde_json::json!({ "sub_id": sub_id }),
+        )
+        .await;
+    outcome
 }
 
 #[cfg(test)]
@@ -535,6 +775,7 @@ mod tests {
                 project: "p1".into(),
                 agent_type: AgentType::Shell,
                 title: "old remote".into(),
+                title_is_custom: false,
                 status: AgentStatus::Idle,
                 status_since: 0,
                 seen: true,

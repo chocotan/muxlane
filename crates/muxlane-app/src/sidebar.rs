@@ -525,6 +525,8 @@ impl MuxlaneApp {
         } = session;
         let active = self.active.as_ref() == Some(&id);
         let detached = self.is_detached(&id);
+        let is_chat_session = self.is_structured_chat_agent(&id)
+            || self.agent_view_mode(&id) != muxlane_core::SessionViewMode::Terminal;
         let detached_marker_id = format!("detached-{id}");
         let project_key = self.project_key_for_agent(&id);
         let attention = compute_attention_style(status, seen || active, theme);
@@ -571,7 +573,7 @@ impl MuxlaneApp {
                         position: clamp_menu_position(
                             event.position,
                             window.viewport_size(),
-                            size(ui_px(180.), ui_px(88.)),
+                            size(ui_px(180.), ui_px(120.)),
                         ),
                         remote,
                     });
@@ -592,6 +594,19 @@ impl MuxlaneApp {
                     .text_ellipsis()
                     .child(title),
             )
+            .when(is_chat_session, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .px_1()
+                        .bg(rgba(theme.bg0))
+                        .border_1()
+                        .border_color(rgba(theme.line))
+                        .text_size(ui_px(9.))
+                        .text_color(rgba(theme.accent))
+                        .child(i18n::text(self.language, "chat.badge")),
+                )
+            })
             .when(detached, |el| {
                 el.child(
                     div()
@@ -1317,6 +1332,53 @@ impl MuxlaneApp {
                             } else {
                                 format!("{unread_count}")
                             }),
+                    )
+                })
+            })
+            .child({
+                let active_bots = self.bot_studio.active_run_count();
+                let bots_open = self.bot_studio.open;
+                semantic_button(
+                    "open-bot-studio",
+                    i18n::text(self.language, "bots.open"),
+                    theme,
+                )
+                .when(cfg!(test), |button| {
+                    button.debug_selector(|| "ux-open-bot-studio".into())
+                })
+                .relative()
+                .flex_none()
+                .w(ui_px(32.))
+                .h(ui_px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(theme.bg2)))
+                .active(|s| s.bg(rgba(theme.bg3)))
+                .when(bots_open, |el| el.bg(rgba(theme.bg2)))
+                .tooltip(hover_tip(i18n::text(self.language, "bots.open"), theme))
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.open_bot_studio(window, cx);
+                }))
+                .child(panel_icon(
+                    BOT_ICON,
+                    if bots_open || active_bots > 0 {
+                        theme.accent
+                    } else {
+                        theme.fg1
+                    },
+                ))
+                .when(active_bots > 0, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(ui_px(2.))
+                            .right(ui_px(2.))
+                            .w(ui_px(6.))
+                            .h(ui_px(6.))
+                            .bg(rgba(theme.accent)),
                     )
                 })
             })

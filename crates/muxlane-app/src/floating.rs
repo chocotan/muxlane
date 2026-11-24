@@ -14,7 +14,9 @@ use muxlane_store::FloatingLayout;
 use std::collections::{BTreeMap, HashSet};
 
 pub(crate) struct SessionWindow {
-    pub(crate) term: Entity<TermView>,
+    pub(crate) term: Option<Entity<TermView>>,
+    pub(crate) chat: Option<Entity<crate::chat::ChatView>>,
+    pub(crate) view_mode: muxlane_core::SessionViewMode,
     controller: WeakEntity<MuxlaneApp>,
     agent: AgentId,
 }
@@ -160,7 +162,35 @@ impl Render for SessionWindow {
                     });
                 }),
             )
-            .child(self.term.clone())
+            .child(match self.view_mode {
+                muxlane_core::SessionViewMode::Chat => self
+                    .chat
+                    .clone()
+                    .map(IntoElement::into_any_element)
+                    .or_else(|| self.term.clone().map(IntoElement::into_any_element))
+                    .unwrap_or_else(|| div().into_any_element()),
+                muxlane_core::SessionViewMode::Split => {
+                    let chat_el = self.chat.clone().map(IntoElement::into_any_element);
+                    let term_el = self.term.clone().map(IntoElement::into_any_element);
+                    match (chat_el, term_el) {
+                        (Some(c), Some(t)) => div()
+                            .size_full()
+                            .flex()
+                            .child(div().flex_1().min_w_0().h_full().child(c))
+                            .child(div().flex_1().min_w_0().h_full().child(t))
+                            .into_any_element(),
+                        (Some(c), None) => c,
+                        (None, Some(t)) => t,
+                        (None, None) => div().into_any_element(),
+                    }
+                }
+                muxlane_core::SessionViewMode::Terminal => self
+                    .term
+                    .clone()
+                    .map(IntoElement::into_any_element)
+                    .or_else(|| self.chat.clone().map(IntoElement::into_any_element))
+                    .unwrap_or_else(|| div().into_any_element()),
+            })
     }
 }
 
@@ -172,6 +202,8 @@ pub(crate) struct FloatingState {
     pub(crate) windows: BTreeMap<AgentId, gpui::WindowHandle<SessionWindow>>,
     /// Which detached window currently holds OS keyboard focus (drives read-state and toasts).
     pub(crate) focused: Option<(AgentId, gpui::WindowId)>,
+    /// Whether the main window owns OS keyboard focus.
+    pub(crate) main_active: bool,
     pending: bool,
     requested_focus: Option<AgentId>,
     /// The main window (sidebar + content). Never resized by the app.
@@ -198,6 +230,7 @@ impl FloatingState {
                     )
                 })
                 .collect(),
+            main_active: true,
             ..Default::default()
         }
     }
@@ -268,29 +301,40 @@ impl FloatingState {
 fn reconcile_windows(controller: WeakEntity<MuxlaneApp>, cx: &mut App) {
     // Never open/draw a window while the controller is borrowed: open_window draws immediately.
     let Ok((main, existing, desired, requested)) = controller.update(cx, |app, cx| {
-        let desired = app.floating.detached_agents();
-        let mut terminals = Vec::new();
-        for agent in desired {
-            app.ensure_agent_terminal(&agent, cx);
-            if let Some(term) = app.terms.get(&agent) {
+        let desired_agents = app.floating.detached_agents();
+        let mut specs = Vec::new();
+        for agent in desired_agents {
+            let view_mode = app.agent_view_mode(&agent);
+            if matches!(
+                view_mode,
+                muxlane_core::SessionViewMode::Terminal | muxlane_core::SessionViewMode::Split
+            ) {
+                app.ensure_agent_terminal(&agent, cx);
+            }
+            let term = app.terms.get(&agent).cloned();
+            let chat = app.chats.get(&agent).cloned();
+            if term.is_some()
+                || chat.is_some()
+                || view_mode != muxlane_core::SessionViewMode::Terminal
+            {
                 let title = app
                     .session_summary(&agent)
                     .map(|s| s.0)
                     .unwrap_or_else(|| agent.clone());
-                terminals.push((agent, term.clone(), title));
+                specs.push((agent, term, chat, view_mode, title));
             }
         }
         (
             app.floating.main,
             app.floating.windows.clone(),
-            terminals,
+            specs,
             app.floating.requested_focus.take(),
         )
     }) else {
         return;
     };
     for (agent, handle) in existing {
-        if !desired.iter().any(|(id, _, _)| id == &agent) {
+        if !desired.iter().any(|(id, _, _, _, _)| id == &agent) {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
             let _ = controller.update(cx, |app, _| {
                 app.floating.windows.remove(&agent);
@@ -310,7 +354,7 @@ fn reconcile_windows(controller: WeakEntity<MuxlaneApp>, cx: &mut App) {
             });
         }
     }
-    for (agent, term, title) in desired {
+    for (agent, term, chat, view_mode, title) in desired {
         let Ok((existing, still_detached)) = controller.update(cx, |app, _| {
             (
                 app.floating.windows.get(&agent).copied(),
@@ -323,6 +367,14 @@ fn reconcile_windows(controller: WeakEntity<MuxlaneApp>, cx: &mut App) {
             continue;
         }
         let handle = if let Some(handle) = existing {
+            let _ = handle.update(cx, |root, window, _| {
+                root.term = term.clone();
+                if chat.is_some() {
+                    root.chat = chat.clone();
+                }
+                root.view_mode = view_mode;
+                window.set_window_title(&title);
+            });
             Some(handle)
         } else {
             let owner = controller.clone();
@@ -377,9 +429,44 @@ fn reconcile_windows(controller: WeakEntity<MuxlaneApp>, cx: &mut App) {
                     },
                     move |window, cx| {
                         window.set_window_title(&title);
+                        let chat = if matches!(
+                            view_mode,
+                            muxlane_core::SessionViewMode::Chat
+                                | muxlane_core::SessionViewMode::Split
+                        ) {
+                            chat.or_else(|| {
+                                owner
+                                    .update(cx, |app, cx| {
+                                        app.ensure_agent_chat(&id, window, cx);
+                                        app.chats.get(&id).cloned()
+                                    })
+                                    .ok()
+                                    .flatten()
+                            })
+                        } else {
+                            chat
+                        };
                         // Keyboard focus is local to this window; creation must not activate the OS window.
-                        term.update(cx, |_, cx| cx.notify());
-                        term.focus_handle(cx).focus(window, cx);
+                        let focus_handle = match view_mode {
+                            muxlane_core::SessionViewMode::Chat => chat
+                                .as_ref()
+                                .map(|c| c.focus_handle(cx))
+                                .or_else(|| term.as_ref().map(|t| t.focus_handle(cx))),
+                            muxlane_core::SessionViewMode::Terminal
+                            | muxlane_core::SessionViewMode::Split => term
+                                .as_ref()
+                                .map(|t| t.focus_handle(cx))
+                                .or_else(|| chat.as_ref().map(|c| c.focus_handle(cx))),
+                        };
+                        if let Some(term) = &term {
+                            term.update(cx, |_, cx| cx.notify());
+                        }
+                        if let Some(chat) = &chat {
+                            chat.update(cx, |_, cx| cx.notify());
+                        }
+                        if let Some(fh) = focus_handle {
+                            fh.focus(window, cx);
+                        }
                         let window_id = window.window_handle().window_id();
                         window.on_window_should_close(cx, move |window, cx| {
                             let owner = close_owner.clone();
@@ -395,6 +482,8 @@ fn reconcile_windows(controller: WeakEntity<MuxlaneApp>, cx: &mut App) {
                         });
                         cx.new(|_| SessionWindow {
                             term,
+                            chat,
+                            view_mode,
                             controller: owner,
                             agent: id,
                         })
@@ -425,7 +514,22 @@ fn reconcile_windows(controller: WeakEntity<MuxlaneApp>, cx: &mut App) {
                 let focus_owner = controller.clone();
                 let _ = handle.update(cx, |root, window, cx| {
                     window.activate_window();
-                    root.term.focus_handle(cx).focus(window, cx);
+                    let fh = match root.view_mode {
+                        muxlane_core::SessionViewMode::Chat => root
+                            .chat
+                            .as_ref()
+                            .map(|c| c.focus_handle(cx))
+                            .or_else(|| root.term.as_ref().map(|t| t.focus_handle(cx))),
+                        muxlane_core::SessionViewMode::Terminal
+                        | muxlane_core::SessionViewMode::Split => root
+                            .term
+                            .as_ref()
+                            .map(|t| t.focus_handle(cx))
+                            .or_else(|| root.chat.as_ref().map(|c| c.focus_handle(cx))),
+                    };
+                    if let Some(fh) = fh {
+                        fh.focus(window, cx);
+                    }
                     let _ = focus_owner.update(cx, |app, cx| app.focus_agent(&agent, window, cx));
                 });
             }
@@ -676,12 +780,17 @@ impl MuxlaneApp {
     }
 
     /// Which agent "the user is looking at" for read-state and toast suppression.
+    /// A backgrounded main window is not looking at its selected tab.
     pub(crate) fn notification_focused_agent(&self) -> Option<&AgentId> {
-        self.floating
-            .focused
+        if let Some((agent, _)) = &self.floating.focused {
+            return Some(agent);
+        }
+        if !self.floating.main_active {
+            return None;
+        }
+        self.active
             .as_ref()
-            .map(|(agent, _)| agent)
-            .or(self.active.as_ref())
+            .filter(|agent| !self.is_detached(agent))
     }
 
     pub(crate) fn handle_terminal_focus(

@@ -890,7 +890,10 @@ mod tests {
         let modes = scan_input_modes(modes, b"\x1b[?1003l");
         assert!(!modes.motion && modes.drag);
         // 应用退出时整组关闭，前缀归空。
-        let modes = scan_input_modes(modes, b"\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1l");
+        let modes = scan_input_modes(
+            modes,
+            b"\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?1l",
+        );
         assert_eq!(modes, InputModes::default());
         assert!(modes.prefix().is_empty());
     }
@@ -964,9 +967,11 @@ mod tests {
         // 应用自己抓鼠标（pie 就是）时双击/三击也要给应用，不能又被 tmux 抢去选词。
         for click in ["DoubleClick1Pane", "TripleClick1Pane"] {
             assert!(
-                config.lines().any(|line| line.starts_with(&format!("bind-key -n {click} "))
-                    && line.contains("mouse_any_flag")
-                    && line.contains("copy-mode -H")),
+                config
+                    .lines()
+                    .any(|line| line.starts_with(&format!("bind-key -n {click} "))
+                        && line.contains("mouse_any_flag")
+                        && line.contains("copy-mode -H")),
                 "{click} must yield to mouse-aware apps"
             );
         }

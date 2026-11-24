@@ -75,6 +75,7 @@ async fn desktop_pairs_and_connects_over_relay() {
             project: "p1".into(),
             agent_type: AgentType::Shell,
             title: "relay bash".into(),
+            title_is_custom: false,
             status: AgentStatus::Idle,
             status_since: muxlane_core::model::now_secs(),
             seen: true,

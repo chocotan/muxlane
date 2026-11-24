@@ -46,6 +46,77 @@ impl AgentPreset {
     pub fn installed_in(&self, cwd: &Path) -> bool {
         self.executable_in(cwd).is_some()
     }
+
+    /// Which structured native chat driver this preset supports (Pi RPC or generic ACP).
+    pub fn chat_driver_kind(&self) -> Option<crate::chat::ChatDriverKind> {
+        match self.agent_type {
+            AgentType::Pi | AgentType::Pie => Some(crate::chat::ChatDriverKind::PiRpc),
+            AgentType::Opencode
+            | AgentType::Gemini
+            | AgentType::Qwen
+            | AgentType::Kimi
+            | AgentType::Agy => Some(crate::chat::ChatDriverKind::Acp),
+            AgentType::Claude | AgentType::Codex | AgentType::Shell | AgentType::Unknown => None,
+        }
+    }
+
+    /// Build CLI arguments for starting this agent in structured chat mode.
+    pub fn chat_launch_args(&self, session_id_or_file: Option<&str>) -> Option<Vec<String>> {
+        let mut args = self.args.clone();
+        match self.chat_driver_kind()? {
+            crate::chat::ChatDriverKind::PiRpc => {
+                if !args.iter().any(|a| a == "--mode") {
+                    args.push("--mode".into());
+                    args.push("rpc".into());
+                }
+                if let Some(session) = session_id_or_file.filter(|s| !s.is_empty()) {
+                    args.push("--session".into());
+                    args.push(session.to_string());
+                }
+            }
+            crate::chat::ChatDriverKind::Acp => match self.agent_type {
+                AgentType::Opencode => {
+                    if !args.iter().any(|a| a == "acp") {
+                        args.insert(0, "acp".into());
+                    }
+                }
+                _ => {
+                    if !args
+                        .iter()
+                        .any(|a| a == "--acp" || a == "--experimental-acp")
+                    {
+                        args.push("--acp".into());
+                    }
+                }
+            },
+        }
+        Some(args)
+    }
+
+    /// Build interactive TUI CLI arguments to resume an existing provider session in terminal mode.
+    pub fn terminal_resume_args(&self, session_id_or_file: &str) -> Vec<String> {
+        let mut args = self.args.clone();
+        match self.agent_type {
+            AgentType::Pi | AgentType::Pie => {
+                args.push("--session".into());
+                args.push(session_id_or_file.to_string());
+            }
+            AgentType::Opencode => {
+                args.push("-s".into());
+                args.push(session_id_or_file.to_string());
+            }
+            AgentType::Gemini | AgentType::Qwen => {
+                args.push("-r".into());
+                args.push(session_id_or_file.to_string());
+            }
+            AgentType::Kimi | AgentType::Agy => {
+                args.push("--resume".into());
+                args.push(session_id_or_file.to_string());
+            }
+            _ => {}
+        }
+        args
+    }
 }
 
 pub fn builtin_presets(shell: impl Into<String>) -> Vec<AgentPreset> {

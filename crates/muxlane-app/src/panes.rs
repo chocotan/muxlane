@@ -607,7 +607,7 @@ impl MuxlaneApp {
                                 this.activate_agent(&pane, &id, window, cx);
                             }
                         }))
-                        // 右键：弹出/收回、删除
+                        // 右键：重命名、弹出/收回、删除
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener({
@@ -621,7 +621,7 @@ impl MuxlaneApp {
                                         position: crate::menus::clamp_menu_position(
                                             event.position,
                                             window.viewport_size(),
-                                            gpui::size(ui_px(180.), ui_px(88.)),
+                                            gpui::size(ui_px(180.), ui_px(120.)),
                                         ),
                                         remote,
                                     });
@@ -844,10 +844,75 @@ impl MuxlaneApp {
                         )
                     });
 
+                let view_switcher = active_id.as_ref().and_then(|id| {
+                    if !self.agent_supports_chat(id) {
+                        return None;
+                    }
+                    let current = self.agent_view_mode(id);
+                    let has_pty = self
+                        .find_agent(id)
+                        .is_some_and(|a| a.tmux_session.is_some());
+                    let modes: Vec<(muxlane_core::SessionViewMode, &str)> = if has_pty {
+                        vec![
+                            (muxlane_core::SessionViewMode::Chat, "chat.tab_chat"),
+                            (muxlane_core::SessionViewMode::Split, "chat.tab_split"),
+                            (muxlane_core::SessionViewMode::Terminal, "chat.tab_term"),
+                        ]
+                    } else {
+                        vec![
+                            (muxlane_core::SessionViewMode::Chat, "chat.tab_chat"),
+                            (muxlane_core::SessionViewMode::Terminal, "chat.tab_term"),
+                        ]
+                    };
+                    let mut group = div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .h(ui_px(20.))
+                        .mr_1()
+                        .border_1()
+                        .border_color(rgba(theme.line))
+                        .bg(rgba(theme.bg0));
+                    for (idx, (mode, key)) in modes.into_iter().enumerate() {
+                        let active_mode = current == mode;
+                        let target_agent = id.clone();
+                        let label = i18n::text(self.language, key);
+                        if idx > 0 {
+                            group = group.child(div().w(ui_px(1.)).h_full().bg(rgba(theme.line)));
+                        }
+                        group = group.child(
+                            div()
+                                .id(gpui::ElementId::Name(
+                                    format!("pane-mode-{pane_id}-{idx}").into(),
+                                ))
+                                .px_1p5()
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .cursor_pointer()
+                                .text_size(ui_px(10.))
+                                .when(active_mode, |el| {
+                                    el.bg(rgba(theme.accent)).text_color(rgba(theme.on_accent))
+                                })
+                                .when(!active_mode, |el| {
+                                    el.text_color(rgba(theme.fg1)).hover(|s| {
+                                        s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0))
+                                    })
+                                })
+                                .on_click(cx.listener(move |this, _ev, window, cx| {
+                                    this.set_session_view_mode(&target_agent, mode, window, cx);
+                                }))
+                                .child(label),
+                        );
+                    }
+                    Some(group)
+                });
+
                 let tabs = div()
                     .flex()
                     .flex_none()
                     .min_w_0()
+                    .items_center()
                     .h(ui_px(28.))
                     .bg(rgba(theme.bg1))
                     .border_b_1()
@@ -855,6 +920,7 @@ impl MuxlaneApp {
                     .child(tabs)
                     .child(new_tab)
                     .child(div().flex_1())
+                    .when_some(view_switcher, |el, sw| el.child(sw))
                     .child(tools);
 
                 let active_summary = active_id.as_ref().and_then(|id| self.session_summary(id));
@@ -869,12 +935,52 @@ impl MuxlaneApp {
                     || self.active.as_ref() == active_id.as_ref();
                 let pane_att = compute_attention_style(active_status, active_seen, theme);
 
-                let content = active_id.as_ref().and_then(|id| {
-                    self.terms
-                        .get(id)
-                        .cloned()
-                        .map(IntoElement::into_any_element)
-                });
+                let content = active_id
+                    .as_ref()
+                    .and_then(|id| match self.agent_view_mode(id) {
+                        muxlane_core::SessionViewMode::Chat => self
+                            .chats
+                            .get(id)
+                            .cloned()
+                            .map(IntoElement::into_any_element)
+                            .or_else(|| {
+                                self.terms
+                                    .get(id)
+                                    .cloned()
+                                    .map(IntoElement::into_any_element)
+                            }),
+                        muxlane_core::SessionViewMode::Split => {
+                            let chat_el = self
+                                .chats
+                                .get(id)
+                                .cloned()
+                                .map(IntoElement::into_any_element);
+                            let term_el = self
+                                .terms
+                                .get(id)
+                                .cloned()
+                                .map(IntoElement::into_any_element);
+                            match (chat_el, term_el) {
+                                (Some(c), Some(t)) => Some(
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .child(div().flex_1().min_w_0().h_full().child(c))
+                                        .child(div().w(ui_px(1.)).h_full().bg(rgba(theme.line)))
+                                        .child(div().flex_1().min_w_0().h_full().child(t))
+                                        .into_any_element(),
+                                ),
+                                (Some(c), None) => Some(c),
+                                (None, Some(t)) => Some(t),
+                                (None, None) => None,
+                            }
+                        }
+                        muxlane_core::SessionViewMode::Terminal => self
+                            .terms
+                            .get(id)
+                            .cloned()
+                            .map(IntoElement::into_any_element),
+                    });
                 let tab_count = group.tabs.len();
                 let target_pane = pane_id.clone();
                 let pane_click_id = pane_id.clone();

@@ -666,6 +666,18 @@ impl RemoteHost {
         result
     }
 
+    pub async fn rename_agent(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+        title: String,
+    ) -> anyhow::Result<muxlane_core::model::AgentInstance> {
+        let mut rpc = self.rpc().await?;
+        let result =
+            crate::rename_agent(rpc.as_mut().expect("RPC initialized"), agent, title).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
     /// 将远端 agent 标记为已读（Done/Failed→Idle），真实写回服务端，并随远端
     /// 自身的状态广播与持久化。调用前请先确认 supports(AGENT_MARK_SEEN)，
     /// 旧版本远端会返回 method_not_found。
@@ -675,6 +687,129 @@ impl RemoteHost {
     ) -> anyhow::Result<()> {
         let mut rpc = self.rpc().await?;
         let result = crate::mark_agent_seen(rpc.as_mut().expect("RPC initialized"), agent).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn spawn_chat(
+        &self,
+        params: muxlane_core::protocol::ChatSpawnParams,
+    ) -> anyhow::Result<muxlane_core::model::AgentInstance> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::spawn_chat(rpc.as_mut().expect("RPC initialized"), params).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn list_chat_sessions(
+        &self,
+    ) -> anyhow::Result<muxlane_core::protocol::ChatListResult> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::list_chat_sessions(rpc.as_mut().expect("RPC initialized")).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn chat_history(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+    ) -> anyhow::Result<muxlane_core::protocol::ChatHistoryResult> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::chat_history(rpc.as_mut().expect("RPC initialized"), agent).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn chat_send(
+        &self,
+        params: muxlane_core::protocol::ChatSendParams,
+    ) -> anyhow::Result<()> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::chat_send(rpc.as_mut().expect("RPC initialized"), params).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn chat_abort(&self, agent: &muxlane_core::model::AgentId) -> anyhow::Result<()> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::chat_abort(rpc.as_mut().expect("RPC initialized"), agent).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn chat_approve(
+        &self,
+        params: muxlane_core::protocol::ChatApproveParams,
+    ) -> anyhow::Result<()> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::chat_approve(rpc.as_mut().expect("RPC initialized"), params).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn chat_configure(
+        &self,
+        params: muxlane_core::protocol::ChatConfigureParams,
+    ) -> anyhow::Result<()> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::chat_configure(rpc.as_mut().expect("RPC initialized"), params).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn chat_switch_mode(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+        target: muxlane_core::SessionDriverMode,
+    ) -> anyhow::Result<muxlane_core::ChatSessionMeta> {
+        let mut rpc = self.rpc().await?;
+        let result =
+            crate::chat_switch_mode(rpc.as_mut().expect("RPC initialized"), agent, target).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn bot_list(&self) -> anyhow::Result<Vec<muxlane_core::BotDefinition>> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::bot_list(rpc.as_mut().expect("RPC initialized")).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn bot_save(
+        &self,
+        bot: muxlane_core::BotDefinition,
+    ) -> anyhow::Result<muxlane_core::BotDefinition> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::bot_save(rpc.as_mut().expect("RPC initialized"), bot).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn bot_delete(&self, bot_id: &muxlane_core::BotId) -> anyhow::Result<bool> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::bot_delete(rpc.as_mut().expect("RPC initialized"), bot_id).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn bot_trigger(
+        &self,
+        params: muxlane_core::protocol::BotTriggerParams,
+    ) -> anyhow::Result<muxlane_core::BotRunRecord> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::bot_trigger(rpc.as_mut().expect("RPC initialized"), params).await;
+        self.handle_rpc_result(&mut rpc, &result);
+        result
+    }
+
+    pub async fn bot_runs(
+        &self,
+        bot_id: Option<muxlane_core::BotId>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<muxlane_core::BotRunRecord>> {
+        let mut rpc = self.rpc().await?;
+        let result = crate::bot_runs(rpc.as_mut().expect("RPC initialized"), bot_id, limit).await;
         self.handle_rpc_result(&mut rpc, &result);
         result
     }

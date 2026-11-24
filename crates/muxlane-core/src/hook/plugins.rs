@@ -96,6 +96,18 @@ process.env.MUXLANE_SOCKET = "/tmp/muxlane-hook-test.sock"
 process.env.MUXLANE_AGENT_ID = "parent"
 process.env.MUXLANE_HOOK_TOKEN = "token"
 
+// 拦截防抖定时器：手动 flush，不让测试真等 2.5s。
+const realSetTimeout = globalThis.setTimeout.bind(globalThis)
+const pendingTimers = new Set()
+globalThis.setTimeout = (cb) => { pendingTimers.add(cb); return cb }
+globalThis.clearTimeout = (handle) => { pendingTimers.delete(handle) }
+const flushTimers = async () => {
+  const due = [...pendingTimers]
+  pendingTimers.clear()
+  for (const cb of due) cb()
+  await new Promise((resolve) => realSetTimeout(resolve, 0))
+}
+
 const extension = await import(pathToFileURL(process.argv[2]).href)
 const context = (parentSession, name) => ({
   sessionManager: {
@@ -164,6 +176,34 @@ await emit("agent_settled", { aborted: false })
 assert.deepEqual(takeReports(), [
   { event: "working", message: "" }, { event: "failed", message: "任务异常: real error" },
 ])
+
+// 长驻后台任务（dev server）：settled 永远不来，agent_end 防抖到期必须收掉 working。
+await emit("agent_start")
+await emit("message_end", { message: { role: "assistant", content: "server up" } })
+await emit("agent_end", { messages: [] })
+assert.deepEqual(takeReports(), [{ event: "working", message: "" }])
+await flushTimers()
+assert.deepEqual(takeReports(), [{ event: "done", message: "server up" }])
+
+// 重试在防抖窗口内跟上：取消完成上报，最终由 settled 收尾。
+await emit("agent_start")
+await emit("agent_end", { messages: [] })
+await emit("agent_start")
+await flushTimers()
+assert.deepEqual(takeReports(), [
+  { event: "working", message: "" }, { event: "working", message: "" },
+])
+await emit("agent_settled", { aborted: false })
+assert.deepEqual(takeReports(), [{ event: "done", message: "任务已完成" }])
+
+// ask_user 待回答期间 agent_end：保持 blocked，不被防抖翻成 done。
+await emit("agent_start")
+await emit("tool_execution_start", {
+  toolName: "ask_user", toolCallId: "q1", args: { question: "继续吗" },
+})
+await emit("agent_end", { messages: [] })
+await flushTimers()
+assert.deepEqual(takeReports().map((item) => item.event), ["working", "blocked"])
 "#,
         )
         .unwrap();
@@ -193,7 +233,8 @@ assert.deepEqual(takeReports(), [
             std::fs::read_to_string(dir.path().join(".pie/agent/extensions/muxlane.ts")).unwrap();
         assert!(opencode.contains("client.session.messages"));
         assert_eq!(pi, pie);
-        assert!(pi.contains("willRetry !== false"));
+        assert!(pi.contains("willRetry === false"));
+        assert!(pi.contains("SETTLE_DEBOUNCE_MS"));
         assert!(pi.contains("agent_settled"));
         assert!(pi.contains("assistantText"));
         assert!(pi.contains("isLegacySubagentProcess"));

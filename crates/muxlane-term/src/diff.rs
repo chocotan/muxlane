@@ -258,12 +258,7 @@ fn render_full(snapshot: &RenderSnapshot) -> Vec<u8> {
 fn render_patch(previous: &RenderSnapshot, snapshot: &RenderSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"\x1b(B");
-    for (row, (old, new)) in previous
-        .rows
-        .iter()
-        .zip(snapshot.rows.iter())
-        .enumerate()
-    {
+    for (row, (old, new)) in previous.rows.iter().zip(snapshot.rows.iter()).enumerate() {
         if old == new {
             continue;
         }
@@ -342,7 +337,10 @@ mod tests {
         let (sent, raw) = assert_viewer_matches(&chunks);
         // The keyframe plus seven one-row patches must beat eight full repaints.
         assert!(sent < raw, "diff sent {sent} vs raw {raw}");
-        assert!(sent * 2 < raw, "expected a large win, sent {sent} vs raw {raw}");
+        assert!(
+            sent * 2 < raw,
+            "expected a large win, sent {sent} vs raw {raw}"
+        );
     }
 
     #[test]
@@ -382,8 +380,7 @@ mod tests {
             other => panic!("first frame after seed must be full, got {other:?}"),
         }
         // Same number of newlines would scroll a normal screen; alt-screen must not.
-        let second =
-            b"\x1b[Hline1\r\nline2\r\nline3\r\nline4\r\nline5\r\nline6\r\nline8";
+        let second = b"\x1b[Hline1\r\nline2\r\nline3\r\nline4\r\nline5\r\nline6\r\nline8";
         match diff.feed(second) {
             DiffFrame::Patch(_) => {}
             other => panic!("alt-screen frame must be a patch, got {other:?}"),

@@ -2,6 +2,8 @@
 mod actions;
 mod app;
 mod bootstrap;
+mod bots;
+mod chat;
 mod dialogs;
 mod editors;
 mod floating;
@@ -14,6 +16,7 @@ mod qr;
 #[allow(dead_code)]
 mod qrcodegen;
 mod remotes;
+mod session_rename;
 mod sessions;
 mod settings;
 mod shell_environment;
@@ -24,6 +27,7 @@ mod term_view;
 mod terminal_keys;
 mod text_field;
 mod theme;
+mod ui;
 mod ui_scale;
 mod widgets;
 mod workspace;
@@ -98,7 +102,8 @@ fn main() {
         .try_init()
         .ok();
 
-    if let Err(error) = shell_environment::import_login_path(&muxlane_term::default_shell_program()) {
+    if let Err(error) = shell_environment::import_login_path(&muxlane_term::default_shell_program())
+    {
         tracing::warn!(%error, "could not prepare terminal PATH");
     }
 
@@ -139,6 +144,11 @@ fn main() {
         rt.spawn(async move { srv.serve().await.expect("server died") });
     }
     server.start_supervisor();
+    rt.block_on(server.restore_bots(&persisted));
+    server.start_bot_daemons();
+    if std::env::var("MUXLANE_LAN_WS").as_deref() != Ok("0") {
+        server.start_lan_ws();
+    }
 
     bootstrap::install(&dir);
 

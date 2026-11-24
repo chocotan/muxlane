@@ -219,6 +219,10 @@ pub struct PersistedApp {
     pub remote_configs: Vec<PersistedRemote>,
     #[serde(default)]
     pub sessions: Vec<PersistedAgent>,
+    #[serde(default)]
+    pub chat_sessions: Vec<PersistedChatSession>,
+    #[serde(default)]
+    pub session_views: BTreeMap<AgentId, muxlane_core::SessionViewMode>,
     #[serde(default = "PaneNode::empty")]
     pub pane_tree: PaneNode,
     #[serde(default)]
@@ -268,6 +272,10 @@ pub struct PersistedApp {
     /// When false, keep the saved URL but do not connect. Missing means on if a URL exists.
     #[serde(default)]
     pub relay_enabled: Option<bool>,
+    #[serde(default)]
+    pub bots: Vec<muxlane_core::BotDefinition>,
+    #[serde(default)]
+    pub bot_runs: Vec<muxlane_core::BotRunRecord>,
 }
 
 impl PersistedApp {
@@ -298,10 +306,41 @@ impl PersistedApp {
                 project: saved.project_id.clone(),
                 agent_type: saved.agent_type,
                 title: saved.title.clone(),
+                title_is_custom: saved.title_is_custom,
                 status: muxlane_core::model::AgentStatus::Idle,
                 status_since: muxlane_core::model::now_secs(),
                 seen: true,
                 tmux_session: Some(saved.tmux_session.clone()),
+            });
+        }
+        for saved in &self.chat_sessions {
+            let Some(project) = snapshot
+                .projects
+                .iter_mut()
+                .find(|project| project.id == saved.project_id)
+            else {
+                continue;
+            };
+            if snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.id == saved.agent_id)
+            {
+                continue;
+            }
+            if !project.agents.contains(&saved.agent_id) {
+                project.agents.push(saved.agent_id.clone());
+            }
+            snapshot.agents.push(muxlane_core::model::AgentInstance {
+                id: saved.agent_id.clone(),
+                project: saved.project_id.clone(),
+                agent_type: saved.agent_type,
+                title: saved.title.clone(),
+                title_is_custom: saved.title_is_custom,
+                status: muxlane_core::model::AgentStatus::Idle,
+                status_since: muxlane_core::model::now_secs(),
+                seen: true,
+                tmux_session: None,
             });
         }
         snapshot
@@ -324,6 +363,7 @@ impl PersistedApp {
                         project_id: agent.project.clone(),
                         agent_type: agent.agent_type,
                         title: agent.title.clone(),
+                        title_is_custom: agent.title_is_custom,
                         tmux_session: agent.tmux_session.clone()?,
                     })
                 })
@@ -335,6 +375,7 @@ impl PersistedApp {
     pub fn with_ui_prefs_from(mut self, previous: &Self) -> Self {
         self.remotes = previous.remotes.clone();
         self.remote_configs = previous.remote_configs.clone();
+        self.session_views = previous.session_views.clone();
         self.pane_tree = previous.pane_tree.clone();
         self.active_pane = previous.active_pane.clone();
         self.window = previous.window;
@@ -358,6 +399,8 @@ impl PersistedApp {
         self.project_order = previous.project_order.clone();
         self.relay_url = previous.relay_url.clone();
         self.relay_enabled = previous.relay_enabled;
+        self.bots = previous.bots.clone();
+        self.bot_runs = previous.bot_runs.clone();
         self
     }
 }
@@ -371,6 +414,8 @@ impl Default for PersistedApp {
             remotes: vec![],
             remote_configs: vec![],
             sessions: vec![],
+            chat_sessions: vec![],
+            session_views: BTreeMap::new(),
             pane_tree: PaneNode::empty(),
             active_pane: None,
             maximized_pane: None,
@@ -394,6 +439,8 @@ impl Default for PersistedApp {
             project_order: Default::default(),
             relay_url: None,
             relay_enabled: None,
+            bots: vec![],
+            bot_runs: vec![],
         }
     }
 }
@@ -450,7 +497,27 @@ pub struct PersistedAgent {
     pub project_id: ProjectId,
     pub agent_type: AgentType,
     pub title: String,
+    #[serde(default)]
+    pub title_is_custom: bool,
     pub tmux_session: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedChatSession {
+    pub agent_id: AgentId,
+    pub project_id: ProjectId,
+    pub agent_type: AgentType,
+    pub title: String,
+    #[serde(default)]
+    pub title_is_custom: bool,
+    pub driver_kind: muxlane_core::ChatDriverKind,
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub provider_session_id: Option<String>,
+    #[serde(default)]
+    pub provider_session_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -718,6 +785,7 @@ mod tests {
                     project_id: "p1".into(),
                     agent_type: AgentType::Shell,
                     title: "a".into(),
+                    title_is_custom: true,
                     tmux_session: "muxlane-a".into(),
                 },
                 PersistedAgent {
@@ -725,6 +793,7 @@ mod tests {
                     project_id: "gone".into(),
                     agent_type: AgentType::Shell,
                     title: "orphan".into(),
+                    title_is_custom: false,
                     tmux_session: "muxlane-orphan".into(),
                 },
             ],
@@ -738,6 +807,7 @@ mod tests {
                 project: "p1".into(),
                 agent_type: AgentType::Shell,
                 title: "live".into(),
+                title_is_custom: false,
                 status: AgentStatus::Working,
                 status_since: 5,
                 seen: false,
@@ -761,13 +831,14 @@ mod tests {
         let snapshot = persisted.provisional_snapshot(cold);
         let a = snapshot.agent(&"a".into()).expect("placeholder for a");
         assert_eq!(a.status, AgentStatus::Idle);
+        assert!(a.title_is_custom);
         assert!(a.seen, "placeholders must not alert");
         assert_eq!(a.tmux_session.as_deref(), Some("muxlane-a"));
         assert_eq!(snapshot.projects[0].agents, vec!["a".to_string()]);
         // Round-trips through from_snapshot so the persisted session list is unchanged.
         let again = PersistedApp::from_snapshot(&snapshot);
         assert_eq!(again.sessions.len(), 1);
-        assert_eq!(again.sessions[0].agent_id, "a");
+        assert_eq!(again.sessions[0], persisted.sessions[0]);
     }
 
     #[test]
@@ -787,6 +858,7 @@ mod tests {
                     project: "p".into(),
                     agent_type: AgentType::Claude,
                     title: "work".into(),
+                    title_is_custom: true,
                     status: muxlane_core::model::AgentStatus::Working,
                     status_since: 1,
                     seen: false,
@@ -797,6 +869,7 @@ mod tests {
                     project: "p".into(),
                     agent_type: AgentType::Shell,
                     title: "shell".into(),
+                    title_is_custom: false,
                     status: muxlane_core::model::AgentStatus::Idle,
                     status_since: 2,
                     seen: true,
@@ -837,6 +910,7 @@ mod tests {
                 project_id: "p".into(),
                 agent_type: AgentType::Claude,
                 title: "work".into(),
+                title_is_custom: true,
                 tmux_session: "muxlane-tmux-agent".into(),
             }]
         );
@@ -861,6 +935,19 @@ mod tests {
         assert!(app.initialized);
         assert!(app.projects.is_empty());
         assert!(app.sessions.is_empty());
+    }
+
+    #[test]
+    fn legacy_sessions_default_to_automatic_titles() {
+        let app: PersistedApp = serde_json::from_value(serde_json::json!({
+            "version": STORE_VERSION,
+            "sessions": [{
+                "agent_id": "a", "project_id": "p", "agent_type": "shell",
+                "title": "zsh", "tmux_session": "muxlane-a"
+            }]
+        }))
+        .unwrap();
+        assert!(!app.sessions[0].title_is_custom);
     }
 
     #[test]
@@ -902,6 +989,7 @@ mod tests {
             project_id: "p".into(),
             agent_type: AgentType::Shell,
             title: "zsh".into(),
+            title_is_custom: true,
             tmux_session: "muxlane-a".into(),
         });
         app.window = Some(WindowGeometry {

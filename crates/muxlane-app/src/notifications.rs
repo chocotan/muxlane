@@ -197,12 +197,8 @@ impl NotificationCenter {
             self.toasts.truncate(3);
         }
 
-        if draft.sound_enabled {
-            match draft.to {
-                AgentStatus::Blocked => sound::play_sound(SoundKind::Request),
-                AgentStatus::Done | AgentStatus::Failed => sound::play_sound(SoundKind::Done),
-                _ => {}
-            }
+        if draft.sound_enabled && draft.to == AgentStatus::Blocked {
+            sound::play_sound(SoundKind::Request);
         }
         if draft.desktop_enabled {
             sound::send_desktop_notification(&toast_title, &body);

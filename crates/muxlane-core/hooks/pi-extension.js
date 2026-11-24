@@ -26,6 +26,11 @@ const isLegacySubagentProcess = process.argv.includes("--mode")
   && process.argv.includes("json")
   && process.argv.includes("--no-session")
 
+// agent_end 之后可能紧跟重试/恢复/压缩/排队的新 run，不能立刻报完成；
+// 但长驻后台任务（dev server 等）挂着时 agent_settled 永远不来，working 会悬死。
+// 折中：agent_end 后短防抖，没有新 run 跟上就按完成上报。
+const SETTLE_DEBOUNCE_MS = 2500
+
 export function isSubagentSession(ctx) {
   const header = ctx?.sessionManager?.getHeader?.()
   const name = ctx?.sessionManager?.getSessionName?.() || ""
@@ -44,6 +49,30 @@ export default function (pi) {
   let lastError = ""
   const seenAskUserCalls = new Set()
   let doneReported = false
+  let settleTimer = null
+  // ask_user 待回答期间 run 会挂起：此时 agent_end 不应被防抖翻成 done。
+  let blockedPending = false
+
+  const cancelSettle = () => {
+    if (settleTimer) {
+      clearTimeout(settleTimer)
+      settleTimer = null
+    }
+  }
+
+  const finishRun = async (event, ctx) => {
+    doneReported = true
+    if (event?.error || ctx?.error) {
+      const err = shortText(event?.error || ctx?.error || "执行出错")
+      await report("failed", `任务异常: ${err}`)
+    } else if (lastError) {
+      await report("failed", `任务异常: ${lastError}`)
+      lastError = ""
+    } else {
+      await report("done", latestAssistant || "任务已完成")
+    }
+    latestAssistant = ""
+  }
 
   pi.on("session_start", async (_event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
@@ -51,15 +80,20 @@ export default function (pi) {
     lastError = ""
     doneReported = false
     seenAskUserCalls.clear()
+    cancelSettle()
+    blockedPending = false
   })
   pi.on("turn_start", async (_event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
+    cancelSettle()
     doneReported = false
     await report("working", "")
   })
   pi.on("agent_start", async (_event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
+    cancelSettle()
     doneReported = false
+    blockedPending = false
     await report("working", "")
   })
 
@@ -73,6 +107,7 @@ export default function (pi) {
       seenAskUserCalls.add(callId)
       const args = event?.args || {}
       const question = shortText(args.question || args.message || args.prompt || "等待用户确认")
+      blockedPending = true
       await report("blocked", question)
     }
   })
@@ -95,26 +130,26 @@ export default function (pi) {
     if (shouldIgnoreRun(ctx)) return
     const text = assistantText(event?.messages || [])
     if (text) latestAssistant = shortText(text, 180)
-    // Pie's extension agent_end omits willRetry. Only old Pi, which still puts
-    // willRetry on the event, may finish here. Current Pie finishes in agent_settled.
-    if (doneReported || event?.willRetry !== false) return
-    doneReported = true
-    let msg = latestAssistant
-    if (event?.error || ctx?.error) {
-      const err = shortText(event?.error || ctx?.error || "执行出错")
-      await report("failed", `任务异常: ${err}`)
-    } else if (lastError) {
-      await report("failed", `任务异常: ${lastError}`)
-      lastError = ""
-    } else {
-      await report("done", msg || "任务已完成")
+    if (doneReported) return
+    // 旧版 Pi 用 willRetry===false 标记最终结束。
+    if (event?.willRetry === false) {
+      cancelSettle()
+      await finishRun(event, ctx)
+      return
     }
-    latestAssistant = ""
+    // Pie 的 agent_end 不带 willRetry：短防抖，重试/压缩/排队的新 run 会取消它。
+    cancelSettle()
+    settleTimer = setTimeout(() => {
+      settleTimer = null
+      // 待用户回答时保持 blocked；其余情况视为完成（后台长驻任务不阻塞状态）。
+      if (!doneReported && !blockedPending) finishRun({}, null)
+    }, SETTLE_DEBOUNCE_MS)
   })
 
   // 新版 Pi 在所有重试、压缩和排队消息结束后触发；旧版没有此事件。
   pi.on("agent_settled", async (event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
+    cancelSettle()
     if (doneReported) return
     doneReported = true
     // 用户取消也要收掉 working，但不能生成完成/失败通知。
@@ -124,16 +159,6 @@ export default function (pi) {
       await report("idle", "")
       return
     }
-    let msg = latestAssistant
-    if (event?.error || ctx?.error) {
-      const err = shortText(event?.error || ctx?.error || "执行出错")
-      await report("failed", `任务异常: ${err}`)
-    } else if (lastError) {
-      await report("failed", `任务异常: ${lastError}`)
-      lastError = ""
-    } else {
-      await report("done", msg || "任务已完成")
-    }
-    latestAssistant = ""
+    await finishRun(event, ctx)
   })
 }

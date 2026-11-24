@@ -1,9 +1,9 @@
 use crate::theme::{Theme, ThemeMode};
 use crate::ui_scale::px as ui_px;
 use gpui::{
-    canvas, div, point, prelude::*, rgba, size, Bounds, Context, ElementInputHandler,
-    EntityInputHandler, FocusHandle, Focusable, Pixels, Point, Render, SharedString, Subscription,
-    UTF16Selection, Window,
+    canvas, div, point, prelude::*, rgba, size, Bounds, ClipboardEntry, Context,
+    ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Focusable, ImageFormat,
+    Pixels, Point, Render, SharedString, Subscription, UTF16Selection, Window,
 };
 use std::ops::Range;
 
@@ -113,6 +113,13 @@ fn line_edge(content: &str, cursor: usize, home: bool) -> usize {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum TextFieldEvent {
+    Submit { steer: bool },
+    Changed,
+    PasteImage { bytes: Vec<u8>, format: ImageFormat },
+}
+
 pub struct TextField {
     focus: FocusHandle,
     content: String,
@@ -121,10 +128,14 @@ pub struct TextField {
     marked_range: Option<Range<usize>>,
     secure: bool,
     multiline: bool,
+    submit_on_enter: bool,
+    borderless: bool,
     theme_mode: ThemeMode,
     click_origin: Option<(f32, f32)>,
     _focus_subscription: Subscription,
 }
+
+impl EventEmitter<TextFieldEvent> for TextField {}
 
 impl TextField {
     pub fn new(
@@ -144,6 +155,8 @@ impl TextField {
             marked_range: None,
             secure: false,
             multiline: false,
+            submit_on_enter: false,
+            borderless: false,
             theme_mode: ThemeMode::Light,
             click_origin: None,
             _focus_subscription: focus_subscription,
@@ -157,6 +170,18 @@ impl TextField {
     ) -> Self {
         let mut field = Self::new(placeholder, window, cx);
         field.secure = true;
+        field
+    }
+
+    pub fn new_chat_composer(
+        placeholder: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut field = Self::new(placeholder, window, cx);
+        field.multiline = true;
+        field.submit_on_enter = true;
+        field.borderless = true;
         field
     }
 
@@ -178,10 +203,63 @@ impl TextField {
         self.content.clone()
     }
 
+    pub fn cursor_token_before_caret(&self) -> Option<(Range<usize>, char, String)> {
+        let caret = self.selected_range.start.min(self.content.len());
+        if !self.content.is_char_boundary(caret) || caret == 0 {
+            return None;
+        }
+        let prefix = &self.content[..caret];
+        let mut token_start = 0;
+        for (idx, ch) in prefix.char_indices().rev() {
+            if ch.is_whitespace() {
+                token_start = idx + ch.len_utf8();
+                break;
+            }
+        }
+        let token = &self.content[token_start..caret];
+        let mut chars = token.chars();
+        let trigger = chars.next()?;
+        if trigger == '@' {
+            let valid_prefix = token_start == 0
+                || self.content[..token_start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
+            return valid_prefix.then(|| (token_start..caret, trigger, chars.as_str().to_string()));
+        }
+        if trigger == '/' {
+            let line_start = token_start == 0 || self.content.as_bytes()[token_start - 1] == b'\n';
+            return line_start.then(|| (token_start..caret, trigger, chars.as_str().to_string()));
+        }
+        None
+    }
+
+    pub fn replace_byte_range(
+        &mut self,
+        range: Range<usize>,
+        replacement: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let start = range.start.min(self.content.len());
+        let end = range.end.min(self.content.len()).max(start);
+        if !self.content.is_char_boundary(start) || !self.content.is_char_boundary(end) {
+            return;
+        }
+        self.content.replace_range(start..end, replacement);
+        let cursor = start + replacement.len();
+        self.selected_range = cursor..cursor;
+        self.marked_range = None;
+        window.invalidate_character_coordinates();
+        cx.emit(TextFieldEvent::Changed);
+        cx.notify();
+    }
+
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
         self.selected_range = 0..0;
         self.marked_range = None;
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 
@@ -190,6 +268,7 @@ impl TextField {
         let len = self.content.len();
         self.selected_range = len..len;
         self.marked_range = None;
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 
@@ -326,6 +405,7 @@ impl TextField {
         self.content.replace_range(range.clone(), "");
         self.selected_range = range.start..range.start;
         self.marked_range = None;
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 
@@ -335,6 +415,7 @@ impl TextField {
             self.content.replace_range(range.clone(), "");
             self.selected_range = range.start..range.start;
             self.marked_range = None;
+            cx.emit(TextFieldEvent::Changed);
             cx.notify();
         } else if self.selected_range.start < self.content.len() {
             let start = self.selected_range.start;
@@ -346,23 +427,32 @@ impl TextField {
             self.content.replace_range(start..end, "");
             self.selected_range = start..start;
             self.marked_range = None;
+            cx.emit(TextFieldEvent::Changed);
             cx.notify();
         }
     }
 
     fn delete_to_start(&mut self, cx: &mut Context<Self>) {
         let end = self.selected_range.start;
+        if end == 0 {
+            return;
+        }
         self.content.replace_range(0..end, "");
         self.selected_range = 0..0;
         self.marked_range = None;
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 
     fn delete_to_end(&mut self, cx: &mut Context<Self>) {
         let start = self.selected_range.start;
+        if start >= self.content.len() {
+            return;
+        }
         self.content.truncate(start);
         self.selected_range = start..start;
         self.marked_range = None;
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 
@@ -383,9 +473,13 @@ impl TextField {
                 break;
             }
         }
+        if start == cursor {
+            return;
+        }
         self.content.replace_range(start..cursor, "");
         self.selected_range = start..start;
         self.marked_range = None;
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 
@@ -414,6 +508,15 @@ impl TextField {
 
     fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
+            for entry in &item.entries {
+                if let ClipboardEntry::Image(image) = entry {
+                    cx.emit(TextFieldEvent::PasteImage {
+                        bytes: image.bytes.clone(),
+                        format: image.format,
+                    });
+                    return;
+                }
+            }
             if let Some(text) = item.text() {
                 self.replace_text_in_range(None, &text, window, cx);
             }
@@ -559,6 +662,7 @@ impl EntityInputHandler for TextField {
         self.selected_range = cursor..cursor;
         self.marked_range = None;
         window.invalidate_character_coordinates();
+        cx.emit(TextFieldEvent::Changed);
         cx.notify();
     }
 
@@ -718,11 +822,14 @@ impl Render for TextField {
                 el.items_start().h_full().overflow_y_scroll().py_2()
             })
             .w_full()
-            .px_3()
-            .border_1()
-            .border_color(rgba(border_c))
-            .bg(rgba(bg_c))
-            .text_size(ui_px(12.))
+            .when(!self.borderless, |el| {
+                el.px_3()
+                    .border_1()
+                    .border_color(rgba(border_c))
+                    .bg(rgba(bg_c))
+            })
+            .when(self.borderless, |el| el.px_2p5())
+            .text_size(ui_px(if self.borderless { 13.5 } else { 12. }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -754,7 +861,13 @@ impl Render for TextField {
                 let ctrl_or_cmd = ctrl || platform;
 
                 let handled = match key {
-                    "enter" if this.multiline && !ctrl && !alt && !platform => {
+                    "enter" if this.submit_on_enter && !shift && !alt => {
+                        cx.emit(TextFieldEvent::Submit {
+                            steer: ctrl || platform,
+                        });
+                        true
+                    }
+                    "enter" if this.multiline && !alt && (!ctrl || this.submit_on_enter) => {
                         this.replace_text_in_range(None, "\n", window, cx);
                         true
                     }

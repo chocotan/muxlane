@@ -1664,8 +1664,7 @@ impl Render for TermView {
                         }
                         if let Ok(mut last) = dims.lock() {
                             // 焦点事件置脏：几何没变也要重发（多客户端尺寸属主切换）。
-                            if resize_forced.swap(false, Ordering::Relaxed)
-                                || *last != (cols, rows)
+                            if resize_forced.swap(false, Ordering::Relaxed) || *last != (cols, rows)
                             {
                                 *last = (cols, rows);
                                 vt_resize.resize(cols, rows);
@@ -2107,7 +2106,8 @@ impl Render for TermView {
                     }))
                     .on_mouse_move(
                         cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                            if let Some(start) = this.pending_link.as_ref().map(|(start, _)| *start) {
+                            if let Some(start) = this.pending_link.as_ref().map(|(start, _)| *start)
+                            {
                                 if link_click_moved(start, event.position) {
                                     // 按下在链接上、手却拖走了：不当点击看，把那次按下补报给
                                     // tmux，后面的移动就按普通拖拽继续。
@@ -2115,14 +2115,7 @@ impl Render for TermView {
                                     if let Some((line, col, _)) = this.grid_point(start) {
                                         this.forwarding_mouse = true;
                                         this.report_mouse(
-                                            0,
-                                            col,
-                                            line,
-                                            true,
-                                            false,
-                                            false,
-                                            false,
-                                            false,
+                                            0, col, line, true, false, false, false, false,
                                         );
                                     }
                                 }
@@ -2546,8 +2539,8 @@ mod tests {
         cx.executor().advance_clock(PTY_RESIZE_DEBOUNCE * 4);
         cx.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
-        let resized = std::iter::from_fn(|| receiver.try_recv().ok())
-            .find_map(|command| match command {
+        let resized =
+            std::iter::from_fn(|| receiver.try_recv().ok()).find_map(|command| match command {
                 RemoteTermCommand::Resize(cols, rows) => Some((cols, rows)),
                 _ => None,
             });
@@ -2586,7 +2579,7 @@ mod tests {
 
         // 每次焦点/激活事件都会触发 request_resize；点击若落在重绘前的那几毫秒里，
         // 旧实现把 last_dims 清零导致 grid_point 失效，点击被静默吞掉。
-        term.update(&mut cx, |term, cx| term.request_resize());
+        term.update(&mut cx, |term, _cx| term.request_resize());
         let at = visual.update(|_, cx| {
             let view = term.read(cx);
             let bounds = view.last_bounds.lock().unwrap().unwrap();
