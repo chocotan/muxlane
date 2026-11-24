@@ -44,5 +44,8 @@
             android:name=".RelayService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <receiver
+            android:name=".ApprovalActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

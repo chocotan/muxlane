@@ -20,7 +20,21 @@ object Methods {
     const val AGENT_DELETE = "agent.delete"
     const val AGENT_MARK_SEEN = "agent.mark_seen"
     const val PAIR_BEGIN = "pair.begin"
+    const val E2EE_UPGRADE = "e2ee.upgrade"
     const val PRESET_LIST = "preset.list"
+    const val CHAT_SPAWN = "chat.spawn"
+    const val CHAT_LIST = "chat.list"
+    const val CHAT_HISTORY = "chat.history"
+    const val CHAT_SUBSCRIBE = "chat.subscribe"
+    const val CHAT_UNSUBSCRIBE = "chat.unsubscribe"
+    const val CHAT_SEND = "chat.send"
+    const val CHAT_ABORT = "chat.abort"
+    const val CHAT_APPROVE = "chat.approve"
+    const val CHAT_CONFIGURE = "chat.configure"
+    const val CHAT_SWITCH_MODE = "chat.switch_mode"
+    const val BOT_LIST = "bot.list"
+    const val BOT_TRIGGER = "bot.trigger"
+    const val BOT_RUNS = "bot.runs"
 }
 
 object Events {
@@ -30,6 +44,18 @@ object Events {
     const val TERM_RESYNC = "term.resync"
     const val TERM_REPLAY_CHUNK = "term.replay_chunk"
     const val TERM_EXIT = "term.exit"
+    const val CHAT_DELTA = "chat.delta"
+    const val CHAT_APPROVAL = "chat.approval"
+    const val BOT_UPDATED = "bot.updated"
+    const val BOT_RUN_UPDATED = "bot.run_updated"
+}
+
+object Features {
+    const val CHAT_TIMELINE = "chat.timeline"
+    const val CHAT_SEND = "chat.send"
+    const val CHAT_APPROVAL = "chat.approval"
+    const val E2EE = "e2ee"
+    const val BOTS = "bots"
 }
 
 val muxlaneJson = Json {
@@ -68,6 +94,14 @@ data class EventMsg(
 )
 
 @Serializable
+data class HelloResult(
+    val version: String,
+    val protocol: Int,
+    val features: List<String> = emptyList(),
+    @SerialName("lan_ws_url") val lanWsUrl: String? = null,
+)
+
+@Serializable
 data class PairBeginParams(
     @SerialName("host_id") val hostId: String? = null,
     val token: String? = null,
@@ -78,6 +112,7 @@ data class PairBeginParams(
 data class PairBeginResult(
     val token: String,
     val machine: MachineInfo,
+    @SerialName("lan_ws_url") val lanWsUrl: String? = null,
 )
 
 @Serializable
@@ -242,3 +277,64 @@ fun b64Decode(value: String): ByteArray = if (value.isEmpty()) ByteArray(0) else
 
 fun <T> encodeParams(serializer: kotlinx.serialization.SerializationStrategy<T>, value: T): JsonElement =
     muxlaneJson.encodeToJsonElement(serializer, value)
+
+@Serializable
+enum class BotRunStatus {
+    @SerialName("queued") QUEUED,
+    @SerialName("running") RUNNING,
+    @SerialName("needs_approval") NEEDS_APPROVAL,
+    @SerialName("succeeded") SUCCEEDED,
+    @SerialName("failed") FAILED,
+    @SerialName("timed_out") TIMED_OUT,
+    @SerialName("cancelled") CANCELLED,
+}
+
+@Serializable
+data class BotDefinitionSummary(
+    val id: String,
+    val name: String,
+    @SerialName("project_id") val projectId: String,
+    val enabled: Boolean = true,
+    @SerialName("agent_type") val agentType: AgentType = AgentType.PI,
+    val permission: String = "ask_first",
+    @SerialName("isolated_worktree") val isolatedWorktree: Boolean = true,
+    val triggers: List<JsonElement> = emptyList(),
+)
+
+@Serializable
+data class BotRunRecord(
+    val id: String,
+    @SerialName("bot_id") val botId: String,
+    @SerialName("agent_id") val agentId: String? = null,
+    @SerialName("project_id") val projectId: String,
+    @SerialName("trigger_source") val triggerSource: String,
+    @SerialName("worktree_path") val worktreePath: String? = null,
+    val status: BotRunStatus = BotRunStatus.RUNNING,
+    val summary: String? = null,
+    val error: String? = null,
+    @SerialName("started_at") val startedAt: Long = 0,
+    @SerialName("finished_at") val finishedAt: Long? = null,
+)
+
+@Serializable
+data class BotListResult(
+    val bots: List<BotDefinitionSummary> = emptyList(),
+)
+
+@Serializable
+data class BotTriggerParams(
+    @SerialName("bot_id") val botId: String,
+    val source: String? = null,
+    val payload: String? = null,
+)
+
+@Serializable
+data class BotRunsParams(
+    @SerialName("bot_id") val botId: String? = null,
+    val limit: Int? = null,
+)
+
+@Serializable
+data class BotRunsResult(
+    val runs: List<BotRunRecord> = emptyList(),
+)

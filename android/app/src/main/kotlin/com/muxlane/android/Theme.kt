@@ -1,6 +1,8 @@
 package com.muxlane.android
 
+import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -9,18 +11,21 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 val MuxCanvas = Color(0xFFF4EBDD)
 val MuxBg0 = Color(0xFFF6F8F7)
 val MuxBg1 = Color(0xFFFFFFFF)
 val MuxBg2 = Color(0xFFE6ECE9)
+val MuxBg3 = Color(0xFFD6E0DC)
 val MuxLine = Color(0xFFDFE6E3)
 val MuxControlLine = Color(0xFFC3CECA)
 val MuxFg0 = Color(0xFF18201E)
 val MuxFg1 = Color(0xFF394541)
 val MuxFg2 = Color(0xFF596662)
 val MuxAccent = Color(0xFF007A68)
+val MuxAccentBg = Color(0xFFE5F4F0)
 val MuxGreen = Color(0xFF007A68)
 val MuxYellow = Color(0xFF8A5100)
 val MuxRed = Color(0xFFBA1A1A)
@@ -59,6 +64,16 @@ private val colors = lightColorScheme(
     error = MuxRed,
 )
 
+private val zeroRadius = CutCornerShape(0.dp)
+
+private val squareShapes = Shapes(
+    extraSmall = zeroRadius,
+    small = zeroRadius,
+    medium = zeroRadius,
+    large = zeroRadius,
+    extraLarge = zeroRadius,
+)
+
 private val typography = Typography(
     headlineSmall = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.02).sp),
     titleLarge = TextStyle(fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.01).sp),
@@ -73,7 +88,12 @@ private val typography = Typography(
 
 @Composable
 fun MuxlaneTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = colors, typography = typography, content = content)
+    MaterialTheme(
+        colorScheme = colors,
+        shapes = squareShapes,
+        typography = typography,
+        content = content,
+    )
 }
 
 val Square = RectangleShape

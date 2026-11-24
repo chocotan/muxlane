@@ -33,6 +33,9 @@ class RelayClient(
 
     @Volatile
     private var connection: Connection? = null
+    @Volatile
+    private var e2eeSession: muxlane.crypto.E2eeSession? = null
+    private val txLock = Any()
     private val nextId = AtomicLong(1)
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<Response>>()
     // WebSocket callbacks must not drop terminal chunks while the main dispatcher is busy.
@@ -43,9 +46,19 @@ class RelayClient(
     var lastError: String? = null
         private set
 
-    suspend fun connect(url: String): CompletableDeferred<Throwable?> {
+    val isE2eeActive: Boolean
+        get() = e2eeSession != null
+
+    fun setE2eeSession(session: muxlane.crypto.E2eeSession?) {
+        synchronized(txLock) {
+            e2eeSession = session
+        }
+    }
+
+    suspend fun connect(url: String, timeoutMs: Long = CONNECT_TIMEOUT_MS): CompletableDeferred<Throwable?> {
         close()
         lastError = null
+        e2eeSession = null
         val current = Connection()
         connection = current
         current.socket = client.newWebSocket(
@@ -76,7 +89,7 @@ class RelayClient(
             },
         )
         try {
-            withTimeout(CONNECT_TIMEOUT_MS) { current.opened.await() }
+            withTimeout(timeoutMs) { current.opened.await() }
         } catch (error: Throwable) {
             if (connection === current) close()
             throw error
@@ -85,8 +98,12 @@ class RelayClient(
     }
 
     fun close() {
-        val current = connection ?: return
+        val current = connection ?: run {
+            e2eeSession = null
+            return
+        }
         connection = null
+        e2eeSession = null
         current.socket?.close(1000, "bye")
         val error = IllegalStateException("连接已断开")
         current.opened.completeExceptionally(error)
@@ -100,7 +117,14 @@ class RelayClient(
         val id = nextId.getAndIncrement()
         val deferred = CompletableDeferred<Response>()
         pending[id] = deferred
-        val sent = current.socket?.send(encodeFrame(Request(id, method, params))) == true
+        val rawLine = encodeFrame(Request(id, method, params))
+        val sent = synchronized(txLock) {
+            val outgoing = e2eeSession?.let { session ->
+                val envelope = session.seal(rawLine.toByteArray(Charsets.UTF_8))
+                muxlane.protocol.muxlaneJson.encodeToString(muxlane.crypto.E2eeEnvelope.serializer(), envelope)
+            } ?: rawLine
+            current.socket?.send(outgoing) == true
+        }
         if (!sent) {
             pending.remove(id)
             error("尚未连接")
@@ -116,7 +140,11 @@ class RelayClient(
     }
 
     private fun handleLine(text: String) {
-        when (val frame = decodeIncoming(text)) {
+        val plaintext = e2eeSession?.let { session ->
+            val env = muxlane.protocol.muxlaneJson.decodeFromString(muxlane.crypto.E2eeEnvelope.serializer(), text.trim())
+            session.open(env).toString(Charsets.UTF_8)
+        } ?: text
+        when (val frame = decodeIncoming(plaintext)) {
             is IncomingFrame.Response -> pending.remove(frame.value.id)?.complete(frame.value)
             is IncomingFrame.Event -> _events.trySend(frame.value)
         }
@@ -130,6 +158,7 @@ class RelayClient(
     private fun finish(current: Connection, error: Throwable) {
         if (connection !== current) return
         connection = null
+        e2eeSession = null
         current.socket?.cancel()
         lastError = error.message
         current.opened.completeExceptionally(error)

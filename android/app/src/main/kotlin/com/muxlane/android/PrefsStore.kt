@@ -31,6 +31,7 @@ class PrefsStore(context: Context) {
                             hostId = item.getString("host_id"),
                             token = token,
                             machineName = item.optString("machine_name", item.getString("host_id")),
+                            lanUrl = item.optString("lan_url").takeIf { it.isNotBlank() },
                         ),
                     )
                 }
@@ -67,6 +68,7 @@ class PrefsStore(context: Context) {
                     .put("relay_url", pairing.relayUrl)
                     .put("host_id", pairing.hostId)
                     .put("machine_name", pairing.machineName)
+                    .put("lan_url", pairing.lanUrl ?: "")
                     .put("token", encrypt(pairing.token)),
             )
         }

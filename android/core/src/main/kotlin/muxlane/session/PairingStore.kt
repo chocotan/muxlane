@@ -5,6 +5,7 @@ data class Pairing(
     val hostId: String,
     val token: String,
     val machineName: String,
+    val lanUrl: String? = null,
 )
 
 interface PairingStore {

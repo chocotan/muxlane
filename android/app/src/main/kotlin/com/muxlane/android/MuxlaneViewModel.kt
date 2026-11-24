@@ -17,11 +17,43 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import muxlane.chat.ApprovalReply
+import muxlane.chat.ChatApproveParams
+import muxlane.chat.ChatApprovalNoticeEvent
+import muxlane.chat.ChatConfigureParams
+import muxlane.chat.ChatDeltaEvent
+import muxlane.chat.ChatDeltaOp
+import muxlane.chat.ChatDriverKind
+import muxlane.chat.ChatHistoryResult
+import muxlane.chat.ChatListResult
+import muxlane.chat.ChatSendParams
+import muxlane.chat.ChatSessionSummary
+import muxlane.chat.ChatSpawnParams
+import muxlane.chat.ChatSubscribeParams
+import muxlane.chat.ChatSubscribeResult
+import muxlane.chat.ChatSwitchModeParams
+import muxlane.chat.ChatTimelineSnapshot
+import muxlane.chat.PendingApproval
+import muxlane.chat.SessionDriverMode
+import muxlane.chat.StreamingBehavior
+import muxlane.crypto.E2eeKeyPair
+import muxlane.crypto.E2eeSession
+import muxlane.crypto.E2eeUpgradeParams
+import muxlane.crypto.E2eeUpgradeResult
 import muxlane.protocol.AgentInstance
 import muxlane.protocol.AgentPreset
 import muxlane.protocol.AgentSpawnParams
 import muxlane.protocol.AgentStatusEvent
+import muxlane.protocol.AgentType
+import muxlane.protocol.BotDefinitionSummary
+import muxlane.protocol.BotListResult
+import muxlane.protocol.BotRunRecord
+import muxlane.protocol.BotRunsParams
+import muxlane.protocol.BotRunsResult
+import muxlane.protocol.BotTriggerParams
 import muxlane.protocol.Events
+import muxlane.protocol.Features
+import muxlane.protocol.HelloResult
 import muxlane.protocol.Methods
 import muxlane.protocol.PairBeginParams
 import muxlane.protocol.PairBeginResult
@@ -41,17 +73,35 @@ import muxlane.session.Pairing
 import muxlane.term.VirtualTerminal
 import kotlin.math.min
 
+enum class SessionPaneMode { CHAT, TERMINAL }
+
 data class UiState(
     val relayUrl: String = "",
     val hostId: String = "",
     val connecting: Boolean = false,
     val connected: Boolean = false,
+    val e2eeActive: Boolean = false,
+    val usingLan: Boolean = false,
     val error: String? = null,
     val pairings: List<Pairing> = emptyList(),
     val pairing: Pairing? = null,
     val addingMachine: Boolean = false,
     val snapshot: Snapshot? = null,
     val selectedAgent: String? = null,
+    val openTabs: List<String> = emptyList(),
+    val sessionMode: SessionPaneMode = SessionPaneMode.TERMINAL,
+    val hubTab: HubTab = HubTab.FEED,
+    val workspaceQuery: String = "",
+    val agentGroupBy: AgentGroupBy = AgentGroupBy.STATUS,
+    val agentsNeedsYouOnly: Boolean = false,
+    val collapsedProjects: Set<String> = emptySet(),
+    val terminalTextScale: Float = 1.0f,
+    val chatTextScale: Float = 1.0f,
+    val chatSessions: Map<String, ChatSessionSummary> = emptyMap(),
+    val chatTimelines: Map<String, ChatTimelineSnapshot> = emptyMap(),
+    val globalApprovals: List<PendingApproval> = emptyList(),
+    val bots: List<BotDefinitionSummary> = emptyList(),
+    val botRuns: List<BotRunRecord> = emptyList(),
     val presets: List<AgentPreset> = emptyList(),
     val spawnProject: String? = null,
     val confirmDelete: String? = null,
@@ -79,6 +129,7 @@ class MuxlaneSession(private val app: Application) {
     val state: StateFlow<UiState> = _state
     private var connectionJob: Job? = null
     private var termSub: String? = null
+    private var chatSub: String? = null
     private var replayId: Long? = null
     private var nextChunk = 0
     private var lastRemoteResize: RemoteResize? = null
@@ -88,7 +139,11 @@ class MuxlaneSession(private val app: Application) {
             client.events.collect { event ->
                 runCatching {
                     when (event.event) {
-                        Events.STATE_CHANGED -> refreshSnapshot()
+                        Events.STATE_CHANGED -> {
+                            refreshSnapshot()
+                            refreshChatList()
+                            refreshBots()
+                        }
                         Events.AGENT_STATUS -> {
                             val status = muxlaneJson.decodeFromJsonElement(AgentStatusEvent.serializer(), event.params)
                             _state.value.pairing?.let { pairing ->
@@ -128,6 +183,15 @@ class MuxlaneSession(private val app: Application) {
                             }
                         }
                         Events.TERM_EXIT -> if (_state.value.selectedAgent != null) refreshSnapshot()
+                        Events.CHAT_DELTA -> {
+                            val delta = muxlaneJson.decodeFromJsonElement(ChatDeltaEvent.serializer(), event.params)
+                            applyChatDeltaEvent(delta)
+                        }
+                        Events.CHAT_APPROVAL -> {
+                            val notice = muxlaneJson.decodeFromJsonElement(ChatApprovalNoticeEvent.serializer(), event.params)
+                            handleChatApprovalNotice(notice)
+                        }
+                        Events.BOT_UPDATED, Events.BOT_RUN_UPDATED -> refreshBots()
                     }
                 }.onFailure { error ->
                     if (error !is CancellationException) setError(error)
@@ -165,6 +229,12 @@ class MuxlaneSession(private val app: Application) {
                 addingMachine = true,
                 snapshot = null,
                 selectedAgent = null,
+                openTabs = emptyList(),
+                chatSessions = emptyMap(),
+                chatTimelines = emptyMap(),
+                globalApprovals = emptyList(),
+                e2eeActive = false,
+                usingLan = false,
                 error = null,
             )
             app.stopService(Intent(app, RelayService::class.java))
@@ -186,6 +256,10 @@ class MuxlaneSession(private val app: Application) {
                 relayUrl = target.relayUrl,
                 hostId = "",
                 selectedAgent = null,
+                openTabs = emptyList(),
+                chatSessions = emptyMap(),
+                chatTimelines = emptyMap(),
+                globalApprovals = emptyList(),
                 error = null,
             )
             start()
@@ -194,6 +268,11 @@ class MuxlaneSession(private val app: Application) {
 
     fun openNotification(hostId: String, agentId: String) {
         val target = _state.value.pairings.find { it.hostId == hostId } ?: return
+        val currentlyConnectedSameHost = _state.value.pairing?.hostId == hostId && _state.value.connected
+        if (currentlyConnectedSameHost) {
+            openAgent(agentId)
+            return
+        }
         scope.launch {
             stopConnection()
             store.setActiveHost(hostId)
@@ -203,6 +282,8 @@ class MuxlaneSession(private val app: Application) {
                 relayUrl = target.relayUrl,
                 hostId = "",
                 selectedAgent = agentId,
+                openTabs = appendOrFocusTab(emptyList(), agentId),
+                sessionMode = SessionPaneMode.CHAT,
                 error = null,
             )
             start()
@@ -218,6 +299,10 @@ class MuxlaneSession(private val app: Application) {
                 addingMachine = false,
                 snapshot = null,
                 selectedAgent = null,
+                openTabs = emptyList(),
+                chatSessions = emptyMap(),
+                chatTimelines = emptyMap(),
+                globalApprovals = emptyList(),
                 presets = emptyList(),
                 spawnProject = null,
                 error = null,
@@ -250,6 +335,10 @@ class MuxlaneSession(private val app: Application) {
                 pairing = if (removingActive) null else _state.value.pairing,
                 snapshot = if (removingActive) null else _state.value.snapshot,
                 selectedAgent = if (removingActive) null else _state.value.selectedAgent,
+                openTabs = if (removingActive) emptyList() else _state.value.openTabs,
+                chatSessions = if (removingActive) emptyMap() else _state.value.chatSessions,
+                chatTimelines = if (removingActive) emptyMap() else _state.value.chatTimelines,
+                globalApprovals = if (removingActive) emptyList() else _state.value.globalApprovals,
                 confirmRemoveHost = null,
                 error = null,
             )
@@ -262,8 +351,15 @@ class MuxlaneSession(private val app: Application) {
         connectionJob = null
         client.close()
         termSub = null
+        chatSub = null
         lastRemoteResize = null
-        _state.value = _state.value.copy(connecting = false, connected = false, snapshot = null)
+        _state.value = _state.value.copy(
+            connecting = false,
+            connected = false,
+            e2eeActive = false,
+            usingLan = false,
+            snapshot = null,
+        )
     }
 
     fun setRelay(url: String) {
@@ -302,7 +398,13 @@ class MuxlaneSession(private val app: Application) {
                     PairBeginResult.serializer(),
                     response.result ?: error(response.error?.message ?: "添加失败"),
                 )
-                val pairing = Pairing(relay, result.machine.machineId, result.token, result.machine.name)
+                val pairing = Pairing(
+                    relayUrl = relay,
+                    hostId = result.machine.machineId,
+                    token = result.token,
+                    machineName = result.machine.name,
+                    lanUrl = result.lanWsUrl,
+                )
                 store.save(pairing)
                 store.setActiveHost(pairing.hostId)
                 client.close()
@@ -335,21 +437,220 @@ class MuxlaneSession(private val app: Application) {
         _state.value = _state.value.copy(confirmRemoveHost = hostId)
     }
 
+    fun isChatCapable(agentId: String): Boolean = _state.value.chatSessions.containsKey(agentId)
+
     fun openAgent(id: String) {
-        _state.value = _state.value.copy(selectedAgent = id, error = null)
+        val mode = if (isChatCapable(id)) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
+        val nextTabs = appendOrFocusTab(_state.value.openTabs, id)
+        _state.value = _state.value.copy(
+            selectedAgent = id,
+            openTabs = nextTabs,
+            sessionMode = mode,
+            error = null,
+        )
         if (_state.value.connected) {
-            scope.launch { runCatching { subscribeTerm(id) }.onFailure(::setError) }
+            scope.launch {
+                runCatching {
+                    if (mode == SessionPaneMode.CHAT) {
+                        unsubscribeTermLocked()
+                        subscribeChat(id)
+                    } else {
+                        unsubscribeChatLocked()
+                        subscribeTerm(id)
+                    }
+                }.onFailure(::setError)
+            }
         } else {
             start()
         }
     }
 
-    fun closeAgent() {
-        val sub = termSub
+    fun stepTab(delta: Int) {
+        val nextId = stepTabInOrder(_state.value.openTabs, _state.value.selectedAgent, delta) ?: return
+        if (nextId != _state.value.selectedAgent) openAgent(nextId)
+    }
+
+    fun closeTab(agentId: String) {
+        val closingActive = _state.value.selectedAgent == agentId
+        val (nextTabs, nextSelected) = removeTabAndNextSelection(
+            openTabs = _state.value.openTabs,
+            closingId = agentId,
+            currentSelected = _state.value.selectedAgent,
+        )
+        if (!closingActive) {
+            _state.value = _state.value.copy(openTabs = nextTabs)
+            return
+        }
+        val oldTerm = termSub
+        val oldChat = chatSub
         termSub = null
+        chatSub = null
+        _state.value = _state.value.copy(openTabs = nextTabs, selectedAgent = null)
+        if (_state.value.connected) {
+            scope.launch {
+                if (oldTerm != null) runCatching { client.call(Methods.TERM_UNSUBSCRIBE, obj("sub_id" to oldTerm)) }
+                if (oldChat != null) runCatching { client.call(Methods.CHAT_UNSUBSCRIBE, obj("sub_id" to oldChat)) }
+                if (nextSelected != null) openAgent(nextSelected)
+            }
+        } else if (nextSelected != null) {
+            openAgent(nextSelected)
+        }
+    }
+
+    fun setHubTab(tab: HubTab) {
+        _state.value = _state.value.copy(hubTab = tab)
+    }
+
+    fun setWorkspaceQuery(query: String) {
+        _state.value = _state.value.copy(workspaceQuery = query)
+    }
+
+    fun setAgentGroupBy(groupBy: AgentGroupBy) {
+        _state.value = _state.value.copy(agentGroupBy = groupBy)
+    }
+
+    fun toggleAgentsNeedsYouOnly() {
+        _state.value = _state.value.copy(agentsNeedsYouOnly = !_state.value.agentsNeedsYouOnly)
+    }
+
+    fun toggleProjectCollapsed(projectId: String) {
+        val current = _state.value.collapsedProjects
+        val next = if (projectId in current) current - projectId else current + projectId
+        _state.value = _state.value.copy(collapsedProjects = next)
+    }
+
+    fun setTerminalTextScale(scale: Float) {
+        _state.value = _state.value.copy(terminalTextScale = scale.coerceIn(0.7f, 1.65f))
+    }
+
+    fun setChatTextScale(scale: Float) {
+        _state.value = _state.value.copy(chatTextScale = scale.coerceIn(0.85f, 1.4f))
+    }
+
+    fun setSessionMode(mode: SessionPaneMode) {
+        val agent = _state.value.selectedAgent ?: return
+        if (_state.value.sessionMode == mode) return
+        val meta = _state.value.chatTimelines[agent]?.meta ?: _state.value.chatSessions[agent]?.meta
+        if (mode == SessionPaneMode.CHAT && !isChatCapable(agent)) return
+        if (mode == SessionPaneMode.TERMINAL && meta != null && !meta.hasPty && !meta.supportsTerminalSwitch) {
+            _state.value = _state.value.copy(error = "当前会话未开启交互终端")
+            return
+        }
+        _state.value = _state.value.copy(sessionMode = mode, error = null)
+        if (!_state.value.connected) return
+        scope.launch {
+            runCatching {
+                when (mode) {
+                    SessionPaneMode.TERMINAL -> {
+                        if (meta != null && meta.driver != SessionDriverMode.TERMINAL_PTY && meta.supportsTerminalSwitch) {
+                            val resp = client.call(
+                                Methods.CHAT_SWITCH_MODE,
+                                encodeParams(ChatSwitchModeParams.serializer(), ChatSwitchModeParams(agent, SessionDriverMode.TERMINAL_PTY)),
+                            )
+                            resp.error?.let { error(it.message) }
+                        }
+                        subscribeTerm(agent)
+                    }
+                    SessionPaneMode.CHAT -> {
+                        unsubscribeTermLocked()
+                        if (meta != null && meta.driver == SessionDriverMode.TERMINAL_PTY) {
+                            val targetDriver = if (snapshotAgent(agent)?.agentType in listOf(AgentType.PI, AgentType.PIE)) {
+                                SessionDriverMode.PI_RPC
+                            } else {
+                                SessionDriverMode.ACP
+                            }
+                            client.call(
+                                Methods.CHAT_SWITCH_MODE,
+                                encodeParams(ChatSwitchModeParams.serializer(), ChatSwitchModeParams(agent, targetDriver)),
+                            ).error?.let { error(it.message) }
+                        }
+                        subscribeChat(agent)
+                    }
+                }
+            }.onFailure(::setError)
+        }
+    }
+
+    fun closeAgent() {
+        val oldTerm = termSub
+        val oldChat = chatSub
+        termSub = null
+        chatSub = null
         _state.value = _state.value.copy(selectedAgent = null)
-        if (sub != null && _state.value.connected) {
-            scope.launch { runCatching { client.call(Methods.TERM_UNSUBSCRIBE, obj("sub_id" to sub)) } }
+        if (_state.value.connected) {
+            scope.launch {
+                if (oldTerm != null) runCatching { client.call(Methods.TERM_UNSUBSCRIBE, obj("sub_id" to oldTerm)) }
+                if (oldChat != null) runCatching { client.call(Methods.CHAT_UNSUBSCRIBE, obj("sub_id" to oldChat)) }
+            }
+        }
+    }
+
+    fun sendChatPrompt(text: String, steer: Boolean = false) {
+        val agent = _state.value.selectedAgent ?: return
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        val streaming = _state.value.chatTimelines[agent]?.meta?.isStreaming == true
+        val behavior = if (streaming) {
+            if (steer) StreamingBehavior.STEER else StreamingBehavior.FOLLOW_UP
+        } else {
+            null
+        }
+        rpc {
+            val resp = client.call(
+                Methods.CHAT_SEND,
+                encodeParams(
+                    ChatSendParams.serializer(),
+                    ChatSendParams(
+                        agent = agent,
+                        text = trimmed,
+                        streamingBehavior = behavior,
+                    ),
+                ),
+            )
+            resp.error?.let { error(it.message) }
+        }
+    }
+
+    fun abortChat() {
+        val agent = _state.value.selectedAgent ?: return
+        rpc {
+            client.call(Methods.CHAT_ABORT, obj("agent" to agent)).error?.let { error(it.message) }
+        }
+    }
+
+    fun configureChat(provider: String? = null, modelId: String? = null, thinkingLevel: String? = null) {
+        val agent = _state.value.selectedAgent ?: return
+        rpc {
+            client.call(
+                Methods.CHAT_CONFIGURE,
+                encodeParams(
+                    ChatConfigureParams.serializer(),
+                    ChatConfigureParams(
+                        agent = agent,
+                        provider = provider,
+                        modelId = modelId,
+                        thinkingLevel = thinkingLevel,
+                    ),
+                ),
+            ).error?.let { error(it.message) }
+        }
+    }
+
+    fun respondApproval(agent: String, approvalId: String, reply: ApprovalReply) {
+        scope.launch {
+            if (!_state.value.connected) {
+                setError(IllegalStateException("连接未就绪，请稍后再试"))
+                return@launch
+            }
+            runCatching {
+                val resp = client.call(
+                    Methods.CHAT_APPROVE,
+                    encodeParams(ChatApproveParams.serializer(), ChatApproveParams(agent, approvalId, reply)),
+                )
+                resp.error?.let { error(it.message) }
+                removeApprovalLocal(agent, approvalId)
+                RelayService.cancelApprovalNotification(app, approvalId)
+            }.onFailure(::setError)
         }
     }
 
@@ -404,7 +705,7 @@ class MuxlaneSession(private val app: Application) {
             redrawTerminal()
         }
         val agent = _state.value.selectedAgent ?: return
-        if (!_state.value.connected) return
+        if (!_state.value.connected || _state.value.sessionMode != SessionPaneMode.TERMINAL) return
         scope.launch {
             runCatching { sendResizeIfNeeded(agent, cols, rows) }.onFailure(::setError)
         }
@@ -453,8 +754,45 @@ class MuxlaneSession(private val app: Application) {
                 ),
             )
             response.error?.let { error(it.message) }
+            val spawned = response.result?.let {
+                runCatching { muxlaneJson.decodeFromJsonElement(AgentInstance.serializer(), it) }.getOrNull()
+            }
             _state.value = _state.value.copy(spawnProject = null, presets = emptyList(), error = null)
             refreshSnapshot()
+            if (spawned != null) openAgent(spawned.id)
+        }
+    }
+
+    fun spawnChat(preset: AgentPreset, initialPrompt: String? = null) {
+        val project = _state.value.spawnProject ?: return
+        val driver = when (preset.agentType) {
+            AgentType.PI, AgentType.PIE -> ChatDriverKind.PI_RPC
+            else -> ChatDriverKind.ACP
+        }
+        rpc {
+            val response = client.call(
+                Methods.CHAT_SPAWN,
+                encodeParams(
+                    ChatSpawnParams.serializer(),
+                    ChatSpawnParams(
+                        project = project,
+                        agentType = preset.agentType,
+                        program = preset.program,
+                        args = preset.args,
+                        presetName = preset.label,
+                        driver = driver,
+                        initialPrompt = initialPrompt,
+                    ),
+                ),
+            )
+            val spawned = muxlaneJson.decodeFromJsonElement(
+                AgentInstance.serializer(),
+                response.result ?: error(response.error?.message ?: "无法创建对话会话"),
+            )
+            _state.value = _state.value.copy(spawnProject = null, presets = emptyList(), error = null)
+            refreshSnapshot()
+            refreshChatList()
+            openAgent(spawned.id)
         }
     }
 
@@ -475,9 +813,26 @@ class MuxlaneSession(private val app: Application) {
         rpc {
             val response = client.call(Methods.AGENT_DELETE, obj("agent" to agent))
             response.error?.let { error(it.message) }
-            _state.value = _state.value.copy(confirmDelete = null, error = null)
-            if (_state.value.selectedAgent == agent) closeAgent()
+            val closingActive = _state.value.selectedAgent == agent
+            val (nextTabs, nextSelected) = removeTabAndNextSelection(
+                openTabs = _state.value.openTabs,
+                closingId = agent,
+                currentSelected = _state.value.selectedAgent,
+            )
+            _state.value = _state.value.copy(
+                confirmDelete = null,
+                openTabs = nextTabs,
+                chatTimelines = _state.value.chatTimelines - agent,
+                chatSessions = _state.value.chatSessions - agent,
+                globalApprovals = _state.value.globalApprovals.filterNot { it.agent == agent },
+                error = null,
+            )
+            if (closingActive) {
+                closeAgent()
+                if (nextSelected != null) openAgent(nextSelected)
+            }
             refreshSnapshot()
+            refreshChatList()
         }
     }
 
@@ -490,9 +845,23 @@ class MuxlaneSession(private val app: Application) {
         var waitMs = 1_000L
         while (scope.isActive) {
             val target = _state.value.pairing ?: break
-            _state.value = _state.value.copy(connecting = true, connected = false, snapshot = null)
+            _state.value = _state.value.copy(
+                connecting = true,
+                connected = false,
+                e2eeActive = false,
+                usingLan = false,
+                snapshot = null,
+            )
             try {
-                val closed = client.connect(joinRelay(target.relayUrl, "phone/${target.hostId}"))
+                var usedLan = false
+                val closed = target.lanUrl?.takeIf { it.isNotBlank() }?.let { lanUrl ->
+                    runCatching {
+                        val c = client.connect(lanUrl, timeoutMs = 1_500L)
+                        usedLan = true
+                        c
+                    }.getOrNull()
+                } ?: client.connect(joinRelay(target.relayUrl, "phone/${target.hostId}"))
+
                 val response = client.call(
                     Methods.PAIR_BEGIN,
                     encodeParams(PairBeginParams.serializer(), PairBeginParams(token = target.token)),
@@ -502,10 +871,47 @@ class MuxlaneSession(private val app: Application) {
                     PairBeginResult.serializer(),
                     response.result ?: error("认证失败"),
                 )
+
+                val helloResp = runCatching { client.call(Methods.SYSTEM_HELLO, JsonObject(emptyMap())) }.getOrNull()
+                val hello = helloResp?.result?.let {
+                    runCatching { muxlaneJson.decodeFromJsonElement(HelloResult.serializer(), it) }.getOrNull()
+                }
+
+                var e2eeActive = false
+                if (hello?.features?.contains(Features.E2EE) == true) {
+                    val kp = E2eeKeyPair.generate()
+                    val clientNonce = E2eeKeyPair.randomNonce16()
+                    val upResp = client.call(
+                        Methods.E2EE_UPGRADE,
+                        encodeParams(
+                            E2eeUpgradeParams.serializer(),
+                            E2eeUpgradeParams(
+                                client_pubkey_b64 = b64Encode(kp.publicSec1),
+                                client_nonce_b64 = b64Encode(clientNonce),
+                            ),
+                        ),
+                    )
+                    upResp.error?.let { error(it.message) }
+                    val upRes = muxlaneJson.decodeFromJsonElement(
+                        E2eeUpgradeResult.serializer(),
+                        upResp.result ?: error("E2EE 握手失败"),
+                    )
+                    val e2eeSession = E2eeSession.deriveClient(
+                        localKeys = kp,
+                        serverPubSec1 = b64Decode(upRes.server_pubkey_b64),
+                        pairingToken = result.token,
+                        clientNonce = clientNonce,
+                        serverNonce = b64Decode(upRes.server_nonce_b64),
+                    )
+                    client.setE2eeSession(e2eeSession)
+                    e2eeActive = true
+                }
+
                 val updated = target.copy(
                     token = result.token,
                     machineName = result.machine.name,
                     hostId = result.machine.machineId,
+                    lanUrl = result.lanWsUrl ?: hello?.lanWsUrl ?: target.lanUrl,
                 )
                 store.save(updated)
                 _state.value = _state.value.copy(
@@ -514,11 +920,19 @@ class MuxlaneSession(private val app: Application) {
                     relayUrl = updated.relayUrl,
                     connecting = false,
                     connected = true,
+                    usingLan = usedLan,
+                    e2eeActive = e2eeActive,
                     error = null,
                 )
                 client.call(Methods.EVENTS_SUBSCRIBE, JsonNull).error?.let { error(it.message) }
                 refreshSnapshot()
-                _state.value.selectedAgent?.let { subscribeTerm(it) }
+                refreshChatList()
+                refreshBots()
+                _state.value.selectedAgent?.let { agent ->
+                    val mode = if (isChatCapable(agent)) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
+                    _state.value = _state.value.copy(sessionMode = mode)
+                    if (mode == SessionPaneMode.CHAT) subscribeChat(agent) else subscribeTerm(agent)
+                }
                 waitMs = 1_000L
                 val cause = closed.await()
                 if (cause != null) throw cause
@@ -529,6 +943,8 @@ class MuxlaneSession(private val app: Application) {
                 _state.value = _state.value.copy(
                     connecting = false,
                     connected = false,
+                    e2eeActive = false,
+                    usingLan = false,
                     snapshot = null,
                     error = message(error),
                 )
@@ -545,7 +961,14 @@ class MuxlaneSession(private val app: Application) {
         job?.cancelAndJoin()
         client.close()
         termSub = null
-        _state.value = _state.value.copy(connecting = false, connected = false, snapshot = null)
+        chatSub = null
+        _state.value = _state.value.copy(
+            connecting = false,
+            connected = false,
+            e2eeActive = false,
+            usingLan = false,
+            snapshot = null,
+        )
     }
 
     private suspend fun refreshSnapshot() {
@@ -554,12 +977,107 @@ class MuxlaneSession(private val app: Application) {
             Snapshot.serializer(),
             response.result ?: error(response.error?.message ?: "无法读取会话状态"),
         )
-        _state.value = _state.value.copy(snapshot = snapshot, error = null)
+        val prunedTabs = pruneStaleTabs(_state.value.openTabs, snapshot.agents)
+        val currentSelected = _state.value.selectedAgent
+        val nextSelected = if (currentSelected != null && snapshot.agents.any { it.id == currentSelected }) {
+            currentSelected
+        } else {
+            null
+        }
+        _state.value = _state.value.copy(
+            snapshot = snapshot,
+            openTabs = prunedTabs,
+            selectedAgent = nextSelected,
+            error = null,
+        )
+    }
+
+    private suspend fun refreshChatList() {
+        val resp = runCatching { client.call(Methods.CHAT_LIST, JsonObject(emptyMap())) }.getOrNull() ?: return
+        val result = resp.result?.let {
+            runCatching { muxlaneJson.decodeFromJsonElement(ChatListResult.serializer(), it) }.getOrNull()
+        } ?: return
+        val sessions = result.sessions.associateBy { it.agent }
+        val collectedApprovals = ArrayList<PendingApproval>()
+        result.sessions.filter { it.pendingApprovals > 0 }.forEach { summary ->
+            val histResp = runCatching {
+                client.call(Methods.CHAT_HISTORY, obj("agent" to summary.agent))
+            }.getOrNull()
+            val hist = histResp?.result?.let {
+                runCatching { muxlaneJson.decodeFromJsonElement(ChatHistoryResult.serializer(), it) }.getOrNull()
+            }
+            if (hist != null) collectedApprovals.addAll(hist.pendingApprovals)
+        }
+        _state.value = _state.value.copy(
+            chatSessions = sessions,
+            globalApprovals = collectedApprovals.distinctBy { it.id },
+        )
+    }
+
+    private suspend fun refreshBots() {
+        val botsResp = runCatching { client.call(Methods.BOT_LIST, JsonObject(emptyMap())) }.getOrNull() ?: return
+        val bots = botsResp.result?.let {
+            runCatching { muxlaneJson.decodeFromJsonElement(BotListResult.serializer(), it) }.getOrNull()
+        }?.bots ?: return
+        val runsResp = runCatching {
+            client.call(Methods.BOT_RUNS, encodeParams(BotRunsParams.serializer(), BotRunsParams(limit = 30)))
+        }.getOrNull()
+        val runs = runsResp?.result?.let {
+            runCatching { muxlaneJson.decodeFromJsonElement(BotRunsResult.serializer(), it) }.getOrNull()
+        }?.runs ?: _state.value.botRuns
+        _state.value = _state.value.copy(bots = bots, botRuns = runs)
+    }
+
+    fun triggerBot(botId: String) {
+        rpc {
+            val resp = client.call(
+                Methods.BOT_TRIGGER,
+                encodeParams(BotTriggerParams.serializer(), BotTriggerParams(botId = botId, source = "manual")),
+            )
+            resp.error?.let { error(it.message) }
+            refreshBots()
+        }
+    }
+
+    private suspend fun subscribeChat(agent: String) {
+        unsubscribeChatLocked()
+        val response = client.call(
+            Methods.CHAT_SUBSCRIBE,
+            encodeParams(ChatSubscribeParams.serializer(), ChatSubscribeParams(agent)),
+        )
+        val result = muxlaneJson.decodeFromJsonElement(
+            ChatSubscribeResult.serializer(),
+            response.result ?: error(response.error?.message ?: "无法订阅对话流"),
+        )
+        if (_state.value.selectedAgent != agent) {
+            runCatching { client.call(Methods.CHAT_UNSUBSCRIBE, obj("sub_id" to result.subId)) }
+            return
+        }
+        chatSub = result.subId
+        val snap = ChatTimelineSnapshot.fromHistory(result.history)
+        val mergedGlobal = (_state.value.globalApprovals.filterNot { it.agent == agent } + snap.pendingApprovals)
+            .distinctBy { it.id }
+        _state.value = _state.value.copy(
+            chatTimelines = _state.value.chatTimelines + (agent to snap),
+            globalApprovals = mergedGlobal,
+        )
+        markSeen(agent)
+    }
+
+    private suspend fun unsubscribeChatLocked() {
+        val old = chatSub ?: return
+        chatSub = null
+        runCatching { client.call(Methods.CHAT_UNSUBSCRIBE, obj("sub_id" to old)) }
+    }
+
+    private suspend fun unsubscribeTermLocked() {
+        val old = termSub ?: return
+        termSub = null
+        runCatching { client.call(Methods.TERM_UNSUBSCRIBE, obj("sub_id" to old)) }
     }
 
     private suspend fun subscribeTerm(agent: String) {
-        termSub?.let { old -> runCatching { client.call(Methods.TERM_UNSUBSCRIBE, obj("sub_id" to old)) } }
-        termSub = null
+        unsubscribeTermLocked()
         lastRemoteResize = null
         terminal.reset()
         redrawTerminal()
@@ -584,6 +1102,68 @@ class MuxlaneSession(private val app: Application) {
         sendResizeIfNeeded(agent, terminal.cols, terminal.rows)
         markSeen(agent)
         redrawTerminal()
+    }
+
+    private fun applyChatDeltaEvent(delta: ChatDeltaEvent) {
+        val current = _state.value.chatTimelines[delta.agent] ?: ChatTimelineSnapshot(agent = delta.agent)
+        val next = current.applyDelta(delta)
+        val nextApprovals = when (val op = delta.delta) {
+            is ChatDeltaOp.ApprovalRequested ->
+                (_state.value.globalApprovals.filterNot { it.id == op.approval.id } + op.approval)
+            is ChatDeltaOp.ApprovalResolved ->
+                _state.value.globalApprovals.filterNot { it.id == op.approvalId }
+            else -> _state.value.globalApprovals
+        }
+        val existingSummary = _state.value.chatSessions[delta.agent]
+        val nextSessions = if (existingSummary != null) {
+            _state.value.chatSessions + (
+                delta.agent to existingSummary.copy(
+                    meta = next.meta,
+                    pendingApprovals = next.pendingApprovals.size,
+                    seq = next.seq,
+                )
+            )
+        } else {
+            _state.value.chatSessions
+        }
+        _state.value = _state.value.copy(
+            chatTimelines = _state.value.chatTimelines + (delta.agent to next),
+            chatSessions = nextSessions,
+            globalApprovals = nextApprovals,
+        )
+    }
+
+    private fun handleChatApprovalNotice(notice: ChatApprovalNoticeEvent) {
+        val pairing = _state.value.pairing
+        notice.approval?.let { approval ->
+            _state.value = _state.value.copy(
+                globalApprovals = _state.value.globalApprovals.filterNot { it.id == approval.id } + approval,
+            )
+            if (pairing != null) {
+                RelayService.notifyApproval(app, pairing.hostId, snapshotAgent(notice.agent), approval)
+            }
+        }
+        notice.resolvedId?.let { id ->
+            removeApprovalLocal(notice.agent, id)
+            RelayService.cancelApprovalNotification(app, id)
+        }
+    }
+
+    private fun removeApprovalLocal(agent: String, approvalId: String) {
+        val currentTimeline = _state.value.chatTimelines[agent]
+        val updatedTimelines = if (currentTimeline != null) {
+            _state.value.chatTimelines + (
+                agent to currentTimeline.copy(
+                    pendingApprovals = currentTimeline.pendingApprovals.filterNot { it.id == approvalId },
+                )
+            )
+        } else {
+            _state.value.chatTimelines
+        }
+        _state.value = _state.value.copy(
+            chatTimelines = updatedTimelines,
+            globalApprovals = _state.value.globalApprovals.filterNot { it.id == approvalId },
+        )
     }
 
     private fun rpc(block: suspend () -> Unit) {
@@ -633,8 +1213,25 @@ class MuxlaneViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelRemoveMachine() = session.cancelRemoveMachine()
     fun confirmRemoveMachine() = session.confirmRemoveMachine()
     fun unpair() = session.unpair()
+    fun isChatCapable(agentId: String) = session.isChatCapable(agentId)
     fun openAgent(id: String) = session.openAgent(id)
+    fun stepTab(delta: Int) = session.stepTab(delta)
+    fun closeTab(agentId: String) = session.closeTab(agentId)
+    fun setHubTab(tab: HubTab) = session.setHubTab(tab)
+    fun setWorkspaceQuery(query: String) = session.setWorkspaceQuery(query)
+    fun setAgentGroupBy(groupBy: AgentGroupBy) = session.setAgentGroupBy(groupBy)
+    fun toggleAgentsNeedsYouOnly() = session.toggleAgentsNeedsYouOnly()
+    fun toggleProjectCollapsed(projectId: String) = session.toggleProjectCollapsed(projectId)
+    fun setTerminalTextScale(scale: Float) = session.setTerminalTextScale(scale)
+    fun setChatTextScale(scale: Float) = session.setChatTextScale(scale)
+    fun setSessionMode(mode: SessionPaneMode) = session.setSessionMode(mode)
     fun closeAgent() = session.closeAgent()
+    fun sendChatPrompt(text: String, steer: Boolean = false) = session.sendChatPrompt(text, steer)
+    fun abortChat() = session.abortChat()
+    fun configureChat(provider: String? = null, modelId: String? = null, thinkingLevel: String? = null) =
+        session.configureChat(provider, modelId, thinkingLevel)
+    fun respondApproval(agent: String, approvalId: String, reply: ApprovalReply) =
+        session.respondApproval(agent, approvalId, reply)
     fun sendInput(text: String, onResult: (Boolean) -> Unit = {}): Boolean = session.sendInput(text, onResult)
     fun scrollTerminal(rows: Int) = session.scrollTerminal(rows)
     fun claimTerminalSize() = session.claimTerminalSize()
@@ -642,14 +1239,14 @@ class MuxlaneViewModel(app: Application) : AndroidViewModel(app) {
     fun clearTerminal() = session.clearTerminal()
     fun loadPresets(project: String) = session.loadPresets(project)
     fun spawn(preset: AgentPreset) = session.spawn(preset)
+    fun spawnChat(preset: AgentPreset, initialPrompt: String? = null) = session.spawnChat(preset, initialPrompt)
     fun closeSpawn() = session.closeSpawn()
     fun requestDelete(agent: String) = session.requestDelete(agent)
     fun cancelDelete() = session.cancelDelete()
     fun confirmDelete() = session.confirmDelete()
     fun markSeen(agent: String) = session.markSeen(agent)
+    fun triggerBot(botId: String) = session.triggerBot(botId)
 }
-
-fun Project.displayName(): String = name.ifBlank { path.substringAfterLast('/') }
 
 /** Legacy X10 wheel reports are understood by tmux with mouse mode enabled. */
 internal fun tmuxWheelReport(up: Boolean, col: Int, row: Int): ByteArray {
