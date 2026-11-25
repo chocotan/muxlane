@@ -322,11 +322,14 @@ impl MuxlaneServer {
         self.sessions
             .lock()
             .await
-            .insert(agent_id, Arc::clone(&session));
+            .insert(agent_id.clone(), Arc::clone(&session));
         self.state
             .write()
             .await
             .add_agent(project, instance.clone());
+        if agent_type.supports_chat_bridge() {
+            let _ = self.ensure_pty_bridge_for_agent(&agent_id).await;
+        }
         self.dirty.bump();
         self.persist_runtime_state().await?;
         Ok(instance)
@@ -512,6 +515,7 @@ impl MuxlaneServer {
         {
             self.dirty.bump();
         }
+        self.chat.wake_pty_bridge(agent).await;
     }
 
     pub async fn persist(&self) -> anyhow::Result<()> {
@@ -535,11 +539,18 @@ impl MuxlaneServer {
         instance: AgentInstance,
         session: Arc<muxlane_term::PtySession>,
     ) {
-        self.sessions
-            .lock()
-            .await
-            .insert(instance.id.clone(), session);
+        let id = instance.id.clone();
+        let agent_type = instance.agent_type;
+        let cwd = project.path.clone();
+        let started_secs = instance.status_since;
+        self.sessions.lock().await.insert(id.clone(), session);
         self.state.write().await.add_agent(project, instance);
+        if agent_type.supports_chat_bridge() {
+            let _ = self
+                .chat
+                .ensure_pty_bridge(&id, agent_type, cwd, started_secs, true, None)
+                .await;
+        }
     }
 
     pub(crate) fn bump_dirty(&self) {
@@ -696,10 +707,78 @@ impl MuxlaneServer {
         Ok(instance)
     }
 
+    /// 为存活的 PTY Agent 确保已注册双向实时桥接会话（若已处于结构化驱动模式则返回现有 meta）。
+    pub async fn ensure_pty_bridge_for_agent(
+        &self,
+        agent: &AgentId,
+    ) -> Option<muxlane_core::ChatSessionMeta> {
+        self.session(agent).await?;
+        let (inst, project) = {
+            let state = self.state.read().await;
+            let inst = state.agents.iter().find(|a| &a.id == agent)?.clone();
+            let project = state
+                .projects
+                .iter()
+                .find(|p| p.id == inst.project)?
+                .clone();
+            (inst, project)
+        };
+        if !inst.agent_type.supports_chat_bridge() {
+            return None;
+        }
+        Some(
+            self.chat
+                .ensure_pty_bridge(
+                    agent,
+                    inst.agent_type,
+                    project.path,
+                    inst.status_since,
+                    true,
+                    None,
+                )
+                .await,
+        )
+    }
+
+    /// 确保所有存活且支持桥接的 PTY Agent 都已向 ChatManager 注册摘要，供桌面与移动端秒切对话。
+    pub async fn ensure_all_pty_bridges(&self) {
+        let live_ids: std::collections::HashSet<AgentId> = {
+            let guard = self.sessions.lock().await;
+            guard.keys().cloned().collect()
+        };
+        if live_ids.is_empty() {
+            return;
+        }
+        let candidates: Vec<(AgentId, muxlane_core::model::AgentType, PathBuf, u64)> = {
+            let state = self.state.read().await;
+            state
+                .agents
+                .iter()
+                .filter(|a| live_ids.contains(&a.id) && a.agent_type.supports_chat_bridge())
+                .filter_map(|a| {
+                    let project = state.projects.iter().find(|p| p.id == a.project)?;
+                    Some((
+                        a.id.clone(),
+                        a.agent_type,
+                        project.path.clone(),
+                        a.status_since,
+                    ))
+                })
+                .collect()
+        };
+        for (agent_id, agent_type, cwd, started_secs) in candidates {
+            let _ = self
+                .chat
+                .ensure_pty_bridge(&agent_id, agent_type, cwd, started_secs, true, None)
+                .await;
+        }
+    }
+
     pub async fn chat_history(
         &self,
         agent: &AgentId,
     ) -> anyhow::Result<muxlane_core::protocol::ChatHistoryResult> {
+        let _ = self.ensure_pty_bridge_for_agent(agent).await;
         if let Some(history) = self.chat.history(agent).await {
             return Ok(history);
         }
@@ -780,6 +859,7 @@ impl MuxlaneServer {
         match target {
             muxlane_core::SessionDriverMode::TerminalPty => {
                 if self.session(agent).await.is_some() {
+                    let _ = self.ensure_pty_bridge_for_agent(agent).await;
                     return Ok(self.chat_history(agent).await?.meta);
                 }
                 let resume_info = self.chat.session_resume_info(agent).await;
@@ -842,6 +922,7 @@ impl MuxlaneServer {
                 {
                     a.tmux_session = tmux_actual;
                 }
+                let _ = self.ensure_pty_bridge_for_agent(agent).await;
                 self.chat.mark_has_pty(agent, true).await;
                 self.dirty.bump();
                 self.persist_runtime_state().await?;

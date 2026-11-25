@@ -1,17 +1,25 @@
-//! 服务端 Chat 会话注册表、增量事件分发、日志持久化与 PTY Transcript 镜像协调。
+//! 服务端 Chat 会话注册表、增量事件分发、日志持久化与 Orca 风格 PTY 双向实时桥接协调。
 use crate::driver::{ChatDriverHandle, DriverCmd, DriverEvent, DriverLaunchSpec};
+use crate::pty_bridge::{self, PtyBridgeWriter};
 use crate::{acp, journal, pi_rpc, transcript};
 use muxlane_core::chat::{
-    ApprovalReply, ChatAttachment, ChatDeltaEvent, ChatDeltaOp, ChatDriverKind, ChatSessionMeta,
-    ChatTimelineState, NoticeLevel, PendingApproval, SessionDriverMode, StreamingBehavior,
-    TimelineEntry,
+    now_ms, ApprovalOption, ApprovalReply, ApprovalSource, ChatAttachment, ChatDeltaEvent,
+    ChatDeltaOp, ChatDriverKind, ChatModelInfo, ChatSessionMeta, ChatTimelineState, NoticeLevel,
+    PendingApproval, SessionDriverMode, StreamingBehavior, TimelineEntry,
 };
 use muxlane_core::model::{AgentId, AgentStatus, AgentType};
-use muxlane_core::protocol::{events, ChatHistoryResult, ChatSessionSummary, EventMsg};
+use muxlane_core::protocol::{
+    events, AgentReportParams, ChatHistoryResult, ChatSessionSummary, EventMsg,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex, Notify};
+
+const BRIDGE_LIVE_PREVIEW_ID: &str = "__bridge_live_preview__";
+const BRIDGE_PENDING_USER_PREFIX: &str = "__bridge_pending_user__:";
+const BRIDGE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub enum ChatHostNotice {
@@ -41,18 +49,94 @@ struct ChatSub {
     tx: mpsc::Sender<EventMsg>,
 }
 
+struct PtyBridgeState {
+    agent_type: AgentType,
+    cwd: PathBuf,
+    started_secs: u64,
+    session_file_hint: Option<PathBuf>,
+    write_lock: Arc<Mutex<()>>,
+    wake_notify: Arc<Notify>,
+    watcher_abort: Option<tokio::task::AbortHandle>,
+    /// Optimistic user echoes awaiting disk JSONL flush: (entry_id, normalized_text, created_at_ms).
+    pending_user_echoes: Vec<(String, String, u64)>,
+    has_live_preview: bool,
+    bridge_approval_id: Option<String>,
+}
+
+impl Drop for PtyBridgeState {
+    fn drop(&mut self) {
+        if let Some(handle) = self.watcher_abort.take() {
+            handle.abort();
+        }
+    }
+}
+
 struct ChatSessionEntry {
     spec: DriverLaunchSpec,
     timeline: ChatTimelineState,
     journal_path: PathBuf,
     driver: Option<ChatDriverHandle>,
+    pty_bridge: Option<PtyBridgeState>,
     subs: Vec<ChatSub>,
 }
 
 pub struct ChatManager {
     sessions: Arc<Mutex<HashMap<AgentId, ChatSessionEntry>>>,
     journal_dir: std::sync::RwLock<Option<PathBuf>>,
+    pty_writer: std::sync::RwLock<Option<Arc<dyn PtyBridgeWriter>>>,
     notices: mpsc::UnboundedSender<ChatHostNotice>,
+}
+
+fn normalize_echo_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_transient_bridge_op(op: &ChatDeltaOp) -> bool {
+    match op {
+        ChatDeltaOp::UpsertEntry { entry } => {
+            entry.id() == BRIDGE_LIVE_PREVIEW_ID
+                || entry.id().starts_with(BRIDGE_PENDING_USER_PREFIX)
+        }
+        ChatDeltaOp::RemoveEntry { entry_id } => {
+            entry_id == BRIDGE_LIVE_PREVIEW_ID || entry_id.starts_with(BRIDGE_PENDING_USER_PREFIX)
+        }
+        _ => false,
+    }
+}
+
+fn default_driver_kind_for(agent_type: AgentType) -> ChatDriverKind {
+    match agent_type {
+        AgentType::Pi | AgentType::Pie => ChatDriverKind::PiRpc,
+        _ => ChatDriverKind::Acp,
+    }
+}
+
+fn supports_native_switch_for(agent_type: AgentType) -> bool {
+    muxlane_core::builtin_presets("")
+        .into_iter()
+        .find(|p| p.agent_type == agent_type)
+        .and_then(|p| p.chat_driver_kind())
+        .is_some()
+}
+
+fn model_info_from_string(raw: &str) -> Option<ChatModelInfo> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((provider, id)) = trimmed.split_once('/') {
+        Some(ChatModelInfo {
+            provider: provider.to_string(),
+            id: id.to_string(),
+            name: id.to_string(),
+        })
+    } else {
+        Some(ChatModelInfo {
+            provider: String::new(),
+            id: trimmed.to_string(),
+            name: trimmed.to_string(),
+        })
+    }
 }
 
 impl ChatManager {
@@ -60,6 +144,7 @@ impl ChatManager {
         Arc::new(Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             journal_dir: std::sync::RwLock::new(None),
+            pty_writer: std::sync::RwLock::new(None),
             notices,
         })
     }
@@ -70,6 +155,16 @@ impl ChatManager {
         }
     }
 
+    pub fn set_pty_writer(&self, writer: Arc<dyn PtyBridgeWriter>) {
+        if let Ok(mut slot) = self.pty_writer.write() {
+            *slot = Some(writer);
+        }
+    }
+
+    fn get_pty_writer(&self) -> Option<Arc<dyn PtyBridgeWriter>> {
+        self.pty_writer.read().ok().and_then(|slot| slot.clone())
+    }
+
     fn resolve_journal_path(&self, agent: &AgentId) -> PathBuf {
         let dir = self
             .journal_dir
@@ -78,6 +173,61 @@ impl ChatManager {
             .and_then(|slot| slot.clone())
             .unwrap_or_else(|| std::env::temp_dir().join("muxlane-chats"));
         journal::journal_path(&dir, agent)
+    }
+
+    async fn emit_delta_op(&self, agent: &AgentId, op: ChatDeltaOp) {
+        let persist = !is_transient_bridge_op(&op);
+        let meta_changed = matches!(op, ChatDeltaOp::MetaUpdated { .. });
+        let approval_notice = match &op {
+            ChatDeltaOp::ApprovalRequested { approval } => Some((Some(approval.clone()), None)),
+            ChatDeltaOp::ApprovalResolved { approval_id } => {
+                Some((None, Some(approval_id.clone())))
+            }
+            _ => None,
+        };
+        let prepared = {
+            let mut map = self.sessions.lock().await;
+            let Some(entry) = map.get_mut(agent) else {
+                return;
+            };
+            let next_seq = entry.timeline.seq + 1;
+            let ev = ChatDeltaEvent {
+                agent: agent.clone(),
+                seq: next_seq,
+                delta: op,
+            };
+            entry.timeline.apply(ev.clone());
+            entry.subs.retain(|s| !s.tx.is_closed());
+            let is_structured = entry.pty_bridge.is_none();
+            (
+                ev,
+                entry.subs.clone(),
+                entry.journal_path.clone(),
+                is_structured,
+            )
+        };
+        let (event, subs, journal_path, is_structured) = prepared;
+        if persist {
+            let _ = journal::append_delta(&journal_path, &event);
+        }
+        if meta_changed && is_structured {
+            let _ = self.notices.send(ChatHostNotice::MetaPersisted {
+                agent: agent.clone(),
+            });
+        }
+        if let Some((approval, resolved_id)) = approval_notice {
+            let _ = self.notices.send(ChatHostNotice::ApprovalChanged {
+                agent: agent.clone(),
+                approval: approval.map(Box::new),
+                resolved_id,
+            });
+        }
+        if let Ok(payload) = serde_json::to_value(&event) {
+            let rpc_ev = EventMsg::new(events::CHAT_DELTA, payload);
+            for sub in subs {
+                let _ = sub.tx.try_send(rpc_ev.clone());
+            }
+        }
     }
 
     /// 启动并注册一个新的结构化 Chat 会话（Pi RPC 或通用 ACP）。
@@ -121,8 +271,18 @@ impl ChatManager {
             });
         }
 
-        {
+        let preserved_subs = {
             let mut map = self.sessions.lock().await;
+            let subs = map
+                .remove(&agent)
+                .map(|mut old| {
+                    if let Some(old_driver) = old.driver.take() {
+                        let _ = old_driver.send(DriverCmd::Shutdown);
+                    }
+                    // Dropping `old.pty_bridge` aborts any active watcher task cleanly.
+                    old.subs
+                })
+                .unwrap_or_default();
             map.insert(
                 agent.clone(),
                 ChatSessionEntry {
@@ -130,9 +290,21 @@ impl ChatManager {
                     timeline,
                     journal_path,
                     driver: Some(handle),
-                    subs: Vec::new(),
+                    pty_bridge: None,
+                    subs: subs.clone(),
                 },
             );
+            subs
+        };
+
+        if !preserved_subs.is_empty() {
+            self.emit_delta_op(
+                &agent,
+                ChatDeltaOp::MetaUpdated {
+                    meta: initial_meta.clone(),
+                },
+            )
+            .await;
         }
 
         let this = Arc::clone(self);
@@ -141,6 +313,634 @@ impl ChatManager {
         });
 
         Ok(initial_meta)
+    }
+
+    /// 为运行在交互式 PTY/tmux 中的 AI Agent 注册或激活 Orca 风格双向实时桥接会话（零重启）。
+    pub async fn ensure_pty_bridge(
+        self: &Arc<Self>,
+        agent: &AgentId,
+        agent_type: AgentType,
+        cwd: PathBuf,
+        started_secs: u64,
+        alive: bool,
+        session_file_hint: Option<PathBuf>,
+    ) -> ChatSessionMeta {
+        let mut emit_meta_update: Option<ChatSessionMeta> = None;
+        let existing_meta = {
+            let mut map = self.sessions.lock().await;
+            if let Some(entry) = map.get_mut(agent) {
+                // Lane B structured driver owns this session; do not override it with PTY bridge.
+                if entry.driver.is_some() {
+                    return entry.timeline.meta.clone();
+                }
+                if let Some(bridge) = entry.pty_bridge.as_mut() {
+                    bridge.agent_type = agent_type;
+                    bridge.cwd = cwd.clone();
+                    if let Some(hint) = session_file_hint.clone() {
+                        bridge.session_file_hint = Some(hint);
+                    }
+                    let mut changed = false;
+                    if entry.timeline.meta.supports_chat_input != alive {
+                        entry.timeline.meta.supports_chat_input = alive;
+                        changed = true;
+                    }
+                    if !entry.timeline.meta.has_pty {
+                        entry.timeline.meta.has_pty = true;
+                        changed = true;
+                    }
+                    if !alive && entry.timeline.meta.is_streaming {
+                        entry.timeline.meta.is_streaming = false;
+                        changed = true;
+                    }
+                    let supports_switch = supports_native_switch_for(agent_type);
+                    if entry.timeline.meta.supports_terminal_switch != supports_switch {
+                        entry.timeline.meta.supports_terminal_switch = supports_switch;
+                        changed = true;
+                    }
+                    bridge.wake_notify.notify_one();
+                    if changed {
+                        emit_meta_update = Some(entry.timeline.meta.clone());
+                    }
+                    Some(entry.timeline.meta.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(meta) = existing_meta {
+            if let Some(updated) = emit_meta_update {
+                self.emit_delta_op(agent, ChatDeltaOp::MetaUpdated { meta: updated })
+                    .await;
+            }
+            return meta;
+        }
+
+        // Hydrate initial transcript synchronously (outside lock) if a Pi/Pie JSONL already exists.
+        let initial_file = session_file_hint.clone().or_else(|| {
+            if matches!(agent_type, AgentType::Pi | AgentType::Pie) {
+                transcript::discover_pi_session_file(
+                    &cwd,
+                    agent_type == AgentType::Pie,
+                    started_secs.saturating_sub(3600),
+                )
+            } else {
+                None
+            }
+        });
+        let mut initial_watcher = initial_file
+            .clone()
+            .map(transcript::IncrementalPiTranscript::new);
+        let initial_poll = initial_watcher.as_mut().and_then(|w| w.poll_deltas().ok());
+
+        let journal_path = self.resolve_journal_path(agent);
+        let wake_notify = Arc::new(Notify::new());
+        let supports_switch = supports_native_switch_for(agent_type);
+
+        let (result_meta, should_emit_meta) = {
+            let mut map = self.sessions.lock().await;
+            // Re-check after lock acquisition in case of concurrent ensure_pty_bridge call.
+            if let Some(existing) = map.get(agent) {
+                if existing.driver.is_some() || existing.pty_bridge.is_some() {
+                    return existing.timeline.meta.clone();
+                }
+            }
+
+            let preserved = map.remove(agent);
+            let mut timeline = preserved
+                .as_ref()
+                .map(|old| old.timeline.clone())
+                .unwrap_or_default();
+            let preserved_subs = preserved.map(|old| old.subs).unwrap_or_default();
+
+            let mut meta = ChatSessionMeta {
+                driver: SessionDriverMode::TerminalPty,
+                supports_chat_input: alive,
+                supports_terminal_switch: supports_switch,
+                has_pty: true,
+                provider_session_id: timeline.meta.provider_session_id.clone(),
+                provider_session_file: initial_file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .or_else(|| timeline.meta.provider_session_file.clone()),
+                current_model: timeline.meta.current_model.clone(),
+                thinking_level: timeline.meta.thinking_level.clone(),
+                ..Default::default()
+            };
+
+            if let Some(poll) = initial_poll {
+                merge_transcript_meta(&mut meta, &poll.meta);
+                for entry in poll.upserted_entries {
+                    let seq = timeline.seq + 1;
+                    timeline.apply(ChatDeltaEvent {
+                        agent: agent.clone(),
+                        seq,
+                        delta: ChatDeltaOp::UpsertEntry { entry },
+                    });
+                }
+            }
+            timeline.meta = meta.clone();
+
+            let this = Arc::clone(self);
+            let agent_for_watch = agent.clone();
+            let wake_for_watch = Arc::clone(&wake_notify);
+            let watcher_handle = tokio::spawn(async move {
+                this.watch_pty_bridge_transcript(agent_for_watch, wake_for_watch, initial_watcher)
+                    .await;
+            })
+            .abort_handle();
+
+            let spec = DriverLaunchSpec {
+                agent: agent.clone(),
+                agent_type,
+                driver_kind: default_driver_kind_for(agent_type),
+                program: agent_type.program().to_string(),
+                args: Vec::new(),
+                cwd: cwd.clone(),
+                env: Vec::new(),
+                provider_session: meta
+                    .provider_session_file
+                    .clone()
+                    .or_else(|| meta.provider_session_id.clone()),
+                model: None,
+                thinking_level: None,
+            };
+
+            let had_subs = !preserved_subs.is_empty();
+            map.insert(
+                agent.clone(),
+                ChatSessionEntry {
+                    spec,
+                    timeline,
+                    journal_path,
+                    driver: None,
+                    pty_bridge: Some(PtyBridgeState {
+                        agent_type,
+                        cwd,
+                        started_secs,
+                        session_file_hint: initial_file,
+                        write_lock: Arc::new(Mutex::new(())),
+                        wake_notify,
+                        watcher_abort: Some(watcher_handle),
+                        pending_user_echoes: Vec::new(),
+                        has_live_preview: false,
+                        bridge_approval_id: None,
+                    }),
+                    subs: preserved_subs,
+                },
+            );
+            (meta, had_subs)
+        };
+
+        if should_emit_meta {
+            self.emit_delta_op(
+                agent,
+                ChatDeltaOp::MetaUpdated {
+                    meta: result_meta.clone(),
+                },
+            )
+            .await;
+        }
+        result_meta
+    }
+
+    /// 切换 PTY Bridge 写入锁状态（前台进程退回裸 Shell 时立刻降为只读，重新启动 Agent 时自动解锁）。
+    pub async fn set_pty_bridge_alive(&self, agent: &AgentId, alive: bool) {
+        let next_meta = {
+            let mut map = self.sessions.lock().await;
+            let Some(entry) = map.get_mut(agent) else {
+                return;
+            };
+            if entry.driver.is_some() || entry.pty_bridge.is_none() {
+                return;
+            }
+            let mut changed = false;
+            if entry.timeline.meta.supports_chat_input != alive {
+                entry.timeline.meta.supports_chat_input = alive;
+                changed = true;
+            }
+            if !alive && entry.timeline.meta.is_streaming {
+                entry.timeline.meta.is_streaming = false;
+                changed = true;
+            }
+            if changed {
+                Some(entry.timeline.meta.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(meta) = next_meta {
+            self.emit_delta_op(agent, ChatDeltaOp::MetaUpdated { meta })
+                .await;
+        }
+    }
+
+    /// 唤醒 PTY Bridge 监听任务（例如用户在终端手动回车后立即同步磁盘 Transcript）。
+    pub async fn wake_pty_bridge(&self, agent: &AgentId) {
+        let wake = {
+            let map = self.sessions.lock().await;
+            map.get(agent)
+                .and_then(|entry| entry.pty_bridge.as_ref())
+                .map(|b| Arc::clone(&b.wake_notify))
+        };
+        if let Some(wake) = wake {
+            wake.notify_one();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                wake.notify_one();
+            });
+        }
+    }
+
+    /// 接收来自 Pi/OpenCode Extension 的 `agent.report` 侧信道事件（会话文件/模型/实时预览/审批/完成）。
+    pub async fn notify_pty_hook(&self, params: &AgentReportParams) {
+        let (ops, wake) = {
+            let mut map = self.sessions.lock().await;
+            let Some(entry) = map.get_mut(&params.agent) else {
+                return;
+            };
+            if entry.driver.is_some() {
+                return;
+            }
+            let Some(bridge) = entry.pty_bridge.as_mut() else {
+                return;
+            };
+
+            let mut ops = Vec::new();
+            let mut meta = entry.timeline.meta.clone();
+            let mut meta_changed = false;
+
+            if let Some(file) = params
+                .session_file
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let path = PathBuf::from(file);
+                if bridge.session_file_hint.as_ref() != Some(&path) {
+                    bridge.session_file_hint = Some(path);
+                }
+                if meta.provider_session_file.as_deref() != Some(file) {
+                    meta.provider_session_file = Some(file.to_string());
+                    meta_changed = true;
+                }
+            }
+            if let Some(sid) = params
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if meta.provider_session_id.as_deref() != Some(sid) {
+                    meta.provider_session_id = Some(sid.to_string());
+                    meta_changed = true;
+                }
+            }
+            if let Some(model_raw) = params.model.as_deref() {
+                if let Some(model_info) = model_info_from_string(model_raw) {
+                    if meta.current_model.as_ref() != Some(&model_info) {
+                        meta.current_model = Some(model_info);
+                        meta_changed = true;
+                    }
+                }
+            }
+
+            let is_jsonl_backed = matches!(bridge.agent_type, AgentType::Pi | AgentType::Pie)
+                || bridge.session_file_hint.is_some();
+
+            match params.event.as_str() {
+                "meta" => {}
+                "preview" => {
+                    if let Some(preview) = params
+                        .streaming_preview
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        bridge.has_live_preview = true;
+                        if !meta.is_streaming {
+                            meta.is_streaming = true;
+                            meta_changed = true;
+                        }
+                        ops.push(ChatDeltaOp::UpsertEntry {
+                            entry: TimelineEntry::AssistantText {
+                                id: BRIDGE_LIVE_PREVIEW_ID.to_string(),
+                                turn_id: None,
+                                text: preview.to_string(),
+                                streaming: true,
+                                model: meta.current_model.as_ref().map(|m| m.name.clone()),
+                                created_at_ms: now_ms(),
+                            },
+                        });
+                    }
+                }
+                "working" => {
+                    if !meta.is_streaming {
+                        meta.is_streaming = true;
+                        meta_changed = true;
+                    }
+                    if let Some(old_approval) = bridge.bridge_approval_id.take() {
+                        ops.push(ChatDeltaOp::ApprovalResolved {
+                            approval_id: old_approval,
+                        });
+                    }
+                }
+                "blocked" => {
+                    if meta.is_streaming {
+                        meta.is_streaming = false;
+                        meta_changed = true;
+                    }
+                    let question = params
+                        .message
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("等待用户确认")
+                        .to_string();
+                    if let Some(old_approval) = bridge.bridge_approval_id.take() {
+                        ops.push(ChatDeltaOp::ApprovalResolved {
+                            approval_id: old_approval,
+                        });
+                    }
+                    let approval_id = format!("pty-approval-{}", ulid::Ulid::new());
+                    bridge.bridge_approval_id = Some(approval_id.clone());
+                    ops.push(ChatDeltaOp::ApprovalRequested {
+                        approval: PendingApproval {
+                            id: approval_id,
+                            agent: params.agent.clone(),
+                            source: ApprovalSource::PiExtensionUi,
+                            method: "confirm".to_string(),
+                            title: "终端 Agent 等待确认".to_string(),
+                            message: Some(question),
+                            tool_name: None,
+                            command_or_input: None,
+                            options: vec![
+                                ApprovalOption {
+                                    option_id: "allow_once".to_string(),
+                                    label: "允许 (y)".to_string(),
+                                    kind: Some("allow_once".to_string()),
+                                },
+                                ApprovalOption {
+                                    option_id: "reject_once".to_string(),
+                                    label: "拒绝 (n)".to_string(),
+                                    kind: Some("reject_once".to_string()),
+                                },
+                            ],
+                            prefill: Some(String::new()),
+                            created_at_ms: now_ms(),
+                        },
+                    });
+                }
+                "done" => {
+                    if meta.is_streaming {
+                        meta.is_streaming = false;
+                        meta_changed = true;
+                    }
+                    if let Some(old_approval) = bridge.bridge_approval_id.take() {
+                        ops.push(ChatDeltaOp::ApprovalResolved {
+                            approval_id: old_approval,
+                        });
+                    }
+                    if !is_jsonl_backed {
+                        if bridge.has_live_preview {
+                            bridge.has_live_preview = false;
+                            ops.push(ChatDeltaOp::RemoveEntry {
+                                entry_id: BRIDGE_LIVE_PREVIEW_ID.to_string(),
+                            });
+                        }
+                        let final_text = params
+                            .streaming_preview
+                            .as_deref()
+                            .or(params.message.as_deref())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty() && *s != "任务已完成");
+                        if let Some(text) = final_text {
+                            ops.push(ChatDeltaOp::UpsertEntry {
+                                entry: TimelineEntry::AssistantText {
+                                    id: format!("bridge-done-{}", ulid::Ulid::new()),
+                                    turn_id: None,
+                                    text: text.to_string(),
+                                    streaming: false,
+                                    model: meta.current_model.as_ref().map(|m| m.name.clone()),
+                                    created_at_ms: now_ms(),
+                                },
+                            });
+                        }
+                    }
+                    ops.push(ChatDeltaOp::TurnFinished {
+                        turn_id: None,
+                        error: None,
+                    });
+                }
+                "idle" => {
+                    if meta.is_streaming {
+                        meta.is_streaming = false;
+                        meta_changed = true;
+                    }
+                    if let Some(old_approval) = bridge.bridge_approval_id.take() {
+                        ops.push(ChatDeltaOp::ApprovalResolved {
+                            approval_id: old_approval,
+                        });
+                    }
+                    if bridge.has_live_preview {
+                        bridge.has_live_preview = false;
+                        ops.push(ChatDeltaOp::RemoveEntry {
+                            entry_id: BRIDGE_LIVE_PREVIEW_ID.to_string(),
+                        });
+                    }
+                    ops.push(ChatDeltaOp::TurnFinished {
+                        turn_id: None,
+                        error: None,
+                    });
+                }
+                "failed" | "error" => {
+                    if meta.is_streaming {
+                        meta.is_streaming = false;
+                        meta_changed = true;
+                    }
+                    if let Some(old_approval) = bridge.bridge_approval_id.take() {
+                        ops.push(ChatDeltaOp::ApprovalResolved {
+                            approval_id: old_approval,
+                        });
+                    }
+                    if bridge.has_live_preview {
+                        bridge.has_live_preview = false;
+                        ops.push(ChatDeltaOp::RemoveEntry {
+                            entry_id: BRIDGE_LIVE_PREVIEW_ID.to_string(),
+                        });
+                    }
+                    ops.push(ChatDeltaOp::TurnFinished {
+                        turn_id: None,
+                        error: params.message.clone(),
+                    });
+                }
+                _ => {}
+            }
+
+            if meta_changed {
+                ops.insert(0, ChatDeltaOp::MetaUpdated { meta });
+            }
+            (ops, Arc::clone(&bridge.wake_notify))
+        };
+
+        for op in ops {
+            self.emit_delta_op(&params.agent, op).await;
+        }
+        wake.notify_one();
+    }
+
+    async fn watch_pty_bridge_transcript(
+        self: Arc<Self>,
+        agent: AgentId,
+        wake: Arc<Notify>,
+        mut watcher: Option<transcript::IncrementalPiTranscript>,
+    ) {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(BRIDGE_POLL_INTERVAL) => {}
+                _ = wake.notified() => {}
+            }
+
+            let probe = {
+                let map = self.sessions.lock().await;
+                let Some(entry) = map.get(&agent) else {
+                    break;
+                };
+                if entry.driver.is_some() {
+                    break;
+                }
+                let Some(bridge) = entry.pty_bridge.as_ref() else {
+                    break;
+                };
+                (
+                    bridge.agent_type,
+                    bridge.cwd.clone(),
+                    bridge.started_secs,
+                    bridge.session_file_hint.clone(),
+                )
+            };
+
+            let (agent_type, cwd, started_secs, hint) = probe;
+            let resolved_file = hint.or_else(|| {
+                if matches!(agent_type, AgentType::Pi | AgentType::Pie) {
+                    transcript::discover_pi_session_file(
+                        &cwd,
+                        agent_type == AgentType::Pie,
+                        started_secs.saturating_sub(3600),
+                    )
+                } else {
+                    None
+                }
+            });
+
+            let Some(file_path) = resolved_file else {
+                continue;
+            };
+
+            match watcher.as_mut() {
+                None => {
+                    watcher = Some(transcript::IncrementalPiTranscript::new(file_path));
+                }
+                Some(existing) if existing.file_path() != file_path => {
+                    existing.switch_file(file_path);
+                }
+                Some(_) => {}
+            }
+
+            let Some(active_watcher) = watcher.as_mut() else {
+                continue;
+            };
+            let poll = match active_watcher.poll_deltas() {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::debug!(%agent, %err, "incremental transcript poll error");
+                    continue;
+                }
+            };
+
+            if !poll.reset && !poll.meta_changed && poll.upserted_entries.is_empty() {
+                continue;
+            }
+
+            self.apply_bridge_transcript_poll(&agent, poll).await;
+        }
+    }
+
+    async fn apply_bridge_transcript_poll(
+        &self,
+        agent: &AgentId,
+        poll: transcript::TranscriptPoll,
+    ) {
+        let ops = {
+            let mut map = self.sessions.lock().await;
+            let Some(entry) = map.get_mut(agent) else {
+                return;
+            };
+            let Some(bridge) = entry.pty_bridge.as_mut() else {
+                return;
+            };
+
+            let mut ops = Vec::new();
+            if poll.reset {
+                bridge.pending_user_echoes.clear();
+                bridge.has_live_preview = false;
+                ops.push(ChatDeltaOp::Reset);
+            }
+
+            let mut merged_meta = entry.timeline.meta.clone();
+            let meta_diff = merge_transcript_meta(&mut merged_meta, &poll.meta);
+            if poll.meta_changed && meta_diff {
+                ops.push(ChatDeltaOp::MetaUpdated { meta: merged_meta });
+            }
+
+            let now = now_ms();
+            // Prune stale optimistic user echoes older than 60s.
+            let mut stale_ids = Vec::new();
+            bridge.pending_user_echoes.retain(|(id, _, ts)| {
+                if now.saturating_sub(*ts) > 60_000 {
+                    stale_ids.push(id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            for id in stale_ids {
+                ops.push(ChatDeltaOp::RemoveEntry { entry_id: id });
+            }
+
+            for item in poll.upserted_entries {
+                match &item {
+                    TimelineEntry::UserMessage { text, .. } => {
+                        let norm = normalize_echo_text(text);
+                        if let Some(pos) = bridge
+                            .pending_user_echoes
+                            .iter()
+                            .position(|(_, pending_norm, _)| *pending_norm == norm)
+                        {
+                            let (pending_id, _, _) = bridge.pending_user_echoes.remove(pos);
+                            ops.push(ChatDeltaOp::RemoveEntry {
+                                entry_id: pending_id,
+                            });
+                        }
+                    }
+                    TimelineEntry::AssistantText { .. } if bridge.has_live_preview => {
+                        bridge.has_live_preview = false;
+                        ops.push(ChatDeltaOp::RemoveEntry {
+                            entry_id: BRIDGE_LIVE_PREVIEW_ID.to_string(),
+                        });
+                    }
+                    _ => {}
+                }
+                ops.push(ChatDeltaOp::UpsertEntry { entry: item });
+            }
+            ops
+        };
+
+        for op in ops {
+            self.emit_delta_op(agent, op).await;
+        }
     }
 
     /// 启动时从磁盘 journal 恢复历史时间线（惰性唤醒子进程，秒开历史面板）。
@@ -173,6 +973,7 @@ impl ChatManager {
                 timeline,
                 journal_path,
                 driver: None,
+                pty_bridge: None,
                 subs: Vec::new(),
             },
         );
@@ -185,6 +986,10 @@ impl ChatManager {
             return Vec::new();
         };
         map.iter()
+            .filter(|(_, entry)| {
+                entry.pty_bridge.is_none()
+                    && entry.timeline.meta.driver != SessionDriverMode::TerminalPty
+            })
             .map(|(agent, entry)| {
                 (
                     agent.clone(),
@@ -211,6 +1016,7 @@ impl ChatManager {
             if let Some(driver) = entry.driver {
                 let _ = driver.send(DriverCmd::Shutdown);
             }
+            // Dropping `entry.pty_bridge` aborts any running watcher task.
             journal::remove_journal(&entry.journal_path);
         }
     }
@@ -242,6 +1048,7 @@ impl ChatManager {
             let mut map = self.sessions.lock().await;
             map.get_mut(agent).and_then(|entry| {
                 entry.timeline.meta.is_streaming = false;
+                entry.pty_bridge = None;
                 entry.driver.take()
             })
         };
@@ -382,6 +1189,116 @@ impl ChatManager {
         attachments: Vec<ChatAttachment>,
         streaming_behavior: Option<StreamingBehavior>,
     ) -> anyhow::Result<()> {
+        let bridge_ctx = {
+            let map = self.sessions.lock().await;
+            map.get(agent).and_then(|entry| {
+                if entry.driver.is_none() {
+                    entry.pty_bridge.as_ref().map(|b| {
+                        (
+                            Arc::clone(&b.write_lock),
+                            Arc::clone(&b.wake_notify),
+                            b.agent_type,
+                            b.session_file_hint.is_some(),
+                        )
+                    })
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let Some((write_lock, wake_notify, agent_type, has_file_hint)) = bridge_ctx {
+            let writer = self
+                .get_pty_writer()
+                .ok_or_else(|| anyhow::anyhow!("PTY bridge writer unavailable"))?;
+            if !writer.is_agent_confirmed(agent).await {
+                self.set_pty_bridge_alive(agent, false).await;
+                anyhow::bail!("terminal session returned to bare shell; chat input disabled");
+            }
+
+            let _guard = write_lock.lock().await;
+            let sanitized = pty_bridge::sanitize_pty_paste_text(&text);
+            let display_text = sanitized.trim().to_string();
+            let is_jsonl_backed =
+                matches!(agent_type, AgentType::Pi | AgentType::Pie) || has_file_hint;
+
+            let pending_id = if !display_text.is_empty() || !attachments.is_empty() {
+                let id = if is_jsonl_backed {
+                    format!("{BRIDGE_PENDING_USER_PREFIX}{}", ulid::Ulid::new())
+                } else {
+                    format!("bridge-user-{}", ulid::Ulid::new())
+                };
+                let created_at_ms = now_ms();
+                if is_jsonl_backed {
+                    let mut map = self.sessions.lock().await;
+                    if let Some(bridge) = map.get_mut(agent).and_then(|e| e.pty_bridge.as_mut()) {
+                        bridge.pending_user_echoes.push((
+                            id.clone(),
+                            normalize_echo_text(&display_text),
+                            created_at_ms,
+                        ));
+                    }
+                }
+                self.emit_delta_op(
+                    agent,
+                    ChatDeltaOp::UpsertEntry {
+                        entry: TimelineEntry::UserMessage {
+                            id: id.clone(),
+                            turn_id: None,
+                            text: display_text.clone(),
+                            attachments: attachments.clone(),
+                            created_at_ms,
+                        },
+                    },
+                )
+                .await;
+                Some(id)
+            } else {
+                None
+            };
+
+            if let Err(err) =
+                pty_bridge::submit_prompt_to_pty(writer.as_ref(), agent, &text, &attachments).await
+            {
+                if let Some(id) = pending_id {
+                    let mut map = self.sessions.lock().await;
+                    if let Some(bridge) = map.get_mut(agent).and_then(|e| e.pty_bridge.as_mut()) {
+                        bridge.pending_user_echoes.retain(|(pid, _, _)| pid != &id);
+                    }
+                    drop(map);
+                    self.emit_delta_op(agent, ChatDeltaOp::RemoveEntry { entry_id: id })
+                        .await;
+                }
+                if err.to_string().contains("bare shell") {
+                    self.set_pty_bridge_alive(agent, false).await;
+                }
+                return Err(err);
+            }
+
+            let next_meta = {
+                let mut map = self.sessions.lock().await;
+                map.get_mut(agent).and_then(|e| {
+                    if !e.timeline.meta.is_streaming {
+                        e.timeline.meta.is_streaming = true;
+                        Some(e.timeline.meta.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(meta) = next_meta {
+                self.emit_delta_op(agent, ChatDeltaOp::MetaUpdated { meta })
+                    .await;
+            }
+
+            wake_notify.notify_one();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(160)).await;
+                wake_notify.notify_one();
+            });
+            return Ok(());
+        }
+
         let driver = self.ensure_driver_active(agent).await?;
         driver.send(DriverCmd::SendPrompt {
             text,
@@ -391,12 +1308,42 @@ impl ChatManager {
     }
 
     pub async fn abort(&self, agent: &AgentId) -> anyhow::Result<()> {
-        let driver = {
+        let (driver, bridge_ctx) = {
             let map = self.sessions.lock().await;
-            map.get(agent).and_then(|e| e.driver.clone())
+            let entry = map.get(agent);
+            let driver = entry.and_then(|e| e.driver.clone());
+            let bridge = entry.and_then(|e| {
+                if e.driver.is_none() {
+                    e.pty_bridge.as_ref().map(|b| {
+                        (
+                            Arc::clone(&b.write_lock),
+                            Arc::clone(&b.wake_notify),
+                            b.agent_type,
+                        )
+                    })
+                } else {
+                    None
+                }
+            });
+            (driver, bridge)
         };
         if let Some(driver) = driver {
             driver.send(DriverCmd::Abort)?;
+            return Ok(());
+        }
+        if let Some((write_lock, wake_notify, agent_type)) = bridge_ctx {
+            let writer = self
+                .get_pty_writer()
+                .ok_or_else(|| anyhow::anyhow!("PTY bridge writer unavailable"))?;
+            if !writer.is_agent_confirmed(agent).await {
+                self.set_pty_bridge_alive(agent, false).await;
+                anyhow::bail!("terminal session returned to bare shell; abort disabled");
+            }
+            let _guard = write_lock.lock().await;
+            writer
+                .write_bytes(agent, pty_bridge::abort_bytes_for_agent(agent_type))
+                .await?;
+            wake_notify.notify_one();
         }
         Ok(())
     }
@@ -407,13 +1354,51 @@ impl ChatManager {
         approval_id: String,
         reply: ApprovalReply,
     ) -> anyhow::Result<()> {
-        let driver = {
+        let (driver, bridge_ctx) = {
             let map = self.sessions.lock().await;
-            map.get(agent)
-                .and_then(|e| e.driver.clone())
-                .ok_or_else(|| anyhow::anyhow!("driver not running for {agent}"))?
+            let entry = map.get(agent);
+            let driver = entry.and_then(|e| e.driver.clone());
+            let bridge = entry.and_then(|e| {
+                if e.driver.is_none() {
+                    e.pty_bridge
+                        .as_ref()
+                        .map(|b| (Arc::clone(&b.write_lock), Arc::clone(&b.wake_notify)))
+                } else {
+                    None
+                }
+            });
+            (driver, bridge)
         };
-        driver.send(DriverCmd::RespondApproval { approval_id, reply })
+        if let Some(driver) = driver {
+            return driver.send(DriverCmd::RespondApproval { approval_id, reply });
+        }
+        if let Some((write_lock, wake_notify)) = bridge_ctx {
+            let writer = self
+                .get_pty_writer()
+                .ok_or_else(|| anyhow::anyhow!("PTY bridge writer unavailable"))?;
+            let _guard = write_lock.lock().await;
+            if let Err(err) =
+                pty_bridge::submit_approval_to_pty(writer.as_ref(), agent, &reply).await
+            {
+                if err.to_string().contains("bare shell") {
+                    self.set_pty_bridge_alive(agent, false).await;
+                }
+                return Err(err);
+            }
+            {
+                let mut map = self.sessions.lock().await;
+                if let Some(bridge) = map.get_mut(agent).and_then(|e| e.pty_bridge.as_mut()) {
+                    if bridge.bridge_approval_id.as_deref() == Some(approval_id.as_str()) {
+                        bridge.bridge_approval_id = None;
+                    }
+                }
+            }
+            self.emit_delta_op(agent, ChatDeltaOp::ApprovalResolved { approval_id })
+                .await;
+            wake_notify.notify_one();
+            return Ok(());
+        }
+        Err(anyhow::anyhow!("driver not running for {agent}"))
     }
 
     pub async fn configure(
@@ -423,6 +1408,14 @@ impl ChatManager {
         model_id: Option<String>,
         thinking_level: Option<String>,
     ) -> anyhow::Result<()> {
+        let is_pty_bridge = {
+            let map = self.sessions.lock().await;
+            map.get(agent)
+                .is_some_and(|e| e.driver.is_none() && e.pty_bridge.is_some())
+        };
+        if is_pty_bridge {
+            anyhow::bail!("model configuration requires structured chat driver");
+        }
         let driver = self.ensure_driver_active(agent).await?;
         if let Some(model_id) = model_id {
             driver.send(DriverCmd::SetModel { provider, model_id })?;
@@ -441,51 +1434,7 @@ impl ChatManager {
         while let Some(ev) = rx.recv().await {
             match ev {
                 DriverEvent::Delta(op) => {
-                    let meta_changed = matches!(op, ChatDeltaOp::MetaUpdated { .. });
-                    let approval_notice = match &op {
-                        ChatDeltaOp::ApprovalRequested { approval } => {
-                            Some((Some(approval.clone()), None))
-                        }
-                        ChatDeltaOp::ApprovalResolved { approval_id } => {
-                            Some((None, Some(approval_id.clone())))
-                        }
-                        _ => None,
-                    };
-                    let (event, subs, journal_path) = {
-                        let mut map = self.sessions.lock().await;
-                        let Some(entry) = map.get_mut(&agent) else {
-                            break;
-                        };
-                        let next_seq = entry.timeline.seq + 1;
-                        let ev = ChatDeltaEvent {
-                            agent: agent.clone(),
-                            seq: next_seq,
-                            delta: op,
-                        };
-                        entry.timeline.apply(ev.clone());
-                        entry.subs.retain(|s| !s.tx.is_closed());
-                        (ev, entry.subs.clone(), entry.journal_path.clone())
-                    };
-
-                    let _ = journal::append_delta(&journal_path, &event);
-                    if meta_changed {
-                        let _ = self.notices.send(ChatHostNotice::MetaPersisted {
-                            agent: agent.clone(),
-                        });
-                    }
-                    if let Some((approval, resolved_id)) = approval_notice {
-                        let _ = self.notices.send(ChatHostNotice::ApprovalChanged {
-                            agent: agent.clone(),
-                            approval: approval.map(Box::new),
-                            resolved_id,
-                        });
-                    }
-                    if let Ok(payload) = serde_json::to_value(&event) {
-                        let rpc_ev = EventMsg::new(events::CHAT_DELTA, payload);
-                        for sub in subs {
-                            let _ = sub.tx.try_send(rpc_ev.clone());
-                        }
-                    }
+                    self.emit_delta_op(&agent, op).await;
                 }
                 DriverEvent::Status {
                     status,
@@ -547,6 +1496,30 @@ impl ChatManager {
             }
         }
     }
+}
+
+/// Merges transcript-derived metadata (session id/file, model, thinking level) into live bridge
+/// metadata without clobbering `supports_chat_input`, `has_pty`, or `is_streaming`.
+fn merge_transcript_meta(dst: &mut ChatSessionMeta, src: &ChatSessionMeta) -> bool {
+    let mut changed = false;
+    if src.provider_session_id.is_some() && dst.provider_session_id != src.provider_session_id {
+        dst.provider_session_id = src.provider_session_id.clone();
+        changed = true;
+    }
+    if src.provider_session_file.is_some() && dst.provider_session_file != src.provider_session_file
+    {
+        dst.provider_session_file = src.provider_session_file.clone();
+        changed = true;
+    }
+    if src.current_model.is_some() && dst.current_model != src.current_model {
+        dst.current_model = src.current_model.clone();
+        changed = true;
+    }
+    if src.thinking_level.is_some() && dst.thinking_level != src.thinking_level {
+        dst.thinking_level = src.thinking_level.clone();
+        changed = true;
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -804,5 +1777,224 @@ process.stdin.on("data", (chunk) => {
             e,
             TimelineEntry::AssistantText { text, .. } if text == "All set via ACP!"
         )));
+    }
+
+    #[tokio::test]
+    async fn chat_manager_bridges_pty_two_way_with_incremental_jsonl_and_shell_guard() {
+        use std::future::Future;
+        use std::io::Write;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TestPtyWriter {
+            confirmed: AtomicBool,
+            writes: std::sync::Mutex<Vec<Vec<u8>>>,
+        }
+
+        impl PtyBridgeWriter for TestPtyWriter {
+            fn is_agent_confirmed(
+                &self,
+                _agent: &AgentId,
+            ) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+                let ok = self.confirmed.load(Ordering::Acquire);
+                Box::pin(async move { ok })
+            }
+
+            fn write_bytes(
+                &self,
+                _agent: &AgentId,
+                bytes: Vec<u8>,
+            ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+                self.writes.lock().unwrap().push(bytes);
+                Box::pin(async { Ok(()) })
+            }
+
+            fn notify_submitted(
+                &self,
+                _agent: &AgentId,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+                Box::pin(async {})
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("pi-live.jsonl");
+        std::fs::write(
+            &jsonl,
+            concat!(r#"{"type":"session","version":3,"id":"sess-live"}"#, "\n"),
+        )
+        .unwrap();
+
+        let (notice_tx, _notice_rx) = mpsc::unbounded_channel();
+        let manager = ChatManager::new(notice_tx);
+        manager.set_journal_dir(dir.path().join("journals"));
+        let writer = Arc::new(TestPtyWriter {
+            confirmed: AtomicBool::new(true),
+            writes: std::sync::Mutex::new(Vec::new()),
+        });
+        manager.set_pty_writer(writer.clone());
+
+        let agent: AgentId = "pi-pty-1".into();
+        let meta = manager
+            .ensure_pty_bridge(
+                &agent,
+                AgentType::Pi,
+                dir.path().to_path_buf(),
+                0,
+                true,
+                None,
+            )
+            .await;
+        assert_eq!(meta.driver, SessionDriverMode::TerminalPty);
+        assert!(meta.supports_chat_input);
+        assert!(meta.has_pty);
+        // PTY bridge sessions must not be exported into headless chat persistence.
+        assert!(manager.try_persisted_records().is_empty());
+
+        let (sub_tx, mut sub_rx) = mpsc::channel(64);
+        let initial = manager
+            .subscribe(&agent, "sub-1".into(), sub_tx)
+            .await
+            .unwrap();
+        assert_eq!(initial.meta.driver, SessionDriverMode::TerminalPty);
+
+        // Hook reports exact session_file & model.
+        manager
+            .notify_pty_hook(&AgentReportParams {
+                token: String::new(),
+                agent: agent.clone(),
+                event: "meta".into(),
+                message: None,
+                session_id: Some("sess-live".into()),
+                session_file: Some(jsonl.display().to_string()),
+                model: Some("anthropic/claude-sonnet".into()),
+                streaming_preview: None,
+            })
+            .await;
+
+        // Send multiline prompt from Chat UI -> writes Bracketed Paste + separate `\r` and emits optimistic echo.
+        manager
+            .send_prompt(&agent, "line 1\nline 2".into(), Vec::new(), None)
+            .await
+            .unwrap();
+        {
+            let writes = writer.writes.lock().unwrap();
+            assert_eq!(writes.len(), 2);
+            assert_eq!(writes[0], b"\x1b[200~line 1\nline 2\x1b[201~");
+            assert_eq!(writes[1], b"\r");
+        }
+        let after_send = manager.history(&agent).await.unwrap();
+        assert!(after_send
+            .entries
+            .iter()
+            .any(|e| e.id().starts_with(BRIDGE_PENDING_USER_PREFIX)));
+
+        // Hook streams a live preview before disk flush.
+        manager
+            .notify_pty_hook(&AgentReportParams {
+                token: String::new(),
+                agent: agent.clone(),
+                event: "preview".into(),
+                streaming_preview: Some("Draft answer...".into()),
+                ..Default::default()
+            })
+            .await;
+        assert!(manager
+            .history(&agent)
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.id() == BRIDGE_LIVE_PREVIEW_ID));
+
+        // Simulate Pi flushing real user + assistant JSONL lines to disk.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&jsonl)
+                .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"message","id":"u1","message":{{"role":"user","content":"line 1\nline 2","timestamp":1000}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"message","id":"a1","message":{{"role":"assistant","content":[{{"type":"text","text":"Final synced answer"}}],"timestamp":2000}}}}"#
+            )
+            .unwrap();
+        }
+        manager.wake_pty_bridge(&agent).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let hist = manager.history(&agent).await.unwrap();
+            let has_real_user = hist.entries.iter().any(|e| e.id() == "pi-user-u1");
+            let has_real_asst = hist.entries.iter().any(|e| {
+                matches!(e, TimelineEntry::AssistantText { id, text, .. } if id == "pi-text-a1-0" && text == "Final synced answer")
+            });
+            let no_pending = !hist.entries.iter().any(|e| {
+                e.id().starts_with(BRIDGE_PENDING_USER_PREFIX) || e.id() == BRIDGE_LIVE_PREVIEW_ID
+            });
+            if has_real_user && has_real_asst && no_pending {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for bridged JSONL reconciliation: {:?}",
+                hist.entries
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(sub_rx.try_recv().is_ok());
+
+        // Blocked hook creates inline approval; approving writes `y\r` into PTY.
+        manager
+            .notify_pty_hook(&AgentReportParams {
+                token: String::new(),
+                agent: agent.clone(),
+                event: "blocked".into(),
+                message: Some("Run tests?".into()),
+                ..Default::default()
+            })
+            .await;
+        let approval_id = manager
+            .history(&agent)
+            .await
+            .unwrap()
+            .pending_approvals
+            .first()
+            .unwrap()
+            .id
+            .clone();
+        manager
+            .approve(
+                &agent,
+                approval_id,
+                ApprovalReply::Confirm { confirmed: true },
+            )
+            .await
+            .unwrap();
+        assert_eq!(writer.writes.lock().unwrap().last().unwrap(), b"y\r");
+
+        // Abort sends Esc (`\x1b`) for Pi.
+        manager.abort(&agent).await.unwrap();
+        assert_eq!(writer.writes.lock().unwrap().last().unwrap(), b"\x1b");
+
+        // Bare-shell guard rejects writes and locks `supports_chat_input = false`.
+        writer.confirmed.store(false, Ordering::Release);
+        let err = manager
+            .send_prompt(&agent, "should fail".into(), Vec::new(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("bare shell"));
+        assert!(
+            !manager
+                .history(&agent)
+                .await
+                .unwrap()
+                .meta
+                .supports_chat_input
+        );
     }
 }

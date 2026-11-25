@@ -3622,9 +3622,11 @@ name = "muxlane-chat"
 version = "0.0.35"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "muxlane-core",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

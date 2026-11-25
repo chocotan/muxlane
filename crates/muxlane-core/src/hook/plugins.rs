@@ -220,6 +220,92 @@ assert.deepEqual(takeReports().map((item) => item.event), ["working", "blocked"]
     }
 
     #[test]
+    fn generated_pi_extension_reports_session_metadata_and_preview() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let extension = dir.path().join("muxlane.mjs");
+        let runner = dir.path().join("runner.mjs");
+        std::fs::write(&extension, PI_EXTENSION).unwrap();
+        std::fs::write(
+            &runner,
+            r#"import assert from "node:assert/strict"
+import net from "node:net"
+import { pathToFileURL } from "node:url"
+
+const reports = []
+net.createConnection = () => {
+  const handlers = {}
+  const client = {
+    setTimeout() {},
+    end(data) { reports.push(JSON.parse(data).params) },
+    destroy() {},
+    on(name, callback) {
+      handlers[name] = callback
+      if (name === "close") queueMicrotask(() => {
+        handlers.connect?.()
+        handlers.close?.()
+      })
+      return client
+    },
+  }
+  return client
+}
+process.env.MUXLANE_SOCKET = "/tmp/muxlane-hook-meta-test.sock"
+process.env.MUXLANE_AGENT_ID = "pi_1"
+process.env.MUXLANE_HOOK_TOKEN = "token"
+
+const extension = await import(pathToFileURL(process.argv[2]).href)
+const handlers = new Map()
+extension.default({
+  on: (name, callback) => handlers.set(name, callback),
+  registerEntryRenderer: () => {},
+})
+
+const ctx = {
+  model: { id: "claude-sonnet-4" },
+  sessionManager: {
+    getHeader: () => ({ id: "sess-123" }),
+    getSessionId: () => "sess-123",
+    getSessionFile: () => "/tmp/sessions/sess-123.jsonl",
+    getSessionName: () => "main",
+  },
+}
+
+await handlers.get("session_start")({}, ctx)
+assert.equal(reports.length, 1)
+assert.equal(reports[0].event, "meta")
+assert.equal(reports[0].session_id, "sess-123")
+assert.equal(reports[0].session_file, "/tmp/sessions/sess-123.jsonl")
+assert.equal(reports[0].model, "claude-sonnet-4")
+
+reports.length = 0
+await handlers.get("message_end")({ message: { role: "assistant", content: "Streaming answer body" } }, ctx)
+assert.equal(reports.length, 1)
+assert.equal(reports[0].event, "preview")
+assert.equal(reports[0].session_file, "/tmp/sessions/sess-123.jsonl")
+assert.equal(reports[0].streaming_preview, "Streaming answer body")
+"#,
+        )
+        .unwrap();
+        let output = std::process::Command::new("node")
+            .arg(&runner)
+            .arg(&extension)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "node metadata test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn installs_opencode_and_pi_plugins_idempotently() {
         let dir = tempfile::tempdir().unwrap();
         install_agent_plugins(dir.path()).unwrap();

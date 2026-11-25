@@ -437,7 +437,11 @@ class MuxlaneSession(private val app: Application) {
         _state.value = _state.value.copy(confirmRemoveHost = hostId)
     }
 
-    fun isChatCapable(agentId: String): Boolean = _state.value.chatSessions.containsKey(agentId)
+    fun isChatCapable(agentId: String): Boolean {
+        if (_state.value.chatSessions.containsKey(agentId)) return true
+        val type = snapshotAgent(agentId)?.agentType ?: return false
+        return type != AgentType.SHELL && type != AgentType.UNKNOWN
+    }
 
     fun openAgent(id: String) {
         val mode = if (isChatCapable(id)) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
@@ -542,6 +546,7 @@ class MuxlaneSession(private val app: Application) {
             runCatching {
                 when (mode) {
                     SessionPaneMode.TERMINAL -> {
+                        unsubscribeChatLocked()
                         if (meta != null && meta.driver != SessionDriverMode.TERMINAL_PTY && meta.supportsTerminalSwitch) {
                             val resp = client.call(
                                 Methods.CHAT_SWITCH_MODE,
@@ -553,17 +558,8 @@ class MuxlaneSession(private val app: Application) {
                     }
                     SessionPaneMode.CHAT -> {
                         unsubscribeTermLocked()
-                        if (meta != null && meta.driver == SessionDriverMode.TERMINAL_PTY) {
-                            val targetDriver = if (snapshotAgent(agent)?.agentType in listOf(AgentType.PI, AgentType.PIE)) {
-                                SessionDriverMode.PI_RPC
-                            } else {
-                                SessionDriverMode.ACP
-                            }
-                            client.call(
-                                Methods.CHAT_SWITCH_MODE,
-                                encodeParams(ChatSwitchModeParams.serializer(), ChatSwitchModeParams(agent, targetDriver)),
-                            ).error?.let { error(it.message) }
-                        }
+                        // Orca-style Dual-Lane Bridge: never kill/restart a live PTY on view toggle.
+                        // `chat.subscribe` attaches directly to the live PTY Bridge or structured driver.
                         subscribeChat(agent)
                     }
                 }

@@ -260,8 +260,9 @@ impl ChatView {
         let join = rt_handle.spawn(async move {
             match backend {
                 ChatBackend::Local { server } => {
+                    let _ = server.ensure_pty_bridge_for_agent(&agent).await;
                     let chat = server.chat_manager();
-                    // Poll briefly until ChatManager has registered the session or PTY mirror.
+                    // Poll briefly until ChatManager has registered the session or PTY bridge.
                     for _ in 0..20 {
                         let (ev_tx, mut ev_rx) = mpsc::channel(256);
                         match chat.subscribe(&agent, sub_id.clone(), ev_tx).await {
@@ -283,6 +284,7 @@ impl ChatView {
                                 return;
                             }
                             Err(_) => {
+                                let _ = server.ensure_pty_bridge_for_agent(&agent).await;
                                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                             }
                         }
@@ -592,12 +594,16 @@ impl ChatView {
 
     fn render_header(&mut self, palette: ChatPalette, cx: &mut Context<Self>) -> AnyElement {
         let driver = self.timeline.meta.driver;
+        let is_live_bridge =
+            driver == SessionDriverMode::TerminalPty && self.timeline.meta.supports_chat_input;
         let driver_label = match driver {
             SessionDriverMode::PiRpc => "PI RPC",
             SessionDriverMode::Acp => "ACP",
-            SessionDriverMode::TerminalPty => "PTY MIRROR",
+            SessionDriverMode::TerminalPty if is_live_bridge => "PTY SYNC",
+            SessionDriverMode::TerminalPty => "PTY READONLY",
         };
         let is_structured = driver != SessionDriverMode::TerminalPty;
+        let is_interactive = is_structured || is_live_bridge;
         let model_label = self
             .timeline
             .meta
@@ -635,7 +641,7 @@ impl ChatView {
                     .child(square_badge(
                         driver_label,
                         palette.theme.on_accent,
-                        if is_structured {
+                        if is_interactive {
                             palette.theme.accent
                         } else {
                             palette.fg_faint

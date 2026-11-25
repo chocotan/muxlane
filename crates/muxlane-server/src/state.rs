@@ -488,6 +488,7 @@ mod tests {
             agent: agent.clone(),
             event: "idle".into(),
             message: Some(String::new()),
+            ..Default::default()
         };
         for running in ["working", "blocked"] {
             state
@@ -584,6 +585,7 @@ mod tests {
             agent: id.clone(),
             event: "working".into(),
             message: None,
+            ..Default::default()
         };
         let events = state.report_hook(&report).await;
         assert_eq!(events[0].params["agent_type"], "pi");
@@ -695,6 +697,7 @@ mod tests {
                     agent: id,
                     event: "working".into(),
                     message: None,
+                    ..Default::default()
                 })
                 .await
                 .len(),
@@ -739,6 +742,7 @@ mod tests {
                 agent: agent.clone(),
                 event: event.into(),
                 message: None,
+                ..Default::default()
             };
             assert_eq!(state.report_hook(&report).await.len(), 1);
             assert!(!state.agents[0].seen);
@@ -850,6 +854,7 @@ mod tests {
                 agent: agent.clone(),
                 event: "done".into(),
                 message: Some("完成了具体修复".into()),
+                ..Default::default()
             })
             .await;
         let payload: muxlane_core::protocol::AgentStatusEvent =

@@ -326,6 +326,48 @@ internal fun ChatTimelinePane(
     )
 
     Column(modifier.fillMaxSize().background(MuxBg0)) {
+        if (meta != null && meta.driver == muxlane.chat.SessionDriverMode.TERMINAL_PTY) {
+            val isLive = meta.supportsChatInput
+            Surface(
+                color = if (isLive) MuxBg1 else MuxWarningBg,
+                shape = Square,
+                border = BorderStroke(1.dp, if (isLive) MuxLine else MuxWarningLine),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (isLive) "PTY 双向同步 · 与终端实时共享" else "终端已退回 Shell · 输入已锁定（只读）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isLive) MuxAccent else MuxWarningFg,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (canSwitchToTerm) {
+                        Box(
+                            Modifier
+                                .background(MuxBg2, Square)
+                                .border(BorderStroke(1.dp, MuxControlLine), Square)
+                                .clickable { model.setSessionMode(SessionPaneMode.TERMINAL) }
+                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                        ) {
+                            Text(
+                                "查看终端",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MuxFg0,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         if (meta != null && (meta.currentModel != null || meta.availableModels.isNotEmpty() || meta.thinkingLevel != null)) {
             ChatModelConfigStrip(
                 meta = meta,
@@ -457,6 +499,7 @@ internal fun ChatTimelinePane(
             ChatComposerBar(
                 draft = draft,
                 onDraftChange = { draft = it },
+                inputEnabled = meta?.supportsChatInput != false,
                 isStreaming = meta?.isStreaming == true,
                 contextUsed = meta?.contextUsedTokens,
                 contextWindow = meta?.contextWindowTokens,
@@ -1122,6 +1165,7 @@ private fun SlashQuickMenu(onPick: (String) -> Unit) {
 private fun ChatComposerBar(
     draft: String,
     onDraftChange: (String) -> Unit,
+    inputEnabled: Boolean,
     isStreaming: Boolean,
     contextUsed: Long?,
     contextWindow: Long?,
@@ -1170,21 +1214,22 @@ private fun ChatComposerBar(
                         .size(38.dp)
                         .background(if (slashOpen) MuxAccent else MuxBg2, Square)
                         .border(BorderStroke(1.dp, MuxControlLine), Square)
-                        .clickable(onClick = onToggleSlash),
+                        .clickable(enabled = inputEnabled, onClick = onToggleSlash),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         "/",
                         style = MaterialTheme.typography.titleMedium,
-                        color = if (slashOpen) MuxOnAccent else MuxFg1,
+                        color = if (slashOpen) MuxOnAccent else if (inputEnabled) MuxFg1 else MuxFg2,
                         fontFamily = MonoFamily,
                     )
                 }
                 BasicTextField(
                     value = draft,
                     onValueChange = onDraftChange,
+                    enabled = inputEnabled,
                     maxLines = 5,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = MuxFg0),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = if (inputEnabled) MuxFg0 else MuxFg2),
                     cursorBrush = SolidColor(MuxAccent),
                     modifier = Modifier
                         .weight(1f)
@@ -1194,7 +1239,7 @@ private fun ChatComposerBar(
                     decorationBox = { inner ->
                         if (draft.isEmpty()) {
                             Text(
-                                stringResource(R.string.chat_input_hint),
+                                if (inputEnabled) stringResource(R.string.chat_input_hint) else "终端已退回 Shell，输入已暂停",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MuxFg2,
                                 maxLines = 1,
@@ -1204,7 +1249,7 @@ private fun ChatComposerBar(
                         inner()
                     },
                 )
-                if (isStreaming && draft.isBlank()) {
+                if (isStreaming && draft.isBlank() && inputEnabled) {
                     OutlinedButton(
                         onClick = onAbort,
                         shape = Square,
@@ -1214,7 +1259,7 @@ private fun ChatComposerBar(
                 } else {
                     Button(
                         onClick = { onSend(isStreaming) },
-                        enabled = draft.isNotBlank(),
+                        enabled = inputEnabled && draft.isNotBlank(),
                         shape = Square,
                         colors = ButtonDefaults.buttonColors(containerColor = MuxAccent),
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),

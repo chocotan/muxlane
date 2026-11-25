@@ -654,6 +654,8 @@ const TRANSLATIONS: &[(&str, &str, &str)] = &[
     ("chat.deny", "拒绝", "Deny"),
     ("chat.reply_submit", "提交回复", "Submit"),
     ("chat.mirror_banner", "只读镜像模式：当前会话正在终端中运行", "Read-only mirror: this session is running in Terminal mode"),
+    ("chat.bridge_paused_banner", "终端已退回 Shell，对话输入已暂停以防误注入命令", "Terminal returned to bare shell; chat input paused"),
+    ("chat.bridge_sync_chip", "PTY 双向同步", "PTY Sync"),
     ("chat.take_over_native", "接管为原生对话", "Take Over Native Chat"),
     ("chat.open_terminal", "切换到终端", "Open Terminal"),
     ("chat.queue_notice", "运行中按 Enter 将以 Follow-up 排队，Ctrl+Enter 立即引导 (Steer)", "While busy: Enter queues Follow-up, Ctrl+Enter steers"),

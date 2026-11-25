@@ -651,6 +651,14 @@ impl Render for ChatComposer {
             .pb_3();
 
         if !self.meta.supports_chat_input {
+            let banner_key = if self.meta.driver
+                == muxlane_core::chat::SessionDriverMode::TerminalPty
+                && self.meta.has_pty
+            {
+                "chat.bridge_paused_banner"
+            } else {
+                "chat.mirror_banner"
+            };
             return measure.child(
                 div()
                     .w_full()
@@ -669,7 +677,7 @@ impl Render for ChatComposer {
                             .min_w_0()
                             .text_size(ui_px(CHAT_META_PX))
                             .text_color(rgba(palette.fg_muted))
-                            .child(i18n::text(self.language, "chat.mirror_banner")),
+                            .child(i18n::text(self.language, banner_key)),
                     )
                     .child(
                         div()
@@ -963,6 +971,16 @@ impl Render for ChatComposer {
                                             }),
                                         ),
                                     )
+                                },
+                            )
+                            .when(
+                                self.meta.driver
+                                    == muxlane_core::chat::SessionDriverMode::TerminalPty,
+                                |el| {
+                                    el.child(shortcut_chip(
+                                        i18n::text(self.language, "chat.bridge_sync_chip"),
+                                        palette,
+                                    ))
                                 },
                             )
                             .when_some(context_summary, |el, ctx| {

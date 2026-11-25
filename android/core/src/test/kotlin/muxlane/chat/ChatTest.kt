@@ -97,6 +97,20 @@ class ChatTest {
         assertEquals(1, snap.pendingApprovals.size)
         assertEquals("Run cargo test?", snap.pendingApprovals[0].title)
 
+        val removeJson = """
+            {
+              "agent": "pi-1",
+              "seq": 5,
+              "delta": {
+                "op": "remove_entry",
+                "entry_id": "u1"
+              }
+            }
+        """.trimIndent()
+        snap = snap.applyDelta(muxlaneJson.decodeFromString(ChatDeltaEvent.serializer(), removeJson))
+        assertEquals(1, snap.entries.size)
+        assertEquals("a1", snap.entries.first().id)
+
         val cancelEncoded = muxlaneJson.encodeToString(ApprovalReply.serializer(), ApprovalReply.Cancel)
         assertTrue(cancelEncoded.contains("\"kind\":\"cancel\""), cancelEncoded)
     }

@@ -366,6 +366,9 @@ pub enum ChatDeltaOp {
     UpsertEntry {
         entry: TimelineEntry,
     },
+    RemoveEntry {
+        entry_id: String,
+    },
     AppendText {
         entry_id: String,
         delta: String,
@@ -466,6 +469,12 @@ impl ChatTimelineState {
                     let idx = self.entries.len();
                     self.index.insert(entry.id().to_string(), idx);
                     self.entries.push(entry);
+                }
+            }
+            ChatDeltaOp::RemoveEntry { entry_id } => {
+                if let Some(idx) = self.index.get(&entry_id).copied() {
+                    self.entries.remove(idx);
+                    self.rebuild_index();
                 }
             }
             ChatDeltaOp::AppendText {
@@ -733,5 +742,60 @@ mod tests {
             ToolCallKind::from_tool_name("ripgrep", Some("search")),
             ToolCallKind::Search
         );
+    }
+
+    #[test]
+    fn reducer_removes_entry_and_rebuilds_index() {
+        let mut state = ChatTimelineState::default();
+        assert!(state.apply(ChatDeltaEvent {
+            agent: "pi-1".into(),
+            seq: 1,
+            delta: ChatDeltaOp::UpsertEntry {
+                entry: TimelineEntry::UserMessage {
+                    id: "__bridge_pending_user__:1".into(),
+                    turn_id: None,
+                    text: "hello".into(),
+                    attachments: Vec::new(),
+                    created_at_ms: 100,
+                },
+            },
+        }));
+        assert!(state.apply(ChatDeltaEvent {
+            agent: "pi-1".into(),
+            seq: 2,
+            delta: ChatDeltaOp::UpsertEntry {
+                entry: TimelineEntry::AssistantText {
+                    id: "a1".into(),
+                    turn_id: None,
+                    text: "hi".into(),
+                    streaming: true,
+                    model: None,
+                    created_at_ms: 200,
+                },
+            },
+        }));
+        assert!(state.apply(ChatDeltaEvent {
+            agent: "pi-1".into(),
+            seq: 3,
+            delta: ChatDeltaOp::RemoveEntry {
+                entry_id: "__bridge_pending_user__:1".into(),
+            },
+        }));
+        assert_eq!(state.entries.len(), 1);
+        assert!(state.get("__bridge_pending_user__:1").is_none());
+        assert!(state.get("a1").is_some());
+        assert!(state.apply(ChatDeltaEvent {
+            agent: "pi-1".into(),
+            seq: 4,
+            delta: ChatDeltaOp::AppendText {
+                entry_id: "a1".into(),
+                delta: "!".into(),
+                kind: TextDeltaKind::Assistant,
+            },
+        }));
+        match state.get("a1") {
+            Some(TimelineEntry::AssistantText { text, .. }) => assert_eq!(text, "hi!"),
+            other => panic!("expected updated a1 after removal, got {other:?}"),
+        }
     }
 }

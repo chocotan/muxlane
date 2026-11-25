@@ -1517,3 +1517,163 @@ process.stdin.on("data", (chunk) => {
     .await;
     assert_eq!(del_resp.result.unwrap()["ok"].as_bool(), Some(true));
 }
+
+#[tokio::test]
+async fn pty_bridge_syncs_live_terminal_and_chat_two_way_via_rpc() {
+    use std::io::Write;
+
+    let (srv, sock, _state, _dirty, dir) = spawn_server().await;
+    let project = srv
+        .add_project(project_params(dir.path().display().to_string(), false))
+        .await
+        .unwrap();
+
+    // Spawn an interactive PTY labeled as Pi that simply echoes stdin lines so we can verify
+    // Chat -> PTY injection without invoking an external LLM binary.
+    let agent = srv
+        .spawn_agent(muxlane_core::protocol::AgentSpawnParams {
+            project: project.id.clone(),
+            agent_type: Some(AgentType::Pi),
+            program: Some("/bin/sh".into()),
+            args: Some(vec![
+                "-c".into(),
+                "echo PTY_BRIDGE_READY; while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done".into(),
+            ]),
+            env: None,
+            preset_name: Some("Pi".into()),
+        })
+        .await
+        .unwrap();
+    let _cleanup = agent.tmux_session.clone().map(KillTmuxSessionOnDrop);
+
+    let session = srv.session(&agent.id).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if String::from_utf8_lossy(&session.replay_tail(4096)).contains("PTY_BRIDGE_READY") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("PTY bridge echo loop did not start");
+
+    // 1. chat.list exposes the live PTY agent as an interactive Bridge session.
+    let list_resp = rpc_call(&sock, methods::CHAT_LIST, serde_json::json!({})).await;
+    let list: muxlane_core::protocol::ChatListResult =
+        serde_json::from_value(list_resp.result.unwrap()).unwrap();
+    let summary = list
+        .sessions
+        .iter()
+        .find(|s| s.agent == agent.id)
+        .expect("live Pi PTY must appear in chat.list");
+    assert_eq!(
+        summary.meta.driver,
+        muxlane_core::SessionDriverMode::TerminalPty
+    );
+    assert!(summary.meta.supports_chat_input);
+    assert!(summary.meta.has_pty);
+
+    // 2. Subscribe to chat timeline over RPC.
+    let mut sub_conn = BufReader::new(UnixStream::connect(&sock).await.unwrap());
+    write_frame(
+        &mut sub_conn,
+        &Request {
+            id: 10,
+            method: methods::CHAT_SUBSCRIBE.into(),
+            params: serde_json::json!({ "agent": agent.id }),
+        },
+    )
+    .await
+    .unwrap();
+    let sub_resp: Response =
+        serde_json::from_value(read_frame(&mut sub_conn).await.unwrap()).unwrap();
+    assert!(sub_resp.error.is_none(), "{:?}", sub_resp.error);
+
+    // 3. Report session_file via agent.report (same side-channel Pi extension uses).
+    let jsonl = dir.path().join("bridge-session.jsonl");
+    std::fs::write(
+        &jsonl,
+        concat!(r#"{"type":"session","version":3,"id":"bridge-s1"}"#, "\n"),
+    )
+    .unwrap();
+    let hook_token = srv.hook_token(&agent.id);
+    let hook_resp = rpc_call(
+        &sock,
+        methods::AGENT_REPORT,
+        serde_json::json!({
+            "token": hook_token,
+            "agent": agent.id,
+            "event": "meta",
+            "message": "",
+            "session_id": "bridge-s1",
+            "session_file": jsonl.display().to_string(),
+            "model": "anthropic/sonnet"
+        }),
+    )
+    .await;
+    assert!(hook_resp.error.is_none(), "{:?}", hook_resp.error);
+
+    // 4. Send a chat prompt via chat.send -> verify bytes land inside the live PTY!
+    let send_resp = rpc_call(
+        &sock,
+        methods::CHAT_SEND,
+        serde_json::json!({
+            "agent": agent.id,
+            "text": "hello_from_chat_bridge"
+        }),
+    )
+    .await;
+    assert!(send_resp.error.is_none(), "{:?}", send_resp.error);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if String::from_utf8_lossy(&session.replay_tail(8192))
+                .contains("GOT:hello_from_chat_bridge")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("chat.send prompt did not arrive in live PTY");
+
+    // 5. Append assistant output into the reported JSONL file -> subscriber receives live CHAT_DELTA.
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl)
+            .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"message","id":"a_live","message":{{"role":"assistant","content":[{{"type":"text","text":"Synced back to Chat UI"}}],"timestamp":2000}}}}"#
+        )
+        .unwrap();
+    }
+
+    let got_assistant_delta = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = read_frame(&mut sub_conn).await.unwrap();
+            if frame.get("event").and_then(|v| v.as_str())
+                == Some(muxlane_core::protocol::events::CHAT_DELTA)
+            {
+                if let Ok(delta) =
+                    serde_json::from_value::<muxlane_core::ChatDeltaEvent>(frame["params"].clone())
+                {
+                    if let muxlane_core::ChatDeltaOp::UpsertEntry {
+                        entry: muxlane_core::TimelineEntry::AssistantText { text, .. },
+                    } = delta.delta
+                    {
+                        if text == "Synced back to Chat UI" {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for live CHAT_DELTA from JSONL append");
+    assert!(got_assistant_delta);
+}

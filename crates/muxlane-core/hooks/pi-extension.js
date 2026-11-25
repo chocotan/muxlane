@@ -52,6 +52,29 @@ export default function (pi) {
   let settleTimer = null
   // ask_user 待回答期间 run 会挂起：此时 agent_end 不应被防抖翻成 done。
   let blockedPending = false
+  let lastKnownMeta = {}
+
+  const collectSessionMeta = (ctx) => {
+    const sm = ctx?.sessionManager
+    const header = sm?.getHeader?.()
+    const sessionId = (typeof sm?.getSessionId === "function" ? sm.getSessionId() : "")
+      || (typeof header?.id === "string" ? header.id : "")
+      || lastKnownMeta.session_id
+      || ""
+    const sessionFile = (typeof sm?.getSessionFile === "function" ? sm.getSessionFile() : "")
+      || lastKnownMeta.session_file
+      || ""
+    const modelObj = ctx?.model
+    const model = (typeof modelObj === "string" ? modelObj : (modelObj?.id || modelObj?.name || ""))
+      || lastKnownMeta.model
+      || ""
+    const next = {}
+    if (sessionId) next.session_id = sessionId
+    if (sessionFile) next.session_file = sessionFile
+    if (model) next.model = model
+    if (sessionId || sessionFile || model) lastKnownMeta = next
+    return next
+  }
 
   const cancelSettle = () => {
     if (settleTimer) {
@@ -62,14 +85,15 @@ export default function (pi) {
 
   const finishRun = async (event, ctx) => {
     doneReported = true
+    const meta = collectSessionMeta(ctx)
     if (event?.error || ctx?.error) {
       const err = shortText(event?.error || ctx?.error || "执行出错")
-      await report("failed", `任务异常: ${err}`)
+      await report("failed", `任务异常: ${err}`, meta)
     } else if (lastError) {
-      await report("failed", `任务异常: ${lastError}`)
+      await report("failed", `任务异常: ${lastError}`, meta)
       lastError = ""
     } else {
-      await report("done", latestAssistant || "任务已完成")
+      await report("done", latestAssistant || "任务已完成", meta)
     }
     latestAssistant = ""
   }
@@ -82,19 +106,24 @@ export default function (pi) {
     seenAskUserCalls.clear()
     cancelSettle()
     blockedPending = false
+    lastKnownMeta = {}
+    const meta = collectSessionMeta(ctx)
+    if (meta.session_file || meta.session_id) {
+      await report("meta", "", meta)
+    }
   })
   pi.on("turn_start", async (_event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
     cancelSettle()
     doneReported = false
-    await report("working", "")
+    await report("working", "", collectSessionMeta(ctx))
   })
   pi.on("agent_start", async (_event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
     cancelSettle()
     doneReported = false
     blockedPending = false
-    await report("working", "")
+    await report("working", "", collectSessionMeta(ctx))
   })
 
   // Only the parent Pi run owns muxlane state. Subagent lifecycle events stay local.
@@ -108,11 +137,11 @@ export default function (pi) {
       const args = event?.args || {}
       const question = shortText(args.question || args.message || args.prompt || "等待用户确认")
       blockedPending = true
-      await report("blocked", question)
+      await report("blocked", question, collectSessionMeta(ctx))
     }
   })
 
-  pi.on("message_end", (event, ctx) => {
+  pi.on("message_end", async (event, ctx) => {
     if (shouldIgnoreRun(ctx)) return
     const message = event?.message
     if (message?.role === "assistant") {
@@ -122,7 +151,13 @@ export default function (pi) {
         lastError = ""
       }
       const text = typeof message.content === "string" ? message.content : assistantText([message])
-      if (text) latestAssistant = shortText(text, 180)
+      if (text) {
+        latestAssistant = shortText(text, 180)
+        const meta = collectSessionMeta(ctx)
+        if (meta.session_file || meta.session_id) {
+          await report("preview", "", { ...meta, streaming_preview: text.slice(0, 4000) })
+        }
+      }
     }
   })
 
@@ -156,7 +191,7 @@ export default function (pi) {
     if (event?.aborted) {
       latestAssistant = ""
       lastError = ""
-      await report("idle", "")
+      await report("idle", "", collectSessionMeta(ctx))
       return
     }
     await finishRun(event, ctx)

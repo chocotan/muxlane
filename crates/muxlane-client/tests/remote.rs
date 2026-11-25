@@ -179,6 +179,7 @@ async fn remote_host_connects_and_receives_events() {
             agent: agent_id.clone(),
             event: "done".into(),
             message: Some("remote done".into()),
+            ..Default::default()
         })
         .await;
 

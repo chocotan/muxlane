@@ -257,6 +257,10 @@ sealed class ChatDeltaOp {
     data class UpsertEntry(val entry: TimelineEntry) : ChatDeltaOp()
 
     @Serializable
+    @SerialName("remove_entry")
+    data class RemoveEntry(@SerialName("entry_id") val entryId: String) : ChatDeltaOp()
+
+    @Serializable
     @SerialName("append_text")
     data class AppendText(
         @SerialName("entry_id") val entryId: String,
@@ -429,6 +433,7 @@ data class ChatTimelineSnapshot(
             }
             copy(entries = next)
         }
+        is ChatDeltaOp.RemoveEntry -> copy(entries = entries.filterNot { it.id == op.entryId })
         is ChatDeltaOp.AppendText -> mutateEntry(op.entryId) { e ->
             when {
                 e is TimelineEntry.AssistantText && op.kind == TextDeltaKind.ASSISTANT -> e.copy(text = e.text + op.delta, streaming = true)

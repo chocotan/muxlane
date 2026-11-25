@@ -567,8 +567,9 @@ impl MuxlaneApp {
 
     pub(crate) fn agent_supports_chat(&self, agent: &AgentId) -> bool {
         self.find_agent(agent).is_some_and(|a| {
-            a.agent_type != muxlane_core::model::AgentType::Shell
-                && self
+            a.agent_type.supports_chat_bridge()
+                || self.chats.contains_key(agent)
+                || self
                     .presets
                     .iter()
                     .any(|p| p.agent_type == a.agent_type && p.chat_driver_kind().is_some())

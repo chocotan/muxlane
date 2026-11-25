@@ -562,14 +562,22 @@ pub struct DeleteScopeResult {
     pub failed_agents: Vec<AgentId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentReportParams {
     pub token: String,
     pub agent: AgentId,
-    /// "done" | "failed" | "error" | "blocked" | "working" | "idle"
+    /// "done" | "failed" | "error" | "blocked" | "working" | "idle" | "meta" | "preview"
     pub event: String,
     #[serde(default)]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

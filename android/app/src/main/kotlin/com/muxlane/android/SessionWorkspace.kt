@@ -118,7 +118,7 @@ internal fun SessionWorkspace(
     val agent = state.snapshot?.agents?.find { it.id == agentId }
     val project = state.snapshot?.projects?.find { it.id == agent?.project }
     val chatMeta = state.chatTimelines[agentId]?.meta ?: state.chatSessions[agentId]?.meta
-    val canSwitchToChat = state.chatSessions.containsKey(agentId)
+    val canSwitchToChat = model.isChatCapable(agentId)
     val canSwitchToTerm = chatMeta == null || chatMeta.hasPty || chatMeta.supportsTerminalSwitch
     val activePaneMode = if (state.sessionMode == SessionPaneMode.CHAT && canSwitchToChat) {
         SessionPaneMode.CHAT

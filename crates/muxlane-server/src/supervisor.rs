@@ -232,6 +232,11 @@ impl MuxlaneServer {
             .await
             .observe_foreground(id, foreground, title.as_deref())
         {
+            if foreground.agent_type == muxlane_core::model::AgentType::Shell {
+                self.chat.set_pty_bridge_alive(id, false).await;
+            } else if foreground.agent_type.supports_chat_bridge() {
+                let _ = self.ensure_pty_bridge_for_agent(id).await;
+            }
             self.dirty.bump();
         }
     }
@@ -325,6 +330,10 @@ impl MuxlaneServer {
             subs.mark_agent_exit(id);
         }
         drop(subs);
+        for id in exited {
+            self.chat.set_pty_bridge_alive(id, false).await;
+            self.chat.remove_session(id).await;
+        }
         let mut state = self.state.write().await;
         for id in exited {
             for event in state.agent_exit(id) {
@@ -348,6 +357,7 @@ impl MuxlaneServer {
         }
         let mut state = self.state.write().await;
         let mut changed = false;
+        let mut foreground_transitions: Vec<(AgentId, muxlane_core::model::AgentType)> = Vec::new();
         for (id, screen) in screens {
             let foreground = state
                 .agents
@@ -358,6 +368,7 @@ impl MuxlaneServer {
             if let Some(foreground) = foreground {
                 if state.observe_foreground(id, foreground, screen.osc_title.as_deref()) {
                     changed = true;
+                    foreground_transitions.push((id.clone(), foreground.agent_type));
                     continue; // The sampled screen may still belong to the previous process.
                 }
             }
@@ -366,6 +377,14 @@ impl MuxlaneServer {
             }
         }
         drop(state);
+        for (id, next_type) in foreground_transitions {
+            if next_type == muxlane_core::model::AgentType::Shell {
+                self.chat.set_pty_bridge_alive(&id, false).await;
+            } else if next_type.supports_chat_bridge() {
+                let _ = self.ensure_pty_bridge_for_agent(&id).await;
+                self.chat.set_pty_bridge_alive(&id, true).await;
+            }
+        }
         if changed {
             self.dirty.bump();
         }

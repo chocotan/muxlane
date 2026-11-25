@@ -78,6 +78,11 @@ impl AgentType {
             AgentType::Unknown => "unknown",
         }
     }
+
+    /// Whether an interactive PTY running this agent can bridge two-way with the native Chat UI.
+    pub fn supports_chat_bridge(self) -> bool {
+        !matches!(self, AgentType::Shell | AgentType::Unknown)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

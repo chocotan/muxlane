@@ -116,6 +116,7 @@ impl MuxlaneServer {
         let chat = muxlane_chat::ChatManager::new(chat_notice_tx);
         let runtime_clone = runtime.clone();
         let server = Arc::new_cyclic(|weak_srv| {
+            chat.set_pty_writer(Arc::new(ServerPtyBridgeWriter(weak_srv.clone())));
             let bridge = Arc::new(ServerBotBridge(weak_srv.clone()));
             let bots = muxlane_bots::BotManager::new(Arc::clone(&chat), bridge);
             MuxlaneServer {
@@ -518,6 +519,7 @@ impl MuxlaneServer {
         session.write_input(&data);
         if data.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
             self.mark_working(&params.agent).await;
+            self.chat.wake_pty_bridge(&params.agent).await;
         }
         Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
     }
@@ -636,8 +638,12 @@ impl MuxlaneServer {
             ));
         }
         self.refresh_shell_identity_for_hook(&params.agent).await;
-        let _ = self.state.write().await.report_hook(&params).await;
-        self.dirty.bump();
+        let _ = self.ensure_pty_bridge_for_agent(&params.agent).await;
+        self.chat.notify_pty_hook(&params).await;
+        if !matches!(params.event.as_str(), "meta" | "preview") {
+            let _ = self.state.write().await.report_hook(&params).await;
+            self.dirty.bump();
+        }
         Ok(Response::ok(req.id, serde_json::json!({"ok": true})))
     }
 
@@ -856,6 +862,7 @@ impl MuxlaneServer {
     }
 
     async fn handle_chat_list(&self, req: Request) -> anyhow::Result<Response> {
+        self.ensure_all_pty_bridges().await;
         let sessions = self.chat.list_summaries().await;
         Ok(Response::ok(
             req.id,
@@ -887,6 +894,7 @@ impl MuxlaneServer {
                 Ok(params) => params,
                 Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
             };
+        let _ = self.ensure_pty_bridge_for_agent(&params.agent).await;
         let sub_id = muxlane_core::model::new_id("chat-sub");
         match self
             .chat
@@ -1481,6 +1489,69 @@ impl muxlane_bots::BotHostBridge for ServerBotBridge {
                 let _ = srv_clone.persist_runtime_state().await;
             });
         }
+    }
+}
+
+struct ServerPtyBridgeWriter(std::sync::Weak<MuxlaneServer>);
+
+impl muxlane_chat::PtyBridgeWriter for ServerPtyBridgeWriter {
+    fn is_agent_confirmed(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+        let weak = self.0.clone();
+        let agent = agent.clone();
+        Box::pin(async move {
+            let Some(srv) = weak.upgrade() else {
+                return false;
+            };
+            let has_live_pty = srv.sessions.lock().await.contains_key(&agent);
+            if !has_live_pty {
+                return false;
+            }
+            let state = srv.state.read().await;
+            state
+                .agents
+                .iter()
+                .find(|a| a.id == agent)
+                .is_some_and(|a| a.agent_type.supports_chat_bridge())
+        })
+    }
+
+    fn write_bytes(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+        bytes: Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
+        let weak = self.0.clone();
+        let agent = agent.clone();
+        Box::pin(async move {
+            let srv = weak
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("server shut down"))?;
+            let session = srv
+                .sessions
+                .lock()
+                .await
+                .get(&agent)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no live PTY session for agent {agent}"))?;
+            session.write_input(&bytes);
+            Ok(())
+        })
+    }
+
+    fn notify_submitted(
+        &self,
+        agent: &muxlane_core::model::AgentId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let weak = self.0.clone();
+        let agent = agent.clone();
+        Box::pin(async move {
+            if let Some(srv) = weak.upgrade() {
+                srv.mark_working(&agent).await;
+            }
+        })
     }
 }
 
