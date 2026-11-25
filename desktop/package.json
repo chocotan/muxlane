@@ -1,0 +1,46 @@
+{
+  "name": "muxlane-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Muxlane Desktop — Electron + React + xterm.js workspace backed by muxlane-server",
+  "main": "out/main.cjs",
+  "scripts": {
+    "dev:renderer": "vite",
+    "build:electron": "node scripts/build-electron.mjs",
+    "build:renderer": "vite build",
+    "build": "npm run build:electron && npm run build:renderer",
+    "dev": "npm run build:electron && concurrently -k -n vite,electron -c cyan,green \"vite\" \"wait-on http://127.0.0.1:5179 && MUXLANE_DEV_URL=http://127.0.0.1:5179 electron .\"",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/addon-webgl": "^0.18.0",
+    "@xterm/xterm": "^5.5.0",
+    "diff": "^7.0.0",
+    "lucide-react": "^0.511.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "shiki": "^3.4.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.7",
+    "@types/diff": "^7.0.2",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.4",
+    "@types/react-dom": "^19.1.4",
+    "@vitejs/plugin-react": "^4.5.0",
+    "concurrently": "^9.1.2",
+    "electron": "^36.3.1",
+    "esbuild": "^0.25.4",
+    "tailwindcss": "^4.1.7",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.4",
+    "wait-on": "^8.0.3"
+  }
+}

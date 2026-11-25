@@ -14,3 +14,6 @@ example
 prototype.html
 .omo
 /scripts/demo-instance.sh
+/desktop/node_modules
+/desktop/dist
+/desktop/out

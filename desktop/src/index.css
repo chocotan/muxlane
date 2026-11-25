@@ -1,0 +1,378 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+
+/*
+ * Muxlane Desktop Design System
+ * Synthesized from Orca + DeepSeek Harness monochrome tonal surfaces,
+ * adapted strictly to 0px square architectural corners per AGENTS.md.
+ */
+
+:root,
+.light {
+  color-scheme: light;
+
+  --surface-base: #f2f2f3;
+  --surface-rail: #ececee;
+  --surface-sidebar: #f5f5f6;
+  --surface-canvas: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-hover: #eaeaec;
+  --surface-active: #e2e2e6;
+  --surface-user: #f3f3f5;
+  --surface-code: #fafafa;
+  --surface-code-header: #f4f4f5;
+  --surface-tab-bar: #f2f2f3;
+  --surface-tab-active: #ffffff;
+  --surface-terminal: #fafafa;
+
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --border-default: rgba(0, 0, 0, 0.11);
+  --border-strong: rgba(0, 0, 0, 0.2);
+
+  --ink-strong: #09090b;
+  --ink-primary: #18181b;
+  --ink-secondary: #52525b;
+  --ink-muted: #71717a;
+  --ink-faint: #a1a1aa;
+
+  --btn-primary-bg: #171717;
+  --btn-primary-hover: #2c2c2e;
+  --btn-primary-fg: #fafafa;
+
+  --status-working: #ca8a04;
+  --status-working-soft: rgba(202, 138, 4, 0.1);
+  --status-question: #ea580c;
+  --status-question-soft: rgba(234, 88, 12, 0.08);
+  --status-success: #15803d;
+  --status-success-soft: rgba(21, 128, 61, 0.09);
+  --status-danger: #dc2626;
+  --status-danger-soft: rgba(220, 38, 38, 0.08);
+  --status-unread: #2563eb;
+  --status-link: #1d4ed8;
+
+  --diff-add-fg: #166534;
+  --diff-add-bg: rgba(88, 124, 12, 0.11);
+  --diff-add-gutter: rgba(88, 124, 12, 0.22);
+  --diff-del-fg: #991b1b;
+  --diff-del-bg: rgba(173, 7, 7, 0.09);
+  --diff-del-gutter: rgba(173, 7, 7, 0.18);
+
+  --shadow-composer: 0 2px 12px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.16);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.3);
+}
+
+.dark {
+  color-scheme: dark;
+
+  --surface-base: #0c0c0d;
+  --surface-rail: #101012;
+  --surface-sidebar: #141416;
+  --surface-canvas: #171719;
+  --surface-elevated: #1d1d20;
+  --surface-hover: #222226;
+  --surface-active: #27272c;
+  --surface-user: #212125;
+  --surface-code: #111113;
+  --surface-code-header: #161619;
+  --surface-tab-bar: #121214;
+  --surface-tab-active: #171719;
+  --surface-terminal: #0e0e10;
+
+  --border-subtle: rgba(255, 255, 255, 0.068);
+  --border-default: rgba(255, 255, 255, 0.105);
+  --border-strong: rgba(255, 255, 255, 0.19);
+
+  --ink-strong: #f5f5f6;
+  --ink-primary: #e4e4e7;
+  --ink-secondary: #a1a1aa;
+  --ink-muted: #767680;
+  --ink-faint: #52525b;
+
+  --btn-primary-bg: #ededee;
+  --btn-primary-hover: #d4d4d8;
+  --btn-primary-fg: #111113;
+
+  --status-working: #eab308;
+  --status-working-soft: rgba(234, 179, 8, 0.11);
+  --status-question: #f97316;
+  --status-question-soft: rgba(249, 115, 22, 0.11);
+  --status-success: #74c991;
+  --status-success-soft: rgba(116, 201, 145, 0.11);
+  --status-danger: #f87171;
+  --status-danger-soft: rgba(248, 113, 113, 0.12);
+  --status-unread: #60a5fa;
+  --status-link: #7aaaff;
+
+  --diff-add-fg: #9ad8a7;
+  --diff-add-bg: rgba(129, 184, 139, 0.13);
+  --diff-add-gutter: rgba(129, 184, 139, 0.24);
+  --diff-del-fg: #f19a8c;
+  --diff-del-bg: rgba(199, 78, 57, 0.15);
+  --diff-del-gutter: rgba(199, 78, 57, 0.28);
+
+  --shadow-composer: 0 6px 24px rgba(0, 0, 0, 0.34), 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-popover: 0 16px 40px rgba(0, 0, 0, 0.56), 0 2px 8px rgba(0, 0, 0, 0.36);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.28);
+}
+
+@theme inline {
+  --font-sans: "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --color-base: var(--surface-base);
+  --color-rail: var(--surface-rail);
+  --color-sidebar: var(--surface-sidebar);
+  --color-canvas: var(--surface-canvas);
+  --color-elevated: var(--surface-elevated);
+  --color-hover: var(--surface-hover);
+  --color-active: var(--surface-active);
+  --color-user-surface: var(--surface-user);
+  --color-code-surface: var(--surface-code);
+  --color-code-header: var(--surface-code-header);
+  --color-tab-bar: var(--surface-tab-bar);
+  --color-tab-active: var(--surface-tab-active);
+  --color-terminal-surface: var(--surface-terminal);
+
+  --color-line-subtle: var(--border-subtle);
+  --color-line: var(--border-default);
+  --color-line-strong: var(--border-strong);
+
+  --color-ink-strong: var(--ink-strong);
+  --color-ink: var(--ink-primary);
+  --color-ink-2: var(--ink-secondary);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+
+  --color-primary-btn: var(--btn-primary-bg);
+  --color-primary-btn-hover: var(--btn-primary-hover);
+  --color-primary-btn-fg: var(--btn-primary-fg);
+
+  --color-working: var(--status-working);
+  --color-working-soft: var(--status-working-soft);
+  --color-question: var(--status-question);
+  --color-question-soft: var(--status-question-soft);
+  --color-success: var(--status-success);
+  --color-success-soft: var(--status-success-soft);
+  --color-danger: var(--status-danger);
+  --color-danger-soft: var(--status-danger-soft);
+  --color-unread: var(--status-unread);
+}
+
+/* Enforce strict 0px architectural square corners across every UI surface */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--surface-base);
+  color: var(--ink-primary);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Quiet rectangular scrollbars inspired by Orca & DeepSeek Harness */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* Hover-only sidebar scrollbar so quiet navigation stays serene */
+.mux-scroll-quiet::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.mux-scroll-quiet:hover::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+}
+.mux-scroll-quiet:hover::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+.mux-tab-strip {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.mux-tab-strip::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Subtle Orca-style composer shadow & popover depth */
+.mux-composer-shadow {
+  box-shadow: var(--shadow-composer);
+}
+.mux-popover-shadow {
+  box-shadow: var(--shadow-popover);
+}
+
+/* Editorial Markdown Prose (Orca + DeepSeek Harness document typography) */
+.mux-markdown {
+  color: var(--ink-primary);
+  font-size: 14px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.mux-markdown > *:first-child {
+  margin-top: 0;
+}
+.mux-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.mux-markdown p {
+  margin: 0.7em 0;
+}
+
+.mux-markdown strong {
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.mux-markdown h1,
+.mux-markdown h2,
+.mux-markdown h3,
+.mux-markdown h4 {
+  color: var(--ink-strong);
+  font-weight: 600;
+  letter-spacing: -0.018em;
+  margin-top: 1.4em;
+  margin-bottom: 0.5em;
+}
+.mux-markdown h1 {
+  font-size: 1.32em;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 0.35em;
+}
+.mux-markdown h2 {
+  font-size: 1.16em;
+}
+.mux-markdown h3 {
+  font-size: 1.04em;
+}
+
+.mux-markdown ul,
+.mux-markdown ol {
+  margin: 0.6em 0;
+  padding-left: 1.45em;
+}
+.mux-markdown ul {
+  list-style-type: disc;
+}
+.mux-markdown ol {
+  list-style-type: decimal;
+}
+.mux-markdown li {
+  margin: 0.28em 0;
+}
+.mux-markdown li::marker {
+  color: var(--ink-muted);
+}
+
+.mux-markdown blockquote {
+  margin: 0.85em 0;
+  padding: 0.3em 0.95em;
+  border-left: 2px solid var(--border-strong);
+  color: var(--ink-secondary);
+}
+
+.mux-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 1.35em 0;
+}
+
+.mux-markdown a {
+  color: var(--status-link);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--status-link) 40%, transparent);
+  text-underline-offset: 3px;
+}
+.mux-markdown a:hover {
+  text-decoration-color: var(--status-link);
+}
+
+.mux-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.95em 0;
+  font-size: 13px;
+}
+.mux-markdown th,
+.mux-markdown td {
+  border: 1px solid var(--border-subtle);
+  padding: 6px 10px;
+  text-align: left;
+}
+.mux-markdown th {
+  background: var(--surface-code-header);
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+.mux-markdown tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--ink-primary) 2%, transparent);
+}
+
+.mux-markdown :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: color-mix(in srgb, var(--ink-primary) 6%, var(--surface-canvas));
+  border: 1px solid var(--border-subtle);
+  padding: 1px 5px;
+  color: var(--ink-strong);
+}
+
+/* Shiki highlighted block reset — blends cleanly with code-surface in both themes */
+.mux-shiki pre {
+  margin: 0 !important;
+  padding: 12px 14px !important;
+  background: var(--surface-code) !important;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.58;
+}
+.mux-shiki code {
+  font-family: var(--font-mono);
+}
+
+/* Subtle composer top fade scrim */
+.mux-composer-scrim {
+  background: linear-gradient(
+    to top,
+    var(--surface-canvas) 74%,
+    color-mix(in srgb, var(--surface-canvas) 0%, transparent)
+  );
+}
+
+/* xterm.js container polish */
+.xterm {
+  height: 100%;
+  padding: 10px 12px;
+}
+.xterm-viewport {
+  background-color: var(--surface-terminal) !important;
+}
