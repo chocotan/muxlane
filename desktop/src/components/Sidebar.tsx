@@ -8,6 +8,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Server,
   Trash2,
   X,
 } from "lucide-react";
@@ -24,12 +25,15 @@ interface SidebarProps {
   width: number;
   onResize: (nextWidth: number) => void;
   machineName: string;
+  isRemoteHost: boolean;
+  remoteHostsCount: number;
   projects: Project[];
   agents: AgentInstance[];
   chatSummaries: Record<string, ChatSessionSummary>;
   activeAgentId: string | null;
   activeSection: "workspace" | "bots";
   globalApprovals: PendingApproval[];
+  onOpenRemotes: () => void;
   onSelectAgent: (agentId: string) => void;
   onAddProject: () => void;
   onDeleteProject: (projectId: string) => void;
@@ -65,6 +69,8 @@ function shortAgentTag(type: AgentInstance["agent_type"]): string {
       return "QW";
     case "kimi":
       return "KM";
+    case "agy":
+      return "Agy";
     case "shell":
       return "Sh";
     default:
@@ -76,12 +82,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   width,
   onResize,
   machineName,
+  isRemoteHost,
+  remoteHostsCount,
   projects,
   agents,
   chatSummaries,
   activeAgentId,
   activeSection,
   globalApprovals,
+  onOpenRemotes,
   onSelectAgent,
   onAddProject,
   onDeleteProject,
@@ -159,23 +168,33 @@ export const Sidebar: React.FC<SidebarProps> = ({
       style={{ width }}
       className="relative flex h-full shrink-0 flex-col border-r border-line-subtle bg-sidebar select-none"
     >
-      {/* Top 36px Header aligned with WorkspaceHeader */}
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-line-subtle px-3">
-        <div className="flex min-w-0 items-center gap-2">
+      {/* Top 36px Header aligned with WorkspaceHeader — clickable machine switcher */}
+      <div className="flex h-9 shrink-0 items-center justify-between gap-1 border-b border-line-subtle px-2">
+        <button
+          type="button"
+          onClick={onOpenRemotes}
+          title={
+            remoteHostsCount > 0
+              ? `切换或管理远程机器（已保存 ${remoteHostsCount} 台远程主机）`
+              : "连接或管理远程机器"
+          }
+          className="flex min-w-0 items-center gap-1.5 px-1.5 py-1 text-left hover:bg-hover transition-colors cursor-pointer"
+        >
+          <Server
+            className={`h-3.5 w-3.5 shrink-0 ${isRemoteHost ? "text-success" : "text-ink-muted"}`}
+            strokeWidth={1.75}
+          />
           <span className="truncate text-[12.5px] font-semibold tracking-tight text-ink-strong">
-            工作区
+            {machineName || "本机"}
           </span>
-          {machineName && (
-            <span className="truncate font-mono text-[10.5px] text-ink-muted">
-              {machineName}
-            </span>
-          )}
-        </div>
+          <ChevronDown className="h-3 w-3 shrink-0 text-ink-muted" />
+        </button>
+
         <div className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
             onClick={onAddProject}
-            title="添加本地项目工作区"
+            title="添加项目工作区"
             className="flex h-6 w-6 items-center justify-center text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
           >
             <FolderPlus className="h-3.5 w-3.5" strokeWidth={1.75} />
@@ -191,7 +210,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
-      {/* Quiet Search / Filter Field (DeepSeek Harness + Orca style) */}
+      {/* Quiet Search / Filter Field */}
       <div className="shrink-0 border-b border-line-subtle px-2.5 py-2">
         <div className="flex h-7 items-center gap-1.5 border border-line-subtle bg-canvas/60 px-2 focus-within:border-line-strong transition-colors">
           <Search className="h-3.5 w-3.5 shrink-0 text-ink-muted" strokeWidth={1.75} />
@@ -205,7 +224,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               type="button"
               onClick={() => setFilterQuery("")}
-              className="text-ink-muted hover:text-ink cursor-pointer"
+              className="flex h-4 w-4 shrink-0 items-center justify-center text-ink-muted hover:text-ink cursor-pointer"
             >
               <X className="h-3 w-3" />
             </button>
@@ -216,7 +235,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Priority Needs-Attention Section */}
       {globalApprovals.length > 0 && (
         <div className="shrink-0 border-b border-line-subtle bg-question-soft px-2.5 py-2">
-          <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-question">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-question">
             <BellRing className="h-3 w-3" />
             <span>待确认审批 ({globalApprovals.length})</span>
           </div>
@@ -242,10 +261,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       {/* Projects & Sessions Tree */}
-      <div className="mux-scroll-quiet flex-1 overflow-y-auto py-2">
+      <div tabIndex={-1} className="mux-scroll-quiet flex-1 overflow-y-auto py-2 focus:outline-none">
         {projects.length === 0 ? (
           <div className="mx-3 mt-6 border border-dashed border-line p-4 text-center">
-            <p className="text-[12px] text-ink-2">还没有本地项目工作区</p>
+            <p className="text-[12px] text-ink-2">还没有项目工作区</p>
             <button
               type="button"
               onClick={onAddProject}
@@ -259,13 +278,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             没有匹配「{filterQuery}」的会话
           </div>
         ) : (
-          <div className="space-y-2.5">
+          <div className="space-y-2">
             {filteredProjects.map(({ project, agents: projectAgents }) => {
               const isCollapsed = !normalizedQuery && collapsed[project.id] === true;
               return (
                 <div key={project.id} className="px-1.5">
-                  {/* Project Group Row */}
-                  <div className="group flex h-7 items-center justify-between px-1.5 hover:bg-hover/70 transition-colors">
+                  {/* Project Group Row — DeepSeek Harness style single 16px leading slot (Folder at rest, Chevron on hover) */}
+                  <div className="group relative flex h-7 items-center px-2 hover:bg-hover transition-colors">
                     <button
                       type="button"
                       onClick={() =>
@@ -273,12 +292,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       }
                       className="flex min-w-0 flex-1 items-center gap-1.5 text-left cursor-pointer"
                     >
-                      {isCollapsed ? (
-                        <ChevronRight className="h-3 w-3 shrink-0 text-ink-muted" />
-                      ) : (
-                        <ChevronDown className="h-3 w-3 shrink-0 text-ink-muted" />
-                      )}
-                      <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-ink-muted" strokeWidth={1.7} />
+                      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-ink-muted group-hover:hidden">
+                        <FolderGit2 className="h-3.5 w-3.5" strokeWidth={1.7} />
+                      </span>
+                      <span className="hidden h-4 w-4 shrink-0 items-center justify-center text-ink-muted group-hover:inline-flex">
+                        {isCollapsed ? (
+                          <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.9} />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5" strokeWidth={1.9} />
+                        )}
+                      </span>
                       <span className="truncate text-[12px] font-medium text-ink">
                         {project.name}
                       </span>
@@ -288,12 +311,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </span>
                       )}
                     </button>
-                    <div className="flex shrink-0 items-center gap-0.5">
+                    <div className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-hover pl-1.5 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity">
                       <button
                         type="button"
                         title="在此项目新建会话"
                         onClick={() => onNewSessionForProject(project.id)}
-                        className="flex h-5 w-5 items-center justify-center text-ink-muted opacity-0 group-hover:opacity-100 hover:bg-active hover:text-ink-strong transition-opacity cursor-pointer"
+                        className="flex h-5 w-5 items-center justify-center text-ink-muted hover:bg-active hover:text-ink-strong cursor-pointer"
                       >
                         <Plus className="h-3.5 w-3.5" />
                       </button>
@@ -301,23 +324,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         type="button"
                         title="移除项目"
                         onClick={() => onDeleteProject(project.id)}
-                        className="flex h-5 w-5 items-center justify-center text-ink-muted opacity-0 group-hover:opacity-100 hover:bg-active hover:text-danger transition-opacity cursor-pointer"
+                        className="flex h-5 w-5 items-center justify-center text-ink-muted hover:bg-active hover:text-danger cursor-pointer"
                       >
                         <Trash2 className="h-3 w-3" />
                       </button>
                     </div>
                   </div>
 
-                  {/* Session Rows */}
+                  {/* Session Rows — exact same px-2 + 16px leading slot + gap-1.5 as Project Row */}
                   {!isCollapsed && (
-                    <div className="mt-0.5 space-y-[2px] pl-3">
+                    <div className="mt-0.5 space-y-[1px]">
                       {projectAgents.length === 0 ? (
                         <button
                           type="button"
                           onClick={() => onNewSessionForProject(project.id)}
-                          className="block w-full px-2 py-1 text-left text-[11.5px] text-ink-muted hover:text-ink transition-colors cursor-pointer"
+                          className="flex h-7 w-full items-center gap-1.5 px-2 text-left text-[11.5px] text-ink-muted hover:bg-hover hover:text-ink transition-colors cursor-pointer"
                         >
-                          + 新建会话
+                          <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
+                            <Plus className="h-3 w-3" />
+                          </span>
+                          <span>新建会话</span>
                         </button>
                       ) : (
                         projectAgents.map((agent) => {
@@ -335,7 +361,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             <div
                               key={agent.id}
                               onClick={() => onSelectAgent(agent.id)}
-                              className={`group relative flex h-8 items-center justify-between gap-2 px-2 transition-colors cursor-pointer ${
+                              className={`group relative flex h-7 items-center justify-between gap-2 px-2 transition-colors cursor-pointer ${
                                 isActive
                                   ? "bg-active text-ink-strong"
                                   : "text-ink-2 hover:bg-hover hover:text-ink"
@@ -345,13 +371,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 <span className="absolute left-0 top-1 bottom-1 w-[2px] bg-ink-strong" />
                               )}
 
-                              <div className="flex min-w-0 flex-1 items-center gap-2">
-                                <span
-                                  className={`h-1.5 w-1.5 shrink-0 ${statusSquareClass(
-                                    agent.status,
-                                    streaming,
-                                  )}`}
-                                />
+                              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                                <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
+                                  <span
+                                    className={`h-1.5 w-1.5 ${statusSquareClass(
+                                      agent.status,
+                                      streaming,
+                                    )}`}
+                                  />
+                                </span>
                                 {editingId === agent.id ? (
                                   <input
                                     autoFocus
@@ -376,41 +404,51 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 )}
                               </div>
 
-                              {/* Right slot: quiet tag + unread dot, swaps to rename/close on hover */}
-                              <div className="flex shrink-0 items-center gap-1">
-                                {unread && (
-                                  <span
-                                    className="h-1.5 w-1.5 bg-unread group-hover:hidden"
-                                    title="有未读更新"
-                                  />
-                                )}
-                                <span className="font-mono text-[10px] text-ink-muted group-hover:hidden">
-                                  {shortAgentTag(agent.agent_type)}
-                                </span>
+                              {/* Resting tag — keeps constant layout; hover actions overlay smoothly on top */}
+                              {editingId !== agent.id && (
+                                <>
+                                  <div className="flex shrink-0 items-center gap-1.5">
+                                    {unread && (
+                                      <span
+                                        className="h-1.5 w-1.5 bg-unread"
+                                        title="有未读更新"
+                                      />
+                                    )}
+                                    <span className="font-mono text-[10px] text-ink-muted">
+                                      {shortAgentTag(agent.agent_type)}
+                                    </span>
+                                  </div>
 
-                                <button
-                                  type="button"
-                                  title="重命名"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    startRename(agent);
-                                  }}
-                                  className="hidden h-5 w-5 items-center justify-center text-ink-muted hover:text-ink-strong group-hover:flex cursor-pointer"
-                                >
-                                  <Pencil className="h-3 w-3" />
-                                </button>
-                                <button
-                                  type="button"
-                                  title="关闭会话"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onDeleteAgent(agent.id);
-                                  }}
-                                  className="hidden h-5 w-5 items-center justify-center text-ink-muted hover:text-danger group-hover:flex cursor-pointer"
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                </button>
-                              </div>
+                                  <div
+                                    className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
+                                      isActive ? "bg-active" : "bg-hover"
+                                    }`}
+                                  >
+                                    <button
+                                      type="button"
+                                      title="重命名"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        startRename(agent);
+                                      }}
+                                      className="flex h-5 w-5 items-center justify-center text-ink-muted hover:text-ink-strong cursor-pointer"
+                                    >
+                                      <Pencil className="h-3 w-3" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      title="关闭会话"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onDeleteAgent(agent.id);
+                                      }}
+                                      className="flex h-5 w-5 items-center justify-center text-ink-muted hover:text-danger cursor-pointer"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                    </button>
+                                  </div>
+                                </>
+                              )}
                             </div>
                           );
                         })
@@ -424,13 +462,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {/* Quiet Footer Summary */}
-      <div className="flex h-8 shrink-0 items-center justify-between border-t border-line-subtle px-3 font-mono text-[10.5px] text-ink-muted">
-        <span>{agents.length} sessions</span>
-        <span>Ctrl+K</span>
-      </div>
-
-      {/* Orca-style Thin Seam Resize Handle with Invisible Wide Grab Target */}
+      {/* Thin Seam Resize Handle with Invisible Wide Grab Target */}
       <div
         onPointerDown={handleDragStart}
         title="拖拽调整侧边栏宽度"

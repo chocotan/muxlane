@@ -1,78 +1,32 @@
 import React from "react";
-import {
-  Columns2,
-  MessageSquare,
-  PanelLeft,
-  Plus,
-  Terminal as TerminalIcon,
-  X,
-} from "lucide-react";
-import type {
-  AgentInstance,
-  ChatSessionMeta,
-  SessionViewMode,
-} from "../shared/protocol";
-import { supportsChatBridge } from "../shared/protocol";
-import { driverBadgeInfo } from "../shared/timeline";
+import { PanelRight, PanelRightClose, Plus, X } from "lucide-react";
+import type { AgentInstance } from "../shared/protocol";
 
 interface WorkspaceHeaderProps {
-  sidebarOpen: boolean;
-  onToggleSidebar: () => void;
+  rightSidebarOpen: boolean;
+  onToggleRightSidebar: () => void;
   openTabs: string[];
   activeAgentId: string | null;
   agents: AgentInstance[];
-  activeMeta: ChatSessionMeta | undefined;
-  activeViewMode: SessionViewMode;
   onSelectTab: (agentId: string) => void;
   onCloseTab: (agentId: string) => void;
   onNewTab: () => void;
-  onChangeViewMode: (mode: SessionViewMode) => void;
-  onTakeOverNative: () => void;
 }
 
 export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
-  sidebarOpen,
-  onToggleSidebar,
+  rightSidebarOpen,
+  onToggleRightSidebar,
   openTabs,
   activeAgentId,
   agents,
-  activeMeta,
-  activeViewMode,
   onSelectTab,
   onCloseTab,
   onNewTab,
-  onChangeViewMode,
-  onTakeOverNative,
 }) => {
-  const activeAgent = agents.find((a) => a.id === activeAgentId);
-  const canChat = activeAgent ? supportsChatBridge(activeAgent.agent_type) : false;
-  const badge = activeAgent ? driverBadgeInfo(activeMeta, activeAgent.agent_type) : null;
-
-  const badgeDotClass =
-    badge?.tone === "live"
-      ? "bg-success"
-      : badge?.tone === "accent"
-        ? "bg-ink-strong"
-        : badge?.tone === "warn"
-          ? "bg-working"
-          : "bg-ink-faint";
-
   return (
     <header className="flex h-9 shrink-0 items-stretch justify-between border-b border-line-subtle bg-tab-bar select-none">
-      {/* Left: Sidebar toggle + Orca-style continuous tab strip */}
+      {/* Left: Orca-style continuous tab strip */}
       <div className="mux-tab-strip flex min-w-0 flex-1 items-stretch overflow-x-auto">
-        <button
-          type="button"
-          onClick={onToggleSidebar}
-          title="切换侧边栏 (Ctrl+B)"
-          className="flex w-9 shrink-0 items-center justify-center border-r border-line-subtle text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
-        >
-          <PanelLeft
-            className={`h-[15px] w-[15px] ${sidebarOpen ? "text-ink" : ""}`}
-            strokeWidth={1.75}
-          />
-        </button>
-
         {openTabs.map((tabId) => {
           const agent = agents.find((a) => a.id === tabId);
           if (!agent) return null;
@@ -116,7 +70,9 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
                   e.stopPropagation();
                   onCloseTab(tabId);
                 }}
-                className="flex h-4 w-4 shrink-0 items-center justify-center text-ink-muted opacity-0 group-hover:opacity-100 hover:bg-active hover:text-ink-strong transition-opacity cursor-pointer"
+                className={`flex h-4 w-4 shrink-0 items-center justify-center text-ink-muted hover:bg-active hover:text-ink-strong transition-opacity cursor-pointer ${
+                  active ? "opacity-55 hover:opacity-100" : "opacity-0 group-hover:opacity-100"
+                }`}
               >
                 <X className="h-3 w-3" />
               </button>
@@ -134,56 +90,25 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
         </button>
       </div>
 
-      {/* Right: Quiet Driver Indicator + Minimal Monochrome Mode Switcher */}
-      <div className="flex shrink-0 items-center gap-2.5 px-3">
-        {badge && (
-          <div className="flex items-center gap-1.5 font-mono text-[10.5px] text-ink-2">
-            <span className={`h-1.5 w-1.5 shrink-0 ${badgeDotClass}`} />
-            <span>{badge.label}</span>
-          </div>
-        )}
-
-        {activeMeta?.driver === "terminal_pty" && activeMeta.supports_terminal_switch && (
-          <button
-            type="button"
-            onClick={onTakeOverNative}
-            title="从 PTY 桥接切换为结构化原生驱动（支持模型与思考深度切换）"
-            className="px-1.5 py-0.5 text-[11px] text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
-          >
-            切原生
-          </button>
-        )}
-
-        {activeAgent && canChat && (
-          <div className="flex items-center border border-line-subtle bg-base p-[2px]">
-            {(
-              [
-                { id: "chat", label: "对话", icon: MessageSquare, title: "对话视图 (Ctrl+1)" },
-                { id: "split", label: "分屏", icon: Columns2, title: "对话 + 终端双屏 (Ctrl+2)" },
-                { id: "terminal", label: "终端", icon: TerminalIcon, title: "交互式终端 (Ctrl+3)" },
-              ] as const
-            ).map((item) => {
-              const Icon = item.icon;
-              const isCurrent = activeViewMode === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  title={item.title}
-                  onClick={() => onChangeViewMode(item.id)}
-                  className={`flex h-6 items-center gap-1.5 px-2 text-[11.5px] transition-colors cursor-pointer ${
-                    isCurrent
-                      ? "bg-active font-medium text-ink-strong"
-                      : "text-ink-muted hover:text-ink"
-                  }`}
-                >
-                  <Icon className="h-3 w-3" strokeWidth={1.8} />
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
+      {/* Right: Orca Right Sidebar Toggle */}
+      <div className="flex shrink-0 items-stretch">
+        <button
+          type="button"
+          onClick={onToggleRightSidebar}
+          title={rightSidebarOpen ? "收起右侧栏 (Ctrl+])" : "展开右侧栏 (Ctrl+])"}
+          aria-label={rightSidebarOpen ? "收起右侧栏" : "展开右侧栏"}
+          className={`flex w-9 shrink-0 items-center justify-center border-l border-line-subtle transition-colors cursor-pointer ${
+            rightSidebarOpen
+              ? "bg-active text-ink-strong"
+              : "text-ink-muted hover:bg-hover hover:text-ink-strong"
+          }`}
+        >
+          {rightSidebarOpen ? (
+            <PanelRightClose className="h-[15px] w-[15px]" strokeWidth={1.75} />
+          ) : (
+            <PanelRight className="h-[15px] w-[15px]" strokeWidth={1.75} />
+          )}
+        </button>
       </div>
     </header>
   );

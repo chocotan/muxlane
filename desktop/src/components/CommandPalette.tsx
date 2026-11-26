@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Bot, FolderPlus, Plus, Search, Terminal as TerminalIcon } from "lucide-react";
+import {
+  Bot,
+  FolderPlus,
+  Plus,
+  Search,
+  Server,
+  Settings,
+  Terminal as TerminalIcon,
+} from "lucide-react";
 import type { AgentInstance, Project } from "../shared/protocol";
 import { agentTypeLabel } from "../shared/timeline";
 
@@ -20,6 +28,8 @@ interface CommandPaletteProps {
   onNewSession: () => void;
   onAddProject: () => void;
   onOpenBots: () => void;
+  onOpenRemotes: () => void;
+  onOpenSettings: () => void;
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -31,33 +41,53 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onNewSession,
   onAddProject,
   onOpenBots,
+  onOpenRemotes,
+  onOpenSettings,
 }) => {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
 
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setSelected(0);
-    }
-  }, [open]);
+    if (!open) return;
+    setQuery("");
+    setSelected(0);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, open]);
 
   const items = useMemo<PaletteItem[]>(() => {
     const projectMap = new Map(projects.map((p) => [p.id, p.name]));
     const base: PaletteItem[] = [
       {
         id: "act:new",
-        label: "新建会话 (Pi / OpenCode / ACP / Shell)",
+        label: "新建会话",
         detail: "Ctrl+N",
         kind: "action",
         run: onNewSession,
       },
       {
         id: "act:project",
-        label: "添加本地项目工作区",
-        detail: "Folder",
+        label: "添加项目工作区",
+        detail: "项目",
         kind: "action",
         run: onAddProject,
+      },
+      {
+        id: "act:remotes",
+        label: "管理远程机器",
+        detail: "Ctrl+Shift+M",
+        kind: "action",
+        run: onOpenRemotes,
+      },
+      {
+        id: "act:settings",
+        label: "打开设置",
+        detail: "Ctrl+,",
+        kind: "action",
+        run: onOpenSettings,
       },
       {
         id: "act:bots",
@@ -69,7 +99,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       ...agents.map((a) => ({
         id: `agent:${a.id}`,
         label: a.title,
-        detail: `${projectMap.get(a.project) ?? a.project} · ${agentTypeLabel(a.agent_type)} · ${a.status}`,
+        detail: `${projectMap.get(a.project) ?? a.project} · ${agentTypeLabel(a.agent_type)}`,
         kind: "agent" as const,
         run: () => onSelectAgent(a.id),
       })),
@@ -80,7 +110,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     return base.filter(
       (i) => i.label.toLowerCase().includes(q) || i.detail.toLowerCase().includes(q),
     );
-  }, [agents, onAddProject, onNewSession, onOpenBots, onSelectAgent, projects, query]);
+  }, [
+    agents,
+    onAddProject,
+    onNewSession,
+    onOpenBots,
+    onOpenRemotes,
+    onOpenSettings,
+    onSelectAgent,
+    projects,
+    query,
+  ]);
 
   useEffect(() => {
     if (selected >= items.length) setSelected(0);
@@ -141,7 +181,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                     item.run();
                     onClose();
                   }}
-                  className={`relative flex w-full items-center justify-between gap-3 px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
+                  className={`relative flex w-full items-center justify-between gap-3 px-3.5 py-2 text-left transition-colors cursor-pointer ${
                     isSelected
                       ? "bg-active text-ink-strong"
                       : "text-ink-2 hover:bg-hover hover:text-ink"
@@ -155,6 +195,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                       <Plus className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
                     ) : item.id === "act:project" ? (
                       <FolderPlus className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+                    ) : item.id === "act:remotes" ? (
+                      <Server className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+                    ) : item.id === "act:settings" ? (
+                      <Settings className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
                     ) : item.id === "act:bots" ? (
                       <Bot className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
                     ) : (

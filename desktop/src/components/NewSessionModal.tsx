@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Columns2, MessageSquare, Terminal as TerminalIcon, X } from "lucide-react";
+import { MessageSquare, Terminal as TerminalIcon, X } from "lucide-react";
 import {
   presetChatDriver,
   type AgentPreset,
   type Project,
+  type SessionViewMode,
 } from "../shared/protocol";
 import { orderPresetsPiFirst } from "../shared/timeline";
 
@@ -11,13 +12,14 @@ interface NewSessionModalProps {
   open: boolean;
   projects: Project[];
   initialProjectId: string | null;
+  defaultSurface: SessionViewMode;
   presetsByProject: Record<string, AgentPreset[]>;
   onLoadPresets: (projectId: string) => Promise<AgentPreset[]>;
   onClose: () => void;
   onSpawn: (opts: {
     projectId: string;
     preset: AgentPreset;
-    surface: "chat" | "terminal" | "split";
+    surface: SessionViewMode;
     initialPrompt?: string;
   }) => Promise<unknown>;
 }
@@ -26,6 +28,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
   open,
   projects,
   initialProjectId,
+  defaultSurface,
   presetsByProject,
   onLoadPresets,
   onClose,
@@ -33,7 +36,9 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
 }) => {
   const [projectId, setProjectId] = useState(initialProjectId || projects[0]?.id || "");
   const [selectedPresetId, setSelectedPresetId] = useState<string>("");
-  const [surface, setSurface] = useState<"chat" | "split" | "terminal">("split");
+  const [surface, setSurface] = useState<SessionViewMode>(
+    defaultSurface === "terminal" ? "terminal" : "chat",
+  );
   const [initialPrompt, setInitialPrompt] = useState("");
   const [loadingPresets, setLoadingPresets] = useState(false);
   const [spawning, setSpawning] = useState(false);
@@ -42,8 +47,15 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
     if (!open) return;
     const pid = initialProjectId || projects[0]?.id || "";
     setProjectId(pid);
+    setSurface(defaultSurface === "terminal" ? "terminal" : "chat");
     setInitialPrompt("");
-  }, [initialProjectId, open, projects]);
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [defaultSurface, initialProjectId, onClose, open, projects]);
 
   useEffect(() => {
     if (!open || !projectId) return;
@@ -69,7 +81,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
 
   const activePreset = allOrdered.find((p) => p.id === selectedPresetId) ?? allOrdered[0] ?? null;
   const isShell = activePreset?.agent_type === "shell";
-  const supportsStructuredChat = activePreset
+  const supportsNativeChat = activePreset
     ? presetChatDriver(activePreset.agent_type) !== null
     : false;
 
@@ -80,11 +92,12 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       await onSpawn({
         projectId,
         preset: activePreset,
-        surface: isShell
-          ? "terminal"
-          : surface === "chat" && !supportsStructuredChat
-            ? "split"
-            : surface,
+        surface:
+          isShell || !supportsNativeChat
+            ? "terminal"
+            : surface === "terminal"
+              ? "terminal"
+              : "chat",
         initialPrompt: initialPrompt.trim() || undefined,
       });
       onClose();
@@ -107,6 +120,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
           <button
             type="button"
             onClick={onClose}
+            aria-label="关闭"
             className="flex h-6 w-6 items-center justify-center text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
           >
             <X className="h-4 w-4" />
@@ -116,9 +130,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
         <div className="space-y-4 p-4">
           {/* Project select */}
           <div>
-            <label className="mb-1.5 block font-mono text-[10.5px] uppercase tracking-wider text-ink-muted">
-              目标项目
-            </label>
+            <label className="mb-1.5 block text-[11.5px] text-ink-muted">目标项目</label>
             <select
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
@@ -134,9 +146,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
 
           {/* Preset picker */}
           <div>
-            <label className="mb-1.5 block font-mono text-[10.5px] uppercase tracking-wider text-ink-muted">
-              Agent / Shell
-            </label>
+            <label className="mb-1.5 block text-[11.5px] text-ink-muted">Agent / Shell</label>
             {loadingPresets && allOrdered.length === 0 ? (
               <div className="border border-line-subtle bg-canvas p-4 text-center text-[12.5px] text-ink-muted">
                 正在检测已安装的 CLI 工具…
@@ -145,7 +155,6 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
               <div className="grid grid-cols-2 gap-1.5">
                 {allOrdered.map((preset) => {
                   const selected = preset.id === activePreset?.id;
-                  const driver = presetChatDriver(preset.agent_type);
                   return (
                     <button
                       key={preset.id}
@@ -165,15 +174,6 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                           {preset.program}
                         </div>
                       </div>
-                      <span className="ml-2 shrink-0 font-mono text-[10px] text-ink-muted">
-                        {preset.agent_type === "shell"
-                          ? "CLI"
-                          : driver === "pi_rpc"
-                            ? "RPC / PTY"
-                            : driver === "acp"
-                              ? "ACP / PTY"
-                              : "PTY SYNC"}
-                      </span>
                     </button>
                   );
                 })}
@@ -181,37 +181,22 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
             )}
           </div>
 
-          {/* Launch Surface */}
-          {!isShell && activePreset && (
+          {/* Session Type (fixed at creation) */}
+          {!isShell && supportsNativeChat && activePreset && (
             <div>
-              <label className="mb-1.5 block font-mono text-[10.5px] uppercase tracking-wider text-ink-muted">
-                启动模式
-              </label>
-              <div className="grid grid-cols-3 border border-line bg-base p-[2px]">
+              <label className="mb-1.5 block text-[11.5px] text-ink-muted">会话类型</label>
+              <div className="grid grid-cols-2 border border-line bg-base p-[2px]">
                 <button
                   type="button"
-                  onClick={() => setSurface("split")}
-                  className={`flex h-8 items-center justify-center gap-1.5 text-[12px] transition-colors cursor-pointer ${
-                    surface === "split"
-                      ? "bg-active font-medium text-ink-strong"
-                      : "text-ink-muted hover:text-ink"
-                  }`}
-                >
-                  <Columns2 className="h-3.5 w-3.5" />
-                  <span>分屏同步</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={!supportsStructuredChat}
                   onClick={() => setSurface("chat")}
-                  className={`flex h-8 items-center justify-center gap-1.5 text-[12px] transition-colors disabled:opacity-35 cursor-pointer ${
-                    surface === "chat"
+                  className={`flex h-8 items-center justify-center gap-1.5 text-[12px] transition-colors cursor-pointer ${
+                    surface !== "terminal"
                       ? "bg-active font-medium text-ink-strong"
                       : "text-ink-muted hover:text-ink"
                   }`}
                 >
                   <MessageSquare className="h-3.5 w-3.5" />
-                  <span>原生对话</span>
+                  <span>对话会话</span>
                 </button>
                 <button
                   type="button"
@@ -223,7 +208,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
                   }`}
                 >
                   <TerminalIcon className="h-3.5 w-3.5" />
-                  <span>纯终端</span>
+                  <span>终端会话</span>
                 </button>
               </div>
             </div>
@@ -232,9 +217,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
           {/* Optional Initial Prompt */}
           {!isShell && (
             <div>
-              <label className="mb-1.5 block font-mono text-[10.5px] uppercase tracking-wider text-ink-muted">
-                初始任务（可选）
-              </label>
+              <label className="mb-1.5 block text-[11.5px] text-ink-muted">初始任务（可选）</label>
               <textarea
                 rows={2}
                 value={initialPrompt}
@@ -256,9 +239,9 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
           </button>
           <button
             type="button"
-            disabled={!activePreset || spawning}
+            disabled={!projectId || !activePreset || spawning}
             onClick={() => void handleLaunch()}
-            className="h-8 bg-primary-btn px-4 text-[12.5px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover disabled:opacity-40 transition-colors cursor-pointer"
+            className="h-8 min-w-[88px] bg-primary-btn px-4 text-[12.5px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover disabled:opacity-45 transition-colors cursor-pointer"
           >
             {spawning ? "启动中…" : "启动会话"}
           </button>

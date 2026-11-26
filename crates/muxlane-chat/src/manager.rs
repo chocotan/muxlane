@@ -52,7 +52,10 @@ struct ChatSub {
 struct PtyBridgeState {
     agent_type: AgentType,
     cwd: PathBuf,
+    fallback_cwd: Option<PathBuf>,
     started_secs: u64,
+    proc_start_secs: Option<u64>,
+    allow_older_fallback: bool,
     session_file_hint: Option<PathBuf>,
     write_lock: Arc<Mutex<()>>,
     wake_notify: Arc<Notify>,
@@ -61,6 +64,7 @@ struct PtyBridgeState {
     pending_user_echoes: Vec<(String, String, u64)>,
     has_live_preview: bool,
     bridge_approval_id: Option<String>,
+    last_auto_title: Option<String>,
 }
 
 impl Drop for PtyBridgeState {
@@ -176,6 +180,12 @@ impl ChatManager {
     }
 
     async fn emit_delta_op(&self, agent: &AgentId, op: ChatDeltaOp) {
+        let op = match op {
+            ChatDeltaOp::UpsertEntry { entry } => ChatDeltaOp::UpsertEntry {
+                entry: compact_entry_for_wire(entry),
+            },
+            other => other,
+        };
         let persist = !is_transient_bridge_op(&op);
         let meta_changed = matches!(op, ChatDeltaOp::MetaUpdated { .. });
         let approval_notice = match &op {
@@ -325,21 +335,84 @@ impl ChatManager {
         alive: bool,
         session_file_hint: Option<PathBuf>,
     ) -> ChatSessionMeta {
+        self.ensure_pty_bridge_with_context(
+            agent,
+            agent_type,
+            cwd,
+            None,
+            started_secs,
+            None,
+            false,
+            alive,
+            session_file_hint,
+        )
+        .await
+    }
+
+    /// 携带实时 pane cwd、回退项目目录、前台进程启动时间与是否允许匹配历史会话标志注册/更新 PTY Bridge。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ensure_pty_bridge_with_context(
+        self: &Arc<Self>,
+        agent: &AgentId,
+        agent_type: AgentType,
+        cwd: PathBuf,
+        fallback_cwd: Option<PathBuf>,
+        started_secs: u64,
+        proc_start_secs: Option<u64>,
+        allow_older_fallback: bool,
+        alive: bool,
+        session_file_hint: Option<PathBuf>,
+    ) -> ChatSessionMeta {
         let mut emit_meta_update: Option<ChatSessionMeta> = None;
-        let existing_meta = {
+        let (existing_meta, claimed_files) = {
             let mut map = self.sessions.lock().await;
-            if let Some(entry) = map.get_mut(agent) {
+            let claimed: Vec<PathBuf> = map
+                .iter()
+                .filter(|(id, _)| *id != agent)
+                .filter_map(|(_, e)| {
+                    e.pty_bridge
+                        .as_ref()
+                        .and_then(|b| b.session_file_hint.clone())
+                        .or_else(|| {
+                            e.timeline
+                                .meta
+                                .provider_session_file
+                                .as_deref()
+                                .map(PathBuf::from)
+                        })
+                })
+                .collect();
+            let existing = if let Some(entry) = map.get_mut(agent) {
                 // Lane B structured driver owns this session; do not override it with PTY bridge.
                 if entry.driver.is_some() {
                     return entry.timeline.meta.clone();
                 }
                 if let Some(bridge) = entry.pty_bridge.as_mut() {
+                    let relaunched_fresh = !allow_older_fallback
+                        && match (bridge.proc_start_secs, proc_start_secs) {
+                            (Some(prev), Some(next)) => next > prev.saturating_add(5),
+                            (None, Some(next)) => next > bridge.started_secs.saturating_add(5),
+                            _ => false,
+                        };
                     bridge.agent_type = agent_type;
                     bridge.cwd = cwd.clone();
-                    if let Some(hint) = session_file_hint.clone() {
-                        bridge.session_file_hint = Some(hint);
+                    bridge.fallback_cwd = fallback_cwd.clone();
+                    if relaunched_fresh {
+                        bridge.started_secs = proc_start_secs.unwrap_or(started_secs);
+                        bridge.proc_start_secs = proc_start_secs;
+                        bridge.allow_older_fallback = false;
+                        bridge.session_file_hint = session_file_hint.clone();
+                        entry.timeline.meta.provider_session_file = None;
+                        entry.timeline.meta.provider_session_id = None;
+                    } else {
+                        if proc_start_secs.is_some() {
+                            bridge.proc_start_secs = proc_start_secs;
+                        }
+                        if let Some(hint) = session_file_hint.clone() {
+                            bridge.session_file_hint = Some(hint);
+                        }
                     }
-                    let mut changed = false;
+                    let mut changed = relaunched_fresh;
                     if entry.timeline.meta.supports_chat_input != alive {
                         entry.timeline.meta.supports_chat_input = alive;
                         changed = true;
@@ -367,7 +440,8 @@ impl ChatManager {
                 }
             } else {
                 None
-            }
+            };
+            (existing, claimed)
         };
 
         if let Some(meta) = existing_meta {
@@ -378,13 +452,24 @@ impl ChatManager {
             return meta;
         }
 
-        // Hydrate initial transcript synchronously (outside lock) if a Pi/Pie JSONL already exists.
+        // Hydrate initial transcript synchronously (outside lock) if a matching Pi/Pie JSONL exists.
+        // Freshly spawned sessions (`allow_older_fallback == false`) strictly require a file created
+        // at/after spawn time so they never inherit an old session's transcript.
         let initial_file = session_file_hint.clone().or_else(|| {
             if matches!(agent_type, AgentType::Pi | AgentType::Pie) {
-                transcript::discover_pi_session_file(
+                let effective_floor = if allow_older_fallback {
+                    started_secs.saturating_sub(3600)
+                } else {
+                    proc_start_secs.unwrap_or(started_secs)
+                };
+                transcript::discover_pi_session_file_with_context(
                     &cwd,
+                    fallback_cwd.as_deref(),
                     agent_type == AgentType::Pie,
-                    started_secs.saturating_sub(3600),
+                    effective_floor,
+                    proc_start_secs,
+                    allow_older_fallback,
+                    &claimed_files,
                 )
             } else {
                 None
@@ -399,7 +484,7 @@ impl ChatManager {
         let wake_notify = Arc::new(Notify::new());
         let supports_switch = supports_native_switch_for(agent_type);
 
-        let (result_meta, should_emit_meta) = {
+        let (result_meta, should_emit_meta, initial_title) = {
             let mut map = self.sessions.lock().await;
             // Re-check after lock acquisition in case of concurrent ensure_pty_bridge call.
             if let Some(existing) = map.get(agent) {
@@ -430,8 +515,10 @@ impl ChatManager {
                 ..Default::default()
             };
 
+            let mut initial_title = None;
             if let Some(poll) = initial_poll {
                 merge_transcript_meta(&mut meta, &poll.meta);
+                initial_title = poll.session_title;
                 for entry in poll.upserted_entries {
                     let seq = timeline.seq + 1;
                     timeline.apply(ChatDeltaEvent {
@@ -479,7 +566,10 @@ impl ChatManager {
                     pty_bridge: Some(PtyBridgeState {
                         agent_type,
                         cwd,
+                        fallback_cwd,
                         started_secs,
+                        proc_start_secs,
+                        allow_older_fallback,
                         session_file_hint: initial_file,
                         write_lock: Arc::new(Mutex::new(())),
                         wake_notify,
@@ -487,12 +577,20 @@ impl ChatManager {
                         pending_user_echoes: Vec::new(),
                         has_live_preview: false,
                         bridge_approval_id: None,
+                        last_auto_title: initial_title.clone(),
                     }),
                     subs: preserved_subs,
                 },
             );
-            (meta, had_subs)
+            (meta, had_subs, initial_title)
         };
+
+        if let Some(title) = initial_title {
+            let _ = self.notices.send(ChatHostNotice::TitleChanged {
+                agent: agent.clone(),
+                title,
+            });
+        }
 
         if should_emit_meta {
             self.emit_delta_op(
@@ -631,6 +729,7 @@ impl ChatManager {
                                 text: preview.to_string(),
                                 streaming: true,
                                 model: meta.current_model.as_ref().map(|m| m.name.clone()),
+                                usage: None,
                                 created_at_ms: now_ms(),
                             },
                         });
@@ -724,6 +823,7 @@ impl ChatManager {
                                     text: text.to_string(),
                                     streaming: false,
                                     model: meta.current_model.as_ref().map(|m| m.name.clone()),
+                                    usage: None,
                                     created_at_ms: now_ms(),
                                 },
                             });
@@ -814,21 +914,59 @@ impl ChatManager {
                 let Some(bridge) = entry.pty_bridge.as_ref() else {
                     break;
                 };
+                let claimed: Vec<PathBuf> = map
+                    .iter()
+                    .filter(|(id, _)| *id != &agent)
+                    .filter_map(|(_, e)| {
+                        e.pty_bridge
+                            .as_ref()
+                            .and_then(|b| b.session_file_hint.clone())
+                            .or_else(|| {
+                                e.timeline
+                                    .meta
+                                    .provider_session_file
+                                    .as_deref()
+                                    .map(PathBuf::from)
+                            })
+                    })
+                    .collect();
                 (
                     bridge.agent_type,
                     bridge.cwd.clone(),
+                    bridge.fallback_cwd.clone(),
                     bridge.started_secs,
+                    bridge.proc_start_secs,
+                    bridge.allow_older_fallback,
                     bridge.session_file_hint.clone(),
+                    claimed,
                 )
             };
 
-            let (agent_type, cwd, started_secs, hint) = probe;
+            let (
+                agent_type,
+                cwd,
+                fallback_cwd,
+                started_secs,
+                proc_start_secs,
+                allow_older_fallback,
+                hint,
+                claimed_files,
+            ) = probe;
             let resolved_file = hint.or_else(|| {
                 if matches!(agent_type, AgentType::Pi | AgentType::Pie) {
-                    transcript::discover_pi_session_file(
+                    let effective_floor = if allow_older_fallback {
+                        started_secs.saturating_sub(3600)
+                    } else {
+                        proc_start_secs.unwrap_or(started_secs)
+                    };
+                    transcript::discover_pi_session_file_with_context(
                         &cwd,
+                        fallback_cwd.as_deref(),
                         agent_type == AgentType::Pie,
-                        started_secs.saturating_sub(3600),
+                        effective_floor,
+                        proc_start_secs,
+                        allow_older_fallback,
+                        &claimed_files,
                     )
                 } else {
                     None
@@ -838,6 +976,16 @@ impl ChatManager {
             let Some(file_path) = resolved_file else {
                 continue;
             };
+
+            // Pin the discovered file on the bridge so sibling sessions do not claim it.
+            {
+                let mut map = self.sessions.lock().await;
+                if let Some(bridge) = map.get_mut(&agent).and_then(|e| e.pty_bridge.as_mut()) {
+                    if bridge.session_file_hint.is_none() {
+                        bridge.session_file_hint = Some(file_path.clone());
+                    }
+                }
+            }
 
             match watcher.as_mut() {
                 None => {
@@ -860,11 +1008,50 @@ impl ChatManager {
                 }
             };
 
-            if !poll.reset && !poll.meta_changed && poll.upserted_entries.is_empty() {
+            if !poll.reset
+                && !poll.meta_changed
+                && poll.upserted_entries.is_empty()
+                && poll.turn_state.is_none()
+            {
                 continue;
             }
 
             self.apply_bridge_transcript_poll(&agent, poll).await;
+        }
+    }
+
+    /// Marks a PTY-bridge session as no longer streaming (e.g. when terminal screen detection
+    /// observes the agent returning to Done / Idle / Failed without an extension hook).
+    pub async fn mark_pty_bridge_idle(&self, agent: &AgentId) {
+        let ops = {
+            let mut map = self.sessions.lock().await;
+            let Some(entry) = map.get_mut(agent) else {
+                return;
+            };
+            let Some(bridge) = entry.pty_bridge.as_mut() else {
+                return;
+            };
+            if !entry.timeline.meta.is_streaming && !bridge.has_live_preview {
+                return;
+            }
+            let mut ops = Vec::new();
+            if bridge.has_live_preview {
+                bridge.has_live_preview = false;
+                ops.push(ChatDeltaOp::RemoveEntry {
+                    entry_id: BRIDGE_LIVE_PREVIEW_ID.to_string(),
+                });
+            }
+            let mut next_meta = entry.timeline.meta.clone();
+            next_meta.is_streaming = false;
+            ops.push(ChatDeltaOp::MetaUpdated { meta: next_meta });
+            ops.push(ChatDeltaOp::TurnFinished {
+                turn_id: None,
+                error: None,
+            });
+            ops
+        };
+        for op in ops {
+            self.emit_delta_op(agent, op).await;
         }
     }
 
@@ -873,7 +1060,7 @@ impl ChatManager {
         agent: &AgentId,
         poll: transcript::TranscriptPoll,
     ) {
-        let ops = {
+        let (ops, title_notice) = {
             let mut map = self.sessions.lock().await;
             let Some(entry) = map.get_mut(agent) else {
                 return;
@@ -886,12 +1073,53 @@ impl ChatManager {
             if poll.reset {
                 bridge.pending_user_echoes.clear();
                 bridge.has_live_preview = false;
+                bridge.last_auto_title = None;
                 ops.push(ChatDeltaOp::Reset);
             }
 
+            let title_notice = poll.session_title.and_then(|title| {
+                if bridge.last_auto_title.as_deref() != Some(title.as_str()) {
+                    bridge.last_auto_title = Some(title.clone());
+                    Some(title)
+                } else {
+                    None
+                }
+            });
+
             let mut merged_meta = entry.timeline.meta.clone();
-            let meta_diff = merge_transcript_meta(&mut merged_meta, &poll.meta);
-            if poll.meta_changed && meta_diff {
+            let mut meta_dirty =
+                merge_transcript_meta(&mut merged_meta, &poll.meta) && poll.meta_changed;
+            let mut emit_turn_finished = false;
+
+            if poll.reset && merged_meta.is_streaming {
+                merged_meta.is_streaming = false;
+                meta_dirty = true;
+            }
+
+            match poll.turn_state {
+                Some(transcript::TranscriptTurnState::Completed) => {
+                    if bridge.has_live_preview {
+                        bridge.has_live_preview = false;
+                        ops.push(ChatDeltaOp::RemoveEntry {
+                            entry_id: BRIDGE_LIVE_PREVIEW_ID.to_string(),
+                        });
+                    }
+                    if merged_meta.is_streaming {
+                        merged_meta.is_streaming = false;
+                        meta_dirty = true;
+                        emit_turn_finished = true;
+                    }
+                }
+                Some(transcript::TranscriptTurnState::Active)
+                    if !poll.initial_load && !poll.reset && !merged_meta.is_streaming =>
+                {
+                    merged_meta.is_streaming = true;
+                    meta_dirty = true;
+                }
+                _ => {}
+            }
+
+            if meta_dirty {
                 ops.push(ChatDeltaOp::MetaUpdated { meta: merged_meta });
             }
 
@@ -935,11 +1163,24 @@ impl ChatManager {
                 }
                 ops.push(ChatDeltaOp::UpsertEntry { entry: item });
             }
-            ops
+
+            if emit_turn_finished {
+                ops.push(ChatDeltaOp::TurnFinished {
+                    turn_id: None,
+                    error: None,
+                });
+            }
+            (ops, title_notice)
         };
 
         for op in ops {
             self.emit_delta_op(agent, op).await;
+        }
+        if let Some(title) = title_notice {
+            let _ = self.notices.send(ChatHostNotice::TitleChanged {
+                agent: agent.clone(),
+                title,
+            });
         }
     }
 
@@ -1095,13 +1336,7 @@ impl ChatManager {
     pub async fn history(&self, agent: &AgentId) -> Option<ChatHistoryResult> {
         let map = self.sessions.lock().await;
         let entry = map.get(agent)?;
-        Some(ChatHistoryResult {
-            agent: agent.clone(),
-            seq: entry.timeline.seq,
-            meta: entry.timeline.meta.clone(),
-            entries: entry.timeline.entries.clone(),
-            pending_approvals: entry.timeline.pending_approvals.clone(),
-        })
+        Some(build_wire_history(agent, &entry.timeline))
     }
 
     pub async fn subscribe(
@@ -1115,13 +1350,7 @@ impl ChatManager {
             .get_mut(agent)
             .ok_or_else(|| anyhow::anyhow!("no chat session for agent {agent}"))?;
         entry.subs.push(ChatSub { id: sub_id, tx });
-        Ok(ChatHistoryResult {
-            agent: agent.clone(),
-            seq: entry.timeline.seq,
-            meta: entry.timeline.meta.clone(),
-            entries: entry.timeline.entries.clone(),
-            pending_approvals: entry.timeline.pending_approvals.clone(),
-        })
+        Ok(build_wire_history(agent, &entry.timeline))
     }
 
     pub async fn unsubscribe(&self, sub_id: &str) {
@@ -1522,6 +1751,191 @@ fn merge_transcript_meta(dst: &mut ChatSessionMeta, src: &ChatSessionMeta) -> bo
     changed
 }
 
+const WIRE_HISTORY_BUDGET_BYTES: usize = 700 * 1024;
+const WIRE_TOOL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
+const WIRE_TOOL_INPUT_MAX_BYTES: usize = 8 * 1024;
+const WIRE_DIFF_SIDE_MAX_BYTES: usize = 24 * 1024;
+const WIRE_THINKING_MAX_BYTES: usize = 24 * 1024;
+const WIRE_TEXT_MAX_BYTES: usize = 96 * 1024;
+const WIRE_ATTACHMENT_B64_MAX_BYTES: usize = 64 * 1024;
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = text[..end].to_string();
+    out.push_str("\n… [内容过长已截断]");
+    out
+}
+
+fn compact_entry_for_wire(entry: TimelineEntry) -> TimelineEntry {
+    match entry {
+        TimelineEntry::UserMessage {
+            id,
+            turn_id,
+            text,
+            attachments,
+            created_at_ms,
+        } => {
+            let attachments = attachments
+                .into_iter()
+                .map(|mut att| {
+                    if att
+                        .data_b64
+                        .as_ref()
+                        .is_some_and(|b| b.len() > WIRE_ATTACHMENT_B64_MAX_BYTES)
+                    {
+                        att.data_b64 = None;
+                    }
+                    att
+                })
+                .collect();
+            TimelineEntry::UserMessage {
+                id,
+                turn_id,
+                text: truncate_utf8(&text, WIRE_TEXT_MAX_BYTES),
+                attachments,
+                created_at_ms,
+            }
+        }
+        TimelineEntry::Thinking {
+            id,
+            turn_id,
+            text,
+            streaming,
+            duration_ms,
+            created_at_ms,
+        } => TimelineEntry::Thinking {
+            id,
+            turn_id,
+            text: truncate_utf8(&text, WIRE_THINKING_MAX_BYTES),
+            streaming,
+            duration_ms,
+            created_at_ms,
+        },
+        TimelineEntry::AssistantText {
+            id,
+            turn_id,
+            text,
+            streaming,
+            model,
+            usage,
+            created_at_ms,
+        } => TimelineEntry::AssistantText {
+            id,
+            turn_id,
+            text: truncate_utf8(&text, WIRE_TEXT_MAX_BYTES),
+            streaming,
+            model,
+            usage,
+            created_at_ms,
+        },
+        TimelineEntry::ToolCall {
+            id,
+            turn_id,
+            call_id,
+            name,
+            kind,
+            title,
+            input,
+            output,
+            diff,
+            exit_code,
+            locations,
+            state,
+            is_error,
+            duration_ms,
+            created_at_ms,
+        } => {
+            let compact_input = match serde_json::to_string(&input) {
+                Ok(raw) if raw.len() > WIRE_TOOL_INPUT_MAX_BYTES => {
+                    serde_json::Value::String(truncate_utf8(&raw, WIRE_TOOL_INPUT_MAX_BYTES))
+                }
+                _ => input,
+            };
+            let compact_output = output.map(|o| truncate_utf8(&o, WIRE_TOOL_OUTPUT_MAX_BYTES));
+            let compact_diff = diff.map(|mut d| {
+                d.old_text = truncate_utf8(&d.old_text, WIRE_DIFF_SIDE_MAX_BYTES);
+                d.new_text = truncate_utf8(&d.new_text, WIRE_DIFF_SIDE_MAX_BYTES);
+                d
+            });
+            TimelineEntry::ToolCall {
+                id,
+                turn_id,
+                call_id,
+                name,
+                kind,
+                title,
+                input: compact_input,
+                output: compact_output,
+                diff: compact_diff,
+                exit_code,
+                locations,
+                state,
+                is_error,
+                duration_ms,
+                created_at_ms,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Builds a wire-safe `ChatHistoryResult` guaranteed to serialize well below `MAX_FRAME` (1 MiB),
+/// keeping the most recent timeline entries when long sessions exceed the single-frame budget.
+fn build_wire_history(agent: &AgentId, timeline: &ChatTimelineState) -> ChatHistoryResult {
+    let overhead = serde_json::to_vec(&(&timeline.meta, &timeline.pending_approvals))
+        .map(|v| v.len())
+        .unwrap_or(4096)
+        + 4096;
+    let budget = WIRE_HISTORY_BUDGET_BYTES.saturating_sub(overhead);
+
+    let total = timeline.entries.len();
+    let mut kept_rev: Vec<TimelineEntry> = Vec::new();
+    let mut used_bytes: usize = 0;
+
+    for raw in timeline.entries.iter().rev() {
+        let compact = compact_entry_for_wire(raw.clone());
+        let entry_bytes = serde_json::to_vec(&compact).map(|v| v.len()).unwrap_or(512) + 2;
+        if !kept_rev.is_empty() && used_bytes + entry_bytes > budget {
+            break;
+        }
+        used_bytes += entry_bytes;
+        kept_rev.push(compact);
+    }
+
+    let omitted = total.saturating_sub(kept_rev.len());
+    kept_rev.reverse();
+    if omitted > 0 {
+        kept_rev.insert(
+            0,
+            TimelineEntry::Notice {
+                id: "wire-history-omitted".to_string(),
+                turn_id: None,
+                level: muxlane_core::chat::NoticeLevel::Info,
+                text: format!(
+                    "已加载最近 {} 条记录（更早的 {} 条历史已省略以适配传输上限）",
+                    kept_rev.len(),
+                    omitted
+                ),
+                created_at_ms: 0,
+            },
+        );
+    }
+
+    ChatHistoryResult {
+        agent: agent.clone(),
+        seq: timeline.seq,
+        meta: timeline.meta.clone(),
+        entries: kept_rev,
+        pending_approvals: timeline.pending_approvals.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1884,6 +2298,7 @@ process.stdin.on("data", (chunk) => {
             assert_eq!(writes[1], b"\r");
         }
         let after_send = manager.history(&agent).await.unwrap();
+        assert!(after_send.meta.is_streaming);
         assert!(after_send
             .entries
             .iter()
@@ -1907,7 +2322,7 @@ process.stdin.on("data", (chunk) => {
             .iter()
             .any(|e| e.id() == BRIDGE_LIVE_PREVIEW_ID));
 
-        // Simulate Pi flushing real user + assistant JSONL lines to disk.
+        // Simulate Pi flushing user + intermediate toolUse (turn still running -> is_streaming stays true).
         {
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
@@ -1920,7 +2335,40 @@ process.stdin.on("data", (chunk) => {
             .unwrap();
             writeln!(
                 f,
-                r#"{{"type":"message","id":"a1","message":{{"role":"assistant","content":[{{"type":"text","text":"Final synced answer"}}],"timestamp":2000}}}}"#
+                r#"{{"type":"message","id":"a0","message":{{"role":"assistant","stopReason":"toolUse","content":[{{"type":"toolCall","id":"tc-live","name":"read","arguments":{{"path":"Cargo.toml"}}}}],"timestamp":1500}}}}"#
+            )
+            .unwrap();
+        }
+        manager.wake_pty_bridge(&agent).await;
+
+        let tool_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let hist = manager.history(&agent).await.unwrap();
+            if hist.entries.iter().any(|e| e.id() == "tool:tc-live") {
+                assert!(
+                    hist.meta.is_streaming,
+                    "intermediate toolUse must keep is_streaming=true"
+                );
+                break;
+            }
+            assert!(tokio::time::Instant::now() < tool_deadline);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        // Simulate toolResult + final assistant response with stopReason="stop" (NO hook "done" sent).
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&jsonl)
+                .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"message","id":"r0","message":{{"role":"toolResult","toolCallId":"tc-live","content":[{{"type":"text","text":"ok"}}],"isError":false,"timestamp":1800}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"message","id":"a1","message":{{"role":"assistant","stopReason":"stop","content":[{{"type":"text","text":"Final synced answer"}}],"timestamp":2000}}}}"#
             )
             .unwrap();
         }
@@ -1936,17 +2384,31 @@ process.stdin.on("data", (chunk) => {
             let no_pending = !hist.entries.iter().any(|e| {
                 e.id().starts_with(BRIDGE_PENDING_USER_PREFIX) || e.id() == BRIDGE_LIVE_PREVIEW_ID
             });
-            if has_real_user && has_real_asst && no_pending {
+            if has_real_user && has_real_asst && no_pending && !hist.meta.is_streaming {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "timed out waiting for bridged JSONL reconciliation: {:?}",
+                "timed out waiting for bridged JSONL reconciliation + idle turn completion: is_streaming={}, entries={:?}",
+                hist.meta.is_streaming,
                 hist.entries
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(sub_rx.try_recv().is_ok());
+
+        // Screen-idle fallback (`mark_pty_bridge_idle`) also clears is_streaming reliably.
+        manager
+            .notify_pty_hook(&AgentReportParams {
+                token: String::new(),
+                agent: agent.clone(),
+                event: "working".into(),
+                ..Default::default()
+            })
+            .await;
+        assert!(manager.history(&agent).await.unwrap().meta.is_streaming);
+        manager.mark_pty_bridge_idle(&agent).await;
+        assert!(!manager.history(&agent).await.unwrap().meta.is_streaming);
 
         // Blocked hook creates inline approval; approving writes `y\r` into PTY.
         manager

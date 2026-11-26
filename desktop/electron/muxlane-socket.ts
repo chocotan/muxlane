@@ -59,12 +59,16 @@ export class MuxlaneSocketClient {
   private spawnedDaemon: ChildProcess | null = null;
   private status: DaemonConnectionStatus;
 
+  private socketPath: string;
+  private allowAutoSpawnLocal = true;
+
   constructor(
-    private readonly socketPath: string,
+    socketPath: string,
     private readonly repoRoot: string,
     private readonly onEvent: (ev: RpcEventMessage) => void,
     private readonly onStatus: (status: DaemonConnectionStatus) => void,
   ) {
+    this.socketPath = socketPath;
     this.status = {
       connected: false,
       connecting: false,
@@ -79,6 +83,30 @@ export class MuxlaneSocketClient {
 
   start(): void {
     this.disposed = false;
+    this.connectNow();
+  }
+
+  switchTarget(socketPath: string, allowAutoSpawnLocal: boolean): void {
+    this.socketPath = socketPath;
+    this.allowAutoSpawnLocal = allowAutoSpawnLocal;
+    this.daemonSpawnAttempted = false;
+    this.backoffMs = 300;
+    this.clearReconnect();
+    if (this.socket) {
+      this.socket.destroy();
+      this.socket = null;
+    }
+    for (const req of this.pending.values()) {
+      clearTimeout(req.timer);
+      req.reject(new Error("已切换连接主机"));
+    }
+    this.pending.clear();
+    this.updateStatus({
+      connected: false,
+      connecting: true,
+      socketPath,
+      error: null,
+    });
     this.connectNow();
   }
 
@@ -204,7 +232,7 @@ export class MuxlaneSocketClient {
 
     sock.on("error", (err: NodeJS.ErrnoException) => {
       if (this.socket !== sock) return;
-      if (err.code === "ENOENT" || err.code === "ECONNREFUSED") {
+      if (this.allowAutoSpawnLocal && (err.code === "ENOENT" || err.code === "ECONNREFUSED")) {
         this.trySpawnHeadlessDaemon();
       }
       this.updateStatus({

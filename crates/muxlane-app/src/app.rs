@@ -142,8 +142,6 @@ pub struct MuxlaneApp {
     /// Live remote terminal streams. Hidden tabs keep their view but drop the
     /// stream so idle agents stop consuming bandwidth.
     pub(crate) remote_streams: HashMap<AgentId, crate::sessions::RemoteStreamCtl>,
-    pub(crate) chats: HashMap<AgentId, Entity<crate::chat::ChatView>>,
-    pub(crate) session_views: std::collections::BTreeMap<AgentId, muxlane_core::SessionViewMode>,
 
     // 快照/远程镜像
     pub(crate) last_snapshot: Snapshot,
@@ -658,8 +656,6 @@ impl MuxlaneApp {
             maximized_pane: None,
             terms: HashMap::new(),
             remote_streams: HashMap::new(),
-            chats: HashMap::new(),
-            session_views: persisted.session_views.clone(),
             active: None,
             workspace,
             floating: crate::floating::FloatingState::from_persisted(&persisted),
@@ -976,7 +972,6 @@ impl MuxlaneApp {
         app.default_terminal_preset = self.default_terminal_preset.clone();
         app.relay_url = self.relay_url.clone();
         app.relay_enabled = Some(self.relay_enabled);
-        app.session_views = self.session_views.clone();
         self.persistence.submit_app(app);
     }
 
@@ -1161,7 +1156,6 @@ impl Render for MuxlaneApp {
         window.set_rem_size(ui_px(16.));
         self.floating.main = Some(window.window_handle());
         self.schedule_session_windows(cx);
-        self.ensure_active_session_views(window, cx);
         self.sync_active_terminal_focus(window, cx);
         self.pane_tab_scrolls
             .retain(|pane, _| self.pane_tree.group(pane).is_some());
@@ -1305,10 +1299,6 @@ impl Render for MuxlaneApp {
                     .terms
                     .values()
                     .any(|term| term.focus_handle(cx).is_focused(window));
-                let chat_is_focused = this
-                    .chats
-                    .values()
-                    .any(|chat| chat.focus_handle(cx).is_focused(window));
                 if this.settings_open && matches!(ev.keystroke.key.as_str(), "tab" | "f6") {
                     this.cycle_settings_focus(ev.keystroke.modifiers.shift, window, cx);
                     cx.stop_propagation();
@@ -1327,10 +1317,7 @@ impl Render for MuxlaneApp {
                     if handled {
                         cx.stop_propagation();
                     }
-                } else if ev.keystroke.key.as_str() == "tab"
-                    && !terminal_is_focused
-                    && !chat_is_focused
-                {
+                } else if ev.keystroke.key.as_str() == "tab" && !terminal_is_focused {
                     if ev.keystroke.modifiers.shift {
                         window.focus_prev(cx);
                     } else {

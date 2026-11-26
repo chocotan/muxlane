@@ -121,7 +121,7 @@ const KITTY_ENTRY_TYPE = "muxlane-image"
 
 export function registerInlineImages(pi, deps = {}) {
   const env = deps.env ?? process.env
-  if (!kittyEnabled(env)) return
+  if (!kittyEnabled(env) || typeof pi?.registerEntryRenderer !== "function") return
   const write = deps.write ?? ((s) => process.stdout.write(s))
   let nextId = (deps.seed ?? (Date.now() & 0x7fffffff)) || 1
   const images = new Map() // logicalId -> { base64, columns, rows, terminalId, uploaded, placed }

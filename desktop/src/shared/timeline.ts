@@ -28,6 +28,11 @@ export function defaultChatMeta(): ChatSessionMeta {
     has_pty: false,
     available_models: [],
     available_thinking_levels: [],
+    available_commands: [],
+    queued_messages: [],
+    tasks: [],
+    subagents: [],
+    background_jobs: [],
     is_streaming: false,
   };
 }
@@ -131,6 +136,15 @@ export function applyChatDeltaOp(
       if (updated === target) return state;
       const nextEntries = state.entries.slice();
       nextEntries[idx] = updated;
+      return { ...state, entries: nextEntries };
+    }
+    case "set_assistant_usage": {
+      const idx = state.entries.findIndex((e) => e.id === op.entry_id);
+      if (idx < 0) return state;
+      const target = state.entries[idx];
+      if (target.type !== "assistant_text") return state;
+      const nextEntries = state.entries.slice();
+      nextEntries[idx] = { ...target, usage: op.usage };
       return { ...state, entries: nextEntries };
     }
     case "meta_updated":

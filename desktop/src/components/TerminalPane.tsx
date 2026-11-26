@@ -3,8 +3,8 @@ import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { Maximize2, Trash2 } from "lucide-react";
 import { Methods, type TermSubscribeResult } from "../shared/protocol";
+import { resolveCustomTerminalSequence } from "../shared/terminalKeys";
 import { encodeStringToBase64, type TermStreamChunk } from "../state/useMuxlaneStore";
 import type { AppTheme } from "../state/useTheme";
 
@@ -12,79 +12,149 @@ interface TerminalPaneProps {
   agentId: string;
   connected: boolean;
   theme: AppTheme;
+  fontSize?: number;
+  fontFamily?: string;
+  visible?: boolean;
   registerTermListener: (agentId: string, fn: (chunk: TermStreamChunk) => void) => () => void;
 }
 
-const DARK_XTERM_THEME: ITheme = {
-  background: "#0e0e10",
-  foreground: "#e4e4e7",
-  cursor: "#e4e4e7",
-  cursorAccent: "#0e0e10",
-  selectionBackground: "rgba(255, 255, 255, 0.18)",
-  black: "#18181b",
-  red: "#f87171",
-  green: "#74c991",
-  yellow: "#eab308",
-  blue: "#60a5fa",
-  magenta: "#c084fc",
-  cyan: "#22d3ee",
-  white: "#d4d4d8",
-  brightBlack: "#52525b",
-  brightRed: "#fca5a5",
-  brightGreen: "#86efac",
-  brightYellow: "#fde047",
-  brightBlue: "#93c5fd",
-  brightMagenta: "#d8b4fe",
-  brightCyan: "#67e8f9",
-  brightWhite: "#fafafa",
-};
-
-const LIGHT_XTERM_THEME: ITheme = {
-  background: "#fafafa",
-  foreground: "#18181b",
-  cursor: "#18181b",
-  cursorAccent: "#fafafa",
+const LIGHT_ANSI = {
   selectionBackground: "rgba(0, 0, 0, 0.14)",
-  black: "#18181b",
-  red: "#dc2626",
-  green: "#15803d",
-  yellow: "#b45309",
-  blue: "#1d4ed8",
+  black: "#242831",
+  red: "#d13e50",
+  green: "#2f855a",
+  yellow: "#b7791f",
+  blue: "#2563eb",
   magenta: "#7e22ce",
   cyan: "#0e7490",
   white: "#71717a",
   brightBlack: "#52525b",
-  brightRed: "#ef4444",
+  brightRed: "#e11d48",
   brightGreen: "#16a34a",
   brightYellow: "#ca8a04",
-  brightBlue: "#2563eb",
+  brightBlue: "#3b82f6",
   brightMagenta: "#9333ea",
   brightCyan: "#0891b2",
   brightWhite: "#09090b",
 };
 
+const DARK_ANSI = {
+  selectionBackground: "rgba(255, 255, 255, 0.18)",
+  black: "#21252b",
+  red: "#e06c75",
+  green: "#98c379",
+  yellow: "#e5c07b",
+  blue: "#61afef",
+  magenta: "#c678dd",
+  cyan: "#56b6c2",
+  white: "#d7dae0",
+  brightBlack: "#5c6370",
+  brightRed: "#f28b92",
+  brightGreen: "#b5e095",
+  brightYellow: "#f0d399",
+  brightBlue: "#82c4f8",
+  brightMagenta: "#dc9bf0",
+  brightCyan: "#7ad4df",
+  brightWhite: "#ffffff",
+};
+
+const XTERM_THEMES: Record<AppTheme, ITheme> = {
+  light: { ...LIGHT_ANSI, background: "#faf9f6", foreground: "#242831", cursor: "#3d6cd8", cursorAccent: "#faf9f6" },
+  moonstone: { ...LIGHT_ANSI, background: "#faf9fc", foreground: "#292633", cursor: "#6650a4", cursorAccent: "#faf9fc" },
+  paper: { ...LIGHT_ANSI, background: "#f4ecdf", foreground: "#3d3027", cursor: "#b35f2a", cursorAccent: "#f4ecdf" },
+  ash: { ...LIGHT_ANSI, background: "#f4f4f2", foreground: "#1a1a18", cursor: "#3a3a36", cursorAccent: "#f4f4f2" },
+  sky: { ...LIGHT_ANSI, background: "#f2f7ff", foreground: "#1e293b", cursor: "#2563eb", cursorAccent: "#f2f7ff" },
+  jade: { ...LIGHT_ANSI, background: "#eff8f2", foreground: "#1f3529", cursor: "#059669", cursorAccent: "#eff8f2" },
+  sakura: { ...LIGHT_ANSI, background: "#fff2f5", foreground: "#452530", cursor: "#e11d48", cursorAccent: "#fff2f5" },
+  dark: { ...DARK_ANSI, background: "#181a1f", foreground: "#d7dae0", cursor: "#528bff", cursorAccent: "#181a1f" },
+  onedark: { ...DARK_ANSI, background: "#282c34", foreground: "#abb2bf", cursor: "#61afef", cursorAccent: "#282c34" },
+  synthwave: {
+    ...DARK_ANSI,
+    background: "#1b1029",
+    foreground: "#f9eaff",
+    cursor: "#e879f9",
+    cursorAccent: "#1b1029",
+    green: "#7ee2b8",
+    yellow: "#f5ca7a",
+    red: "#fb7185",
+    magenta: "#e879f9",
+  },
+};
+
+const DEFAULT_FONT_FAMILY =
+  '"JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace';
+
 export const TerminalPane: React.FC<TerminalPaneProps> = ({
   agentId,
   connected,
   theme,
+  fontSize = 13,
+  fontFamily = DEFAULT_FONT_FAMILY,
+  visible = true,
   registerTermListener,
 }) => {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const themeRef = useRef<AppTheme>(theme);
-  const [sizeText, setSizeText] = useState("120×32");
+  const fontSizeRef = useRef(fontSize);
+  const fontFamilyRef = useRef(fontFamily);
   const [exited, setExited] = useState(false);
 
   themeRef.current = theme;
+  fontSizeRef.current = fontSize;
+  fontFamilyRef.current = fontFamily;
+
+  // Orca-style focus & fit handoff when TerminalPane is uncovered from Chat view
+  useEffect(() => {
+    if (!visible) return;
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    const raf = requestAnimationFrame(() => {
+      try {
+        fit.fit();
+        const cols = Math.max(20, term.cols);
+        const rows = Math.max(6, term.rows);
+        void window.muxlane
+          .rpc(Methods.TERM_RESIZE, { agent: agentId, cols, rows })
+          .catch(() => {});
+        term.focus();
+      } catch {
+        // ignore layout race
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [agentId, visible]);
 
   // Live-update xterm.js color palette without resetting active session
   useEffect(() => {
     const term = termRef.current;
     if (term) {
-      term.options.theme = theme === "light" ? LIGHT_XTERM_THEME : DARK_XTERM_THEME;
+      term.options.theme = XTERM_THEMES[theme] ?? XTERM_THEMES.dark;
     }
   }, [theme]);
+
+  // Live-update terminal font size & family from Settings and refit cleanly
+  useEffect(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    term.options.fontSize = fontSize;
+    term.options.fontFamily = fontFamily;
+    requestAnimationFrame(() => {
+      try {
+        fit.fit();
+        const cols = Math.max(20, term.cols);
+        const rows = Math.max(6, term.rows);
+        void window.muxlane
+          .rpc(Methods.TERM_RESIZE, { agent: agentId, cols, rows })
+          .catch(() => {});
+      } catch {
+        // ignore
+      }
+    });
+  }, [agentId, fontFamily, fontSize]);
 
   useEffect(() => {
     const container = hostRef.current;
@@ -93,13 +163,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "block",
-      fontFamily:
-        '"SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
-      lineHeight: 1.28,
+      fontFamily: fontFamilyRef.current,
+      fontSize: fontSizeRef.current,
+      lineHeight: 1.08,
       scrollback: 10_000,
       allowProposedApi: true,
-      theme: themeRef.current === "light" ? LIGHT_XTERM_THEME : DARK_XTERM_THEME,
+      theme: XTERM_THEMES[themeRef.current] ?? XTERM_THEMES.dark,
     });
 
     const fit = new FitAddon();
@@ -109,6 +178,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     term.loadAddon(fit);
     term.loadAddon(links);
     term.open(container);
+    if (visible) {
+      requestAnimationFrame(() => term.focus());
+    }
 
     try {
       const webgl = new WebglAddon();
@@ -128,7 +200,6 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         fit.fit();
         const cols = Math.max(20, term.cols);
         const rows = Math.max(6, term.rows);
-        setSizeText(`${cols}×${rows}`);
         void window.muxlane
           .rpc(Methods.TERM_RESIZE, { agent: agentId, cols, rows })
           .catch(() => {});
@@ -137,14 +208,59 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       }
     };
 
-    const dataDisposable = term.onData((data) => {
+    const sendInput = (data: string) => {
       void window.muxlane
         .rpc(Methods.TERM_INPUT, {
           agent: agentId,
           data_b64: encodeStringToBase64(data),
         })
         .catch(() => {});
+    };
+
+    // Fix @xterm/xterm Linux key encoding bugs (Alt+Arrow rewritten to Ctrl+Arrow, Shift+Enter -> \r, etc.)
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.isComposing || e.keyCode === 229) return true;
+
+      // Linux terminal standard copy/paste (Ctrl+Shift+C / Ctrl+Shift+V)
+      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
+        const lower = e.key.toLowerCase();
+        if (lower === "c" && term.hasSelection()) {
+          if (e.type === "keydown") {
+            e.preventDefault();
+            e.stopPropagation();
+            void navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+          }
+          return false;
+        }
+        if (lower === "v") {
+          if (e.type === "keydown") {
+            e.preventDefault();
+            e.stopPropagation();
+            void navigator.clipboard
+              .readText()
+              .then((text) => {
+                if (text) term.paste(text);
+              })
+              .catch(() => {});
+          }
+          return false;
+        }
+      }
+
+      const customSeq = resolveCustomTerminalSequence(e);
+      if (customSeq !== null) {
+        if (e.type === "keydown") {
+          e.preventDefault();
+          e.stopPropagation();
+          sendInput(customSeq);
+        }
+        return false;
+      }
+
+      return true;
     });
+
+    const dataDisposable = term.onData(sendInput);
 
     const resizeObserver = new ResizeObserver(() => {
       requestAnimationFrame(fitAndNotify);
@@ -180,7 +296,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         })
         .then((res) => {
           if (disposed) {
-            void window.muxlane.rpc(Methods.TERM_UNSUBSCRIBE, { sub_id: res.sub_id }).catch(() => {});
+            void window.muxlane
+              .rpc(Methods.TERM_UNSUBSCRIBE, { sub_id: res.sub_id })
+              .catch(() => {});
             return;
           }
           subId = res.sub_id;
@@ -215,50 +333,21 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   }, [agentId, connected, registerTermListener]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-terminal-surface">
-      <div className="flex h-8 shrink-0 items-center justify-between border-b border-line-subtle bg-sidebar px-3 font-mono text-[10.5px] text-ink-muted select-none">
-        <div className="flex items-center gap-2">
-          <span className="uppercase tracking-wider text-ink-2">Terminal</span>
-          <span className="text-ink-faint">·</span>
-          <span className="tabular-nums">{sizeText}</span>
-          {exited && (
-            <>
-              <span className="text-ink-faint">·</span>
-              <span className="text-working">exited</span>
-            </>
-          )}
+    <div
+      onMouseDown={() => termRef.current?.focus()}
+      onKeyDown={(e) => {
+        if (e.key === "PageDown" || e.key === "PageUp") {
+          e.preventDefault();
+        }
+      }}
+      className="relative flex h-full min-h-0 flex-col bg-terminal-surface"
+    >
+      <div ref={hostRef} className="min-h-0 flex-1 overflow-hidden px-1 py-0.5" />
+      {exited && (
+        <div className="pointer-events-none absolute right-3 bottom-3 border border-line bg-elevated px-2 py-0.5 font-mono text-[11px] text-working select-none">
+          终端已退出
         </div>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            title="适配终端尺寸"
-            onClick={() => {
-              fitRef.current?.fit();
-              const t = termRef.current;
-              if (t) {
-                setSizeText(`${t.cols}×${t.rows}`);
-                void window.muxlane
-                  .rpc(Methods.TERM_RESIZE, { agent: agentId, cols: t.cols, rows: t.rows })
-                  .catch(() => {});
-              }
-            }}
-            className="flex h-6 items-center gap-1 px-1.5 text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
-          >
-            <Maximize2 className="h-3 w-3" />
-            <span>适配</span>
-          </button>
-          <button
-            type="button"
-            title="清屏"
-            onClick={() => termRef.current?.clear()}
-            className="flex h-6 items-center gap-1 px-1.5 text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
-          >
-            <Trash2 className="h-3 w-3" />
-            <span>清屏</span>
-          </button>
-        </div>
-      </div>
-      <div ref={hostRef} className="min-h-0 flex-1 overflow-hidden bg-terminal-surface" />
+      )}
     </div>
   );
 };

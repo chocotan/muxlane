@@ -108,6 +108,8 @@ impl MuxlaneServer {
             };
             self.state.write().await.add_agent(project, instance);
         }
+        // Attach live PTY bridges immediately for all restored Pi/Pie/OpenCode/etc. tmux sessions.
+        self.ensure_all_pty_bridges().await;
         // One notification for the whole batch: the UI reconciles against a complete
         // snapshot instead of a half-restored one.
         self.bump_dirty();
@@ -170,28 +172,33 @@ impl MuxlaneServer {
         self.observe_screens(&screens, &foregrounds).await;
     }
 
-    /// One shared sampler for the periodic tick and hook path. Sampling only happens
-    /// while a Shell-origin session exists, at most once per second.
+    /// One shared sampler for the periodic tick and hook path. Sampling happens
+    /// while a Shell-origin or Agy session exists, at most once per second.
     async fn sample_foregrounds_if_due(
         &self,
         screens: &[(AgentId, ScreenInput)],
-    ) -> std::collections::HashMap<String, crate::foreground::ShellForeground> {
+    ) -> crate::foreground::ForegroundSample {
         const INTERVAL: Duration = Duration::from_millis(1000);
         if screens.is_empty() {
             return Default::default();
         }
-        let has_shell_origin = {
+        let needs_sample = {
             let state = self.state.read().await;
-            screens.iter().any(|(id, _)| state.is_shell_origin(id))
+            screens.iter().any(|(id, _)| {
+                state.is_shell_origin(id)
+                    || state.agents.iter().any(|agent| {
+                        &agent.id == id && agent.agent_type == muxlane_core::model::AgentType::Agy
+                    })
+            })
         };
-        if !has_shell_origin {
+        if !needs_sample {
             return Default::default();
         }
         let mut last = self.foreground_sampled_at.lock().await;
         if last.is_some_and(|instant| instant.elapsed() < INTERVAL) {
             return Default::default();
         }
-        let sample = crate::foreground::sample().await;
+        let sample = crate::foreground::sample_all().await;
         *last = Some(std::time::Instant::now());
         sample
     }
@@ -350,21 +357,25 @@ impl MuxlaneServer {
     async fn observe_screens(
         &self,
         screens: &[(AgentId, ScreenInput)],
-        foregrounds: &std::collections::HashMap<String, crate::foreground::ShellForeground>,
+        sample: &crate::foreground::ForegroundSample,
     ) {
         if screens.is_empty() {
             return;
         }
         let mut state = self.state.write().await;
         let mut changed = false;
+        let mut title_updated = false;
         let mut foreground_transitions: Vec<(AgentId, muxlane_core::model::AgentType)> = Vec::new();
+        let mut idle_transitions: Vec<AgentId> = Vec::new();
         for (id, screen) in screens {
-            let foreground = state
+            let tmux_name = state
                 .agents
                 .iter()
                 .find(|agent| &agent.id == id)
-                .and_then(|agent| agent.tmux_session.as_ref())
-                .and_then(|name| foregrounds.get(name));
+                .and_then(|agent| agent.tmux_session.clone());
+            let foreground = tmux_name
+                .as_deref()
+                .and_then(|name| sample.shell_foregrounds.get(name));
             if let Some(foreground) = foreground {
                 if state.observe_foreground(id, foreground, screen.osc_title.as_deref()) {
                     changed = true;
@@ -372,8 +383,35 @@ impl MuxlaneServer {
                     continue; // The sampled screen may still belong to the previous process.
                 }
             }
-            if !state.observe_screen(id, screen).is_empty() {
+            if let Some(agy_title) = tmux_name
+                .as_deref()
+                .and_then(|name| sample.agy_titles.get(name))
+            {
+                if state.apply_chat_title(id, agy_title.clone()) {
+                    changed = true;
+                    title_updated = true;
+                }
+            }
+            let events = state.observe_screen(id, screen);
+            if !events.is_empty() {
                 changed = true;
+                for ev in &events {
+                    if ev.event == muxlane_core::protocol::events::AGENT_STATUS {
+                        if let Ok(status_ev) = serde_json::from_value::<
+                            muxlane_core::protocol::AgentStatusEvent,
+                        >(ev.params.clone())
+                        {
+                            if matches!(
+                                status_ev.to,
+                                muxlane_core::model::AgentStatus::Done
+                                    | muxlane_core::model::AgentStatus::Idle
+                                    | muxlane_core::model::AgentStatus::Failed
+                            ) {
+                                idle_transitions.push(id.clone());
+                            }
+                        }
+                    }
+                }
             }
         }
         drop(state);
@@ -381,12 +419,18 @@ impl MuxlaneServer {
             if next_type == muxlane_core::model::AgentType::Shell {
                 self.chat.set_pty_bridge_alive(&id, false).await;
             } else if next_type.supports_chat_bridge() {
-                let _ = self.ensure_pty_bridge_for_agent(&id).await;
+                let _ = self.ensure_fresh_pty_bridge_for_agent(&id).await;
                 self.chat.set_pty_bridge_alive(&id, true).await;
             }
         }
+        for id in idle_transitions {
+            self.chat.mark_pty_bridge_idle(&id).await;
+        }
         if changed {
             self.dirty.bump();
+            if title_updated {
+                let _ = self.persist_runtime_state().await;
+            }
         }
     }
 }

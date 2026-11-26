@@ -20,7 +20,9 @@ export const DiffView: React.FC<{ diff: ToolDiff; defaultExpanded?: boolean }> =
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex h-8 w-full items-center justify-between border-b border-line-subtle bg-code-header px-2.5 text-left font-mono text-[11.5px] hover:bg-hover/60 transition-colors cursor-pointer select-none"
+        className={`flex h-8 w-full items-center justify-between bg-code-header px-2.5 text-left font-mono text-[11.5px] hover:bg-hover/60 transition-colors cursor-pointer select-none ${
+          expanded ? "border-b border-line-subtle" : ""
+        }`}
       >
         <div className="flex min-w-0 items-center gap-2">
           {expanded ? (

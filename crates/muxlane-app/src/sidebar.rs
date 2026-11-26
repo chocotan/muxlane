@@ -525,8 +525,6 @@ impl MuxlaneApp {
         } = session;
         let active = self.active.as_ref() == Some(&id);
         let detached = self.is_detached(&id);
-        let is_chat_session = self.is_structured_chat_agent(&id)
-            || self.agent_view_mode(&id) != muxlane_core::SessionViewMode::Terminal;
         let detached_marker_id = format!("detached-{id}");
         let project_key = self.project_key_for_agent(&id);
         let attention = compute_attention_style(status, seen || active, theme);
@@ -594,19 +592,6 @@ impl MuxlaneApp {
                     .text_ellipsis()
                     .child(title),
             )
-            .when(is_chat_session, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .px_1()
-                        .bg(rgba(theme.bg0))
-                        .border_1()
-                        .border_color(rgba(theme.line))
-                        .text_size(ui_px(9.))
-                        .text_color(rgba(theme.accent))
-                        .child(i18n::text(self.language, "chat.badge")),
-                )
-            })
             .when(detached, |el| {
                 el.child(
                     div()

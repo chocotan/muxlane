@@ -454,6 +454,23 @@ mod tests {
                 input(["Agy requires approval"]),
             ),
             (
+                "agy",
+                AgentStatus::Working,
+                input([
+                    "⣟  Reading file...",
+                    ">",
+                    "esc to cancel                                  Gemini 4 Neon · high",
+                ]),
+            ),
+            (
+                "agy",
+                AgentStatus::Idle,
+                input([
+                    ">",
+                    "? for shortcuts                                Gemini 4 Neon (XHigh)",
+                ]),
+            ),
+            (
                 "qwen",
                 AgentStatus::Working,
                 input(std::iter::empty::<&str>()),

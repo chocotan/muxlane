@@ -3,119 +3,513 @@
 
 /*
  * Muxlane Desktop Design System
- * Synthesized from Orca + DeepSeek Harness monochrome tonal surfaces,
- * adapted strictly to 0px square architectural corners per AGENTS.md.
+ * 10 built-in themes ported from the Rust GPUI client (`crates/muxlane-app/src/theme.rs`),
+ * strictly enforcing 0px architectural square corners per AGENTS.md.
  */
 
+/* 1. 雾白瓷 (Porcelain / Light) */
 :root,
-.light {
+.light,
+[data-theme="light"] {
   color-scheme: light;
 
-  --surface-base: #f2f2f3;
-  --surface-rail: #ececee;
-  --surface-sidebar: #f5f5f6;
-  --surface-canvas: #ffffff;
+  --surface-base: #ece8e1;
+  --surface-rail: #e5e0d8;
+  --surface-sidebar: #f1eee8;
+  --surface-canvas: #faf9f6;
   --surface-elevated: #ffffff;
-  --surface-hover: #eaeaec;
-  --surface-active: #e2e2e6;
-  --surface-user: #f3f3f5;
-  --surface-code: #fafafa;
-  --surface-code-header: #f4f4f5;
-  --surface-tab-bar: #f2f2f3;
-  --surface-tab-active: #ffffff;
-  --surface-terminal: #fafafa;
+  --surface-hover: #e5e1d9;
+  --surface-active: #dbd7cf;
+  --surface-user: #f0ede6;
+  --surface-code: #f5f3ee;
+  --surface-code-header: #ece8e1;
+  --surface-tab-bar: #ece8e1;
+  --surface-tab-active: #faf9f6;
+  --surface-terminal: #faf9f6;
 
-  --border-subtle: rgba(0, 0, 0, 0.07);
-  --border-default: rgba(0, 0, 0, 0.11);
-  --border-strong: rgba(0, 0, 0, 0.2);
+  --border-subtle: rgba(36, 40, 49, 0.08);
+  --border-default: #d0ccc3;
+  --border-strong: #b7b2a7;
 
-  --ink-strong: #09090b;
-  --ink-primary: #18181b;
-  --ink-secondary: #52525b;
-  --ink-muted: #71717a;
-  --ink-faint: #a1a1aa;
+  --ink-strong: #171a21;
+  --ink-primary: #242831;
+  --ink-secondary: #4b5563;
+  --ink-muted: #59636f;
+  --ink-faint: #8c939e;
 
-  --btn-primary-bg: #171717;
-  --btn-primary-hover: #2c2c2e;
-  --btn-primary-fg: #fafafa;
+  --btn-primary-bg: #3d6cd8;
+  --btn-primary-hover: #325cc0;
+  --btn-primary-fg: #ffffff;
 
-  --status-working: #ca8a04;
-  --status-working-soft: rgba(202, 138, 4, 0.1);
-  --status-question: #ea580c;
-  --status-question-soft: rgba(234, 88, 12, 0.08);
-  --status-success: #15803d;
-  --status-success-soft: rgba(21, 128, 61, 0.09);
-  --status-danger: #dc2626;
-  --status-danger-soft: rgba(220, 38, 38, 0.08);
-  --status-unread: #2563eb;
-  --status-link: #1d4ed8;
+  --status-working: #b88226;
+  --status-working-soft: rgba(184, 130, 38, 0.11);
+  --status-question: #d97706;
+  --status-question-soft: rgba(217, 119, 6, 0.09);
+  --status-success: #529633;
+  --status-success-soft: rgba(82, 150, 51, 0.1);
+  --status-danger: #d13e50;
+  --status-danger-soft: rgba(209, 62, 80, 0.09);
+  --status-unread: #3d6cd8;
+  --status-link: #3d6cd8;
 
   --diff-add-fg: #166534;
-  --diff-add-bg: rgba(88, 124, 12, 0.11);
-  --diff-add-gutter: rgba(88, 124, 12, 0.22);
+  --diff-add-bg: rgba(82, 150, 51, 0.11);
+  --diff-add-gutter: rgba(82, 150, 51, 0.22);
   --diff-del-fg: #991b1b;
-  --diff-del-bg: rgba(173, 7, 7, 0.09);
-  --diff-del-gutter: rgba(173, 7, 7, 0.18);
+  --diff-del-bg: rgba(209, 62, 80, 0.09);
+  --diff-del-gutter: rgba(209, 62, 80, 0.18);
 
-  --shadow-composer: 0 2px 12px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-composer: 0 2px 10px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
-  --scrollbar-thumb: rgba(0, 0, 0, 0.16);
-  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.3);
+  --scrollbar-thumb: rgba(36, 40, 49, 0.18);
+  --scrollbar-thumb-hover: rgba(36, 40, 49, 0.34);
 }
 
-.dark {
+/* 2. 月白 (Moonstone) */
+[data-theme="moonstone"] {
+  color-scheme: light;
+
+  --surface-base: #f0eef5;
+  --surface-rail: #e9e6f1;
+  --surface-sidebar: #f4f2f8;
+  --surface-canvas: #faf9fc;
+  --surface-elevated: #ffffff;
+  --surface-hover: #e9e6f0;
+  --surface-active: #e0dce9;
+  --surface-user: #f1eff6;
+  --surface-code: #f5f3fa;
+  --surface-code-header: #edeaf4;
+  --surface-tab-bar: #f0eef5;
+  --surface-tab-active: #faf9fc;
+  --surface-terminal: #faf9fc;
+
+  --border-subtle: rgba(41, 38, 51, 0.08);
+  --border-default: #cec9dc;
+  --border-strong: #b4adc6;
+
+  --ink-strong: #1e1b26;
+  --ink-primary: #292633;
+  --ink-secondary: #504b60;
+  --ink-muted: #605b6e;
+  --ink-faint: #928da1;
+
+  --btn-primary-bg: #6650a4;
+  --btn-primary-hover: #564191;
+  --btn-primary-fg: #ffffff;
+
+  --status-working: #875b14;
+  --status-working-soft: rgba(135, 91, 20, 0.1);
+  --status-question: #b45309;
+  --status-question-soft: rgba(180, 83, 9, 0.09);
+  --status-success: #2d6950;
+  --status-success-soft: rgba(45, 105, 80, 0.1);
+  --status-danger: #ac3850;
+  --status-danger-soft: rgba(172, 56, 80, 0.09);
+  --status-unread: #6650a4;
+  --status-link: #6650a4;
+
+  --diff-add-fg: #20523d;
+  --diff-add-bg: rgba(45, 105, 80, 0.11);
+  --diff-add-gutter: rgba(45, 105, 80, 0.22);
+  --diff-del-fg: #8c263c;
+  --diff-del-bg: rgba(172, 56, 80, 0.09);
+  --diff-del-gutter: rgba(172, 56, 80, 0.19);
+}
+
+/* 3. 纸暖 (Paper Warm) */
+[data-theme="paper"] {
+  color-scheme: light;
+
+  --surface-base: #eadfce;
+  --surface-rail: #e3d6c2;
+  --surface-sidebar: #efe5d5;
+  --surface-canvas: #f4ecdf;
+  --surface-elevated: #faf4ea;
+  --surface-hover: #e5d8c4;
+  --surface-active: #dfd0bc;
+  --surface-user: #ece2d1;
+  --surface-code: #efe6d7;
+  --surface-code-header: #e6dac6;
+  --surface-tab-bar: #eadfce;
+  --surface-tab-active: #f4ecdf;
+  --surface-terminal: #f4ecdf;
+
+  --border-subtle: rgba(61, 48, 39, 0.09);
+  --border-default: #d2c0a8;
+  --border-strong: #bca689;
+
+  --ink-strong: #2b211a;
+  --ink-primary: #3d3027;
+  --ink-secondary: #574a41;
+  --ink-muted: #66584d;
+  --ink-faint: #96877a;
+
+  --btn-primary-bg: #b35f2a;
+  --btn-primary-hover: #9b4f20;
+  --btn-primary-fg: #ffffff;
+
+  --status-working: #b8872e;
+  --status-working-soft: rgba(184, 135, 46, 0.12);
+  --status-question: #b35f2a;
+  --status-question-soft: rgba(179, 95, 42, 0.1);
+  --status-success: #4e8c62;
+  --status-success-soft: rgba(78, 140, 98, 0.11);
+  --status-danger: #c94b4b;
+  --status-danger-soft: rgba(201, 75, 75, 0.1);
+  --status-unread: #b35f2a;
+  --status-link: #b35f2a;
+
+  --diff-add-fg: #2f6942;
+  --diff-add-bg: rgba(78, 140, 98, 0.12);
+  --diff-add-gutter: rgba(78, 140, 98, 0.24);
+  --diff-del-fg: #9c3030;
+  --diff-del-bg: rgba(201, 75, 75, 0.1);
+  --diff-del-gutter: rgba(201, 75, 75, 0.2);
+}
+
+/* 4. 灰白 (Ash) */
+[data-theme="ash"] {
+  color-scheme: light;
+
+  --surface-base: #e7e7e4;
+  --surface-rail: #e0e0dc;
+  --surface-sidebar: #ededeb;
+  --surface-canvas: #f4f4f2;
+  --surface-elevated: #fafaf8;
+  --surface-hover: #e2e2de;
+  --surface-active: #d9d9d5;
+  --surface-user: #eaeae6;
+  --surface-code: #eeeeeb;
+  --surface-code-header: #e4e4e0;
+  --surface-tab-bar: #e7e7e4;
+  --surface-tab-active: #f4f4f2;
+  --surface-terminal: #f4f4f2;
+
+  --border-subtle: rgba(26, 26, 24, 0.08);
+  --border-default: #bfbfb9;
+  --border-strong: #a3a39c;
+
+  --ink-strong: #111110;
+  --ink-primary: #1a1a18;
+  --ink-secondary: #3c3c39;
+  --ink-muted: #4a4a46;
+  --ink-faint: #84847e;
+
+  --btn-primary-bg: #3a3a36;
+  --btn-primary-hover: #262623;
+  --btn-primary-fg: #ffffff;
+
+  --status-working: #6b4306;
+  --status-working-soft: rgba(107, 67, 6, 0.1);
+  --status-question: #8c4a08;
+  --status-question-soft: rgba(140, 74, 8, 0.09);
+  --status-success: #1f6b3a;
+  --status-success-soft: rgba(31, 107, 58, 0.1);
+  --status-danger: #6e1826;
+  --status-danger-soft: rgba(110, 24, 38, 0.09);
+  --status-unread: #3a3a36;
+  --status-link: #2f2f2b;
+}
+
+/* 5. 霁蓝 (Clear Sky) */
+[data-theme="sky"] {
+  color-scheme: light;
+
+  --surface-base: #e3edfc;
+  --surface-rail: #d9e6fa;
+  --surface-sidebar: #eaf2fe;
+  --surface-canvas: #f2f7ff;
+  --surface-elevated: #fafcff;
+  --surface-hover: #dce8fa;
+  --surface-active: #d2e0f4;
+  --surface-user: #e6effd;
+  --surface-code: #ebf2fe;
+  --surface-code-header: #e0ebfb;
+  --surface-tab-bar: #e3edfc;
+  --surface-tab-active: #f2f7ff;
+  --surface-terminal: #f2f7ff;
+
+  --border-subtle: rgba(30, 41, 59, 0.08);
+  --border-default: #c1d3ec;
+  --border-strong: #9fb8db;
+
+  --ink-strong: #0f172a;
+  --ink-primary: #1e293b;
+  --ink-secondary: #4b5c73;
+  --ink-muted: #52647c;
+  --ink-faint: #8294ac;
+
+  --btn-primary-bg: #2563eb;
+  --btn-primary-hover: #1d4ed8;
+  --btn-primary-fg: #ffffff;
+
+  --status-working: #b7791f;
+  --status-working-soft: rgba(183, 121, 31, 0.1);
+  --status-question: #d97706;
+  --status-question-soft: rgba(217, 119, 6, 0.09);
+  --status-success: #16805c;
+  --status-success-soft: rgba(22, 128, 92, 0.1);
+  --status-danger: #dc3f51;
+  --status-danger-soft: rgba(220, 63, 81, 0.09);
+  --status-unread: #2563eb;
+  --status-link: #2563eb;
+}
+
+/* 6. 竹青 (Jade) */
+[data-theme="jade"] {
+  color-scheme: light;
+
+  --surface-base: #e0f0e6;
+  --surface-rail: #d7eadf;
+  --surface-sidebar: #e7f4ec;
+  --surface-canvas: #eff8f2;
+  --surface-elevated: #f8fcf9;
+  --surface-hover: #d8ebe0;
+  --surface-active: #cfe4d8;
+  --surface-user: #e3f1e8;
+  --surface-code: #e8f4ec;
+  --surface-code-header: #dcece2;
+  --surface-tab-bar: #e0f0e6;
+  --surface-tab-active: #eff8f2;
+  --surface-terminal: #eff8f2;
+
+  --border-subtle: rgba(31, 53, 41, 0.08);
+  --border-default: #bfd8ca;
+  --border-strong: #9ec0ad;
+
+  --ink-strong: #12221a;
+  --ink-primary: #1f3529;
+  --ink-secondary: #465d50;
+  --ink-muted: #526b5e;
+  --ink-faint: #81998c;
+
+  --btn-primary-bg: #059669;
+  --btn-primary-hover: #047857;
+  --btn-primary-fg: #ffffff;
+
+  --status-working: #b7791f;
+  --status-working-soft: rgba(183, 121, 31, 0.1);
+  --status-question: #d97706;
+  --status-question-soft: rgba(217, 119, 6, 0.09);
+  --status-success: #2f855a;
+  --status-success-soft: rgba(47, 133, 90, 0.1);
+  --status-danger: #c94b4b;
+  --status-danger-soft: rgba(201, 75, 75, 0.09);
+  --status-unread: #059669;
+  --status-link: #059669;
+}
+
+/* 7. 樱粉 (Sakura) */
+[data-theme="sakura"] {
+  color-scheme: light;
+
+  --surface-base: #f9e3ea;
+  --surface-rail: #f5d8e2;
+  --surface-sidebar: #fcebf0;
+  --surface-canvas: #fff2f5;
+  --surface-elevated: #fff9fb;
+  --surface-hover: #f5dce4;
+  --surface-active: #f1d0dc;
+  --surface-user: #fae6ec;
+  --surface-code: #fcebf0;
+  --surface-code-header: #f6dfe7;
+  --surface-tab-bar: #f9e3ea;
+  --surface-tab-active: #fff2f5;
+  --surface-terminal: #fff2f5;
+
+  --border-subtle: rgba(69, 37, 48, 0.08);
+  --border-default: #e8bdcd;
+  --border-strong: #d59cb2;
+
+  --ink-strong: #311720;
+  --ink-primary: #452530;
+  --ink-secondary: #674350;
+  --ink-muted: #765060;
+  --ink-faint: #a68290;
+
+  --btn-primary-bg: #e11d48;
+  --btn-primary-hover: #be123c;
+  --btn-primary-fg: #ffffff;
+
+  --status-working: #b7791f;
+  --status-working-soft: rgba(183, 121, 31, 0.1);
+  --status-question: #d97706;
+  --status-question-soft: rgba(217, 119, 6, 0.09);
+  --status-success: #378557;
+  --status-success-soft: rgba(55, 133, 87, 0.1);
+  --status-danger: #c2415a;
+  --status-danger-soft: rgba(194, 65, 90, 0.09);
+  --status-unread: #e11d48;
+  --status-link: #e11d48;
+}
+
+/* 8. 墨渊 (Ink / Dark) */
+.dark,
+[data-theme="dark"] {
   color-scheme: dark;
 
-  --surface-base: #0c0c0d;
-  --surface-rail: #101012;
-  --surface-sidebar: #141416;
-  --surface-canvas: #171719;
-  --surface-elevated: #1d1d20;
-  --surface-hover: #222226;
-  --surface-active: #27272c;
-  --surface-user: #212125;
-  --surface-code: #111113;
-  --surface-code-header: #161619;
-  --surface-tab-bar: #121214;
-  --surface-tab-active: #171719;
-  --surface-terminal: #0e0e10;
+  --surface-base: #131519;
+  --surface-rail: #15171c;
+  --surface-sidebar: #1c1f24;
+  --surface-canvas: #181a1f;
+  --surface-elevated: #21252b;
+  --surface-hover: #262a32;
+  --surface-active: #2d323c;
+  --surface-user: #22262e;
+  --surface-code: #14161b;
+  --surface-code-header: #1c1f26;
+  --surface-tab-bar: #15171c;
+  --surface-tab-active: #181a1f;
+  --surface-terminal: #181a1f;
 
-  --border-subtle: rgba(255, 255, 255, 0.068);
-  --border-default: rgba(255, 255, 255, 0.105);
-  --border-strong: rgba(255, 255, 255, 0.19);
+  --border-subtle: rgba(215, 218, 224, 0.075);
+  --border-default: #333842;
+  --border-strong: #464d5b;
 
-  --ink-strong: #f5f5f6;
-  --ink-primary: #e4e4e7;
-  --ink-secondary: #a1a1aa;
-  --ink-muted: #767680;
-  --ink-faint: #52525b;
+  --ink-strong: #f0f2f5;
+  --ink-primary: #d7dae0;
+  --ink-secondary: #a4aab5;
+  --ink-muted: #8a919e;
+  --ink-faint: #585e6a;
 
-  --btn-primary-bg: #ededee;
-  --btn-primary-hover: #d4d4d8;
-  --btn-primary-fg: #111113;
+  --btn-primary-bg: #528bff;
+  --btn-primary-hover: #3d79f2;
+  --btn-primary-fg: #0f1419;
 
-  --status-working: #eab308;
-  --status-working-soft: rgba(234, 179, 8, 0.11);
-  --status-question: #f97316;
-  --status-question-soft: rgba(249, 115, 22, 0.11);
-  --status-success: #74c991;
-  --status-success-soft: rgba(116, 201, 145, 0.11);
-  --status-danger: #f87171;
-  --status-danger-soft: rgba(248, 113, 113, 0.12);
-  --status-unread: #60a5fa;
-  --status-link: #7aaaff;
+  --status-working: #e5c07b;
+  --status-working-soft: rgba(229, 192, 123, 0.12);
+  --status-question: #f0a860;
+  --status-question-soft: rgba(240, 168, 96, 0.12);
+  --status-success: #98c379;
+  --status-success-soft: rgba(152, 195, 121, 0.12);
+  --status-danger: #e06c75;
+  --status-danger-soft: rgba(224, 108, 117, 0.13);
+  --status-unread: #528bff;
+  --status-link: #6ea2ff;
 
-  --diff-add-fg: #9ad8a7;
-  --diff-add-bg: rgba(129, 184, 139, 0.13);
-  --diff-add-gutter: rgba(129, 184, 139, 0.24);
-  --diff-del-fg: #f19a8c;
-  --diff-del-bg: rgba(199, 78, 57, 0.15);
-  --diff-del-gutter: rgba(199, 78, 57, 0.28);
+  --diff-add-fg: #98c379;
+  --diff-add-bg: rgba(152, 195, 121, 0.13);
+  --diff-add-gutter: rgba(152, 195, 121, 0.24);
+  --diff-del-fg: #e06c75;
+  --diff-del-bg: rgba(224, 108, 117, 0.15);
+  --diff-del-gutter: rgba(224, 108, 117, 0.28);
 
   --shadow-composer: 0 6px 24px rgba(0, 0, 0, 0.34), 0 1px 2px rgba(0, 0, 0, 0.28);
   --shadow-popover: 0 16px 40px rgba(0, 0, 0, 0.56), 0 2px 8px rgba(0, 0, 0, 0.36);
-  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
-  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.28);
+  --scrollbar-thumb: rgba(215, 218, 224, 0.15);
+  --scrollbar-thumb-hover: rgba(215, 218, 224, 0.3);
+}
+
+/* 9. 代码墨 (One Dark) */
+[data-theme="onedark"] {
+  color-scheme: dark;
+
+  --surface-base: #1e2227;
+  --surface-rail: #1c2026;
+  --surface-sidebar: #21252b;
+  --surface-canvas: #282c34;
+  --surface-elevated: #2c313a;
+  --surface-hover: #313640;
+  --surface-active: #383e4a;
+  --surface-user: #2f343e;
+  --surface-code: #21252b;
+  --surface-code-header: #262b33;
+  --surface-tab-bar: #21252b;
+  --surface-tab-active: #282c34;
+  --surface-terminal: #282c34;
+
+  --border-subtle: rgba(171, 178, 191, 0.09);
+  --border-default: #3e4451;
+  --border-strong: #535b6c;
+
+  --ink-strong: #dcdfe4;
+  --ink-primary: #abb2bf;
+  --ink-secondary: #9299a7;
+  --ink-muted: #7f8796;
+  --ink-faint: #5c6370;
+
+  --btn-primary-bg: #61afef;
+  --btn-primary-hover: #4fa2e6;
+  --btn-primary-fg: #0f1419;
+
+  --status-working: #e5c07b;
+  --status-working-soft: rgba(229, 192, 123, 0.12);
+  --status-question: #d19a66;
+  --status-question-soft: rgba(209, 154, 102, 0.12);
+  --status-success: #98c379;
+  --status-success-soft: rgba(152, 195, 121, 0.12);
+  --status-danger: #e06c75;
+  --status-danger-soft: rgba(224, 108, 117, 0.13);
+  --status-unread: #61afef;
+  --status-link: #61afef;
+
+  --diff-add-fg: #98c379;
+  --diff-add-bg: rgba(152, 195, 121, 0.13);
+  --diff-add-gutter: rgba(152, 195, 121, 0.24);
+  --diff-del-fg: #e06c75;
+  --diff-del-bg: rgba(224, 108, 117, 0.15);
+  --diff-del-gutter: rgba(224, 108, 117, 0.28);
+
+  --shadow-composer: 0 6px 24px rgba(0, 0, 0, 0.34), 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-popover: 0 16px 40px rgba(0, 0, 0, 0.56), 0 2px 8px rgba(0, 0, 0, 0.36);
+  --scrollbar-thumb: rgba(171, 178, 191, 0.16);
+  --scrollbar-thumb-hover: rgba(171, 178, 191, 0.32);
+}
+
+/* 10. 夜霓 (Synthwave) */
+[data-theme="synthwave"] {
+  color-scheme: dark;
+
+  --surface-base: #160d22;
+  --surface-rail: #1f1130;
+  --surface-sidebar: #241436;
+  --surface-canvas: #1b1029;
+  --surface-elevated: #28163b;
+  --surface-hover: #321b47;
+  --surface-active: #3d2255;
+  --surface-user: #2d1842;
+  --surface-code: #160c22;
+  --surface-code-header: #221233;
+  --surface-tab-bar: #221233;
+  --surface-tab-active: #1b1029;
+  --surface-terminal: #1b1029;
+
+  --border-subtle: rgba(249, 234, 255, 0.09);
+  --border-default: #4b2861;
+  --border-strong: #683985;
+
+  --ink-strong: #ffffff;
+  --ink-primary: #f9eaff;
+  --ink-secondary: #c6a9d8;
+  --ink-muted: #b39bc8;
+  --ink-faint: #7c6293;
+
+  --btn-primary-bg: #e879f9;
+  --btn-primary-hover: #d962ec;
+  --btn-primary-fg: #1b1029;
+
+  --status-working: #f5ca7a;
+  --status-working-soft: rgba(245, 202, 122, 0.13);
+  --status-question: #fb923c;
+  --status-question-soft: rgba(251, 146, 60, 0.13);
+  --status-success: #7ee2b8;
+  --status-success-soft: rgba(126, 226, 184, 0.12);
+  --status-danger: #fb7185;
+  --status-danger-soft: rgba(251, 113, 133, 0.14);
+  --status-unread: #e879f9;
+  --status-link: #e879f9;
+
+  --diff-add-fg: #7ee2b8;
+  --diff-add-bg: rgba(126, 226, 184, 0.13);
+  --diff-add-gutter: rgba(126, 226, 184, 0.25);
+  --diff-del-fg: #fb7185;
+  --diff-del-bg: rgba(251, 113, 133, 0.15);
+  --diff-del-gutter: rgba(251, 113, 133, 0.28);
+
+  --shadow-composer: 0 6px 24px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-popover: 0 16px 40px rgba(0, 0, 0, 0.65), 0 2px 8px rgba(0, 0, 0, 0.42);
+  --scrollbar-thumb: rgba(249, 234, 255, 0.16);
+  --scrollbar-thumb-hover: rgba(249, 234, 255, 0.32);
 }
 
 @theme inline {
@@ -180,12 +574,12 @@ body,
   color: var(--ink-primary);
   font-family: var(--font-sans);
   font-size: 13.5px;
-  line-height: 1.5;
+  line-height: 1.42;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Quiet rectangular scrollbars inspired by Orca & DeepSeek Harness */
+/* Quiet rectangular scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -220,7 +614,6 @@ body,
   height: 0;
 }
 
-/* Subtle Orca-style composer shadow & popover depth */
 .mux-composer-shadow {
   box-shadow: var(--shadow-composer);
 }
@@ -228,11 +621,11 @@ body,
   box-shadow: var(--shadow-popover);
 }
 
-/* Editorial Markdown Prose (Orca + DeepSeek Harness document typography) */
+/* Compact, crisp Markdown Prose */
 .mux-markdown {
   color: var(--ink-primary);
-  font-size: 14px;
-  line-height: 1.7;
+  font-size: 13.5px;
+  line-height: 1.48;
   word-break: break-word;
 }
 
@@ -244,7 +637,7 @@ body,
 }
 
 .mux-markdown p {
-  margin: 0.7em 0;
+  margin: 0.36em 0;
 }
 
 .mux-markdown strong {
@@ -258,26 +651,27 @@ body,
 .mux-markdown h4 {
   color: var(--ink-strong);
   font-weight: 600;
-  letter-spacing: -0.018em;
-  margin-top: 1.4em;
-  margin-bottom: 0.5em;
+  letter-spacing: -0.015em;
+  line-height: 1.3;
+  margin-top: 0.85em;
+  margin-bottom: 0.32em;
 }
 .mux-markdown h1 {
-  font-size: 1.32em;
+  font-size: 1.24em;
   border-bottom: 1px solid var(--border-subtle);
-  padding-bottom: 0.35em;
+  padding-bottom: 0.25em;
 }
 .mux-markdown h2 {
-  font-size: 1.16em;
+  font-size: 1.12em;
 }
 .mux-markdown h3 {
-  font-size: 1.04em;
+  font-size: 1.02em;
 }
 
 .mux-markdown ul,
 .mux-markdown ol {
-  margin: 0.6em 0;
-  padding-left: 1.45em;
+  margin: 0.32em 0;
+  padding-left: 1.4em;
 }
 .mux-markdown ul {
   list-style-type: disc;
@@ -286,15 +680,18 @@ body,
   list-style-type: decimal;
 }
 .mux-markdown li {
-  margin: 0.28em 0;
+  margin: 0.14em 0;
+}
+.mux-markdown li > p {
+  margin: 0.16em 0;
 }
 .mux-markdown li::marker {
   color: var(--ink-muted);
 }
 
 .mux-markdown blockquote {
-  margin: 0.85em 0;
-  padding: 0.3em 0.95em;
+  margin: 0.45em 0;
+  padding: 0.18em 0.85em;
   border-left: 2px solid var(--border-strong);
   color: var(--ink-secondary);
 }
@@ -302,14 +699,14 @@ body,
 .mux-markdown hr {
   border: none;
   border-top: 1px solid var(--border-subtle);
-  margin: 1.35em 0;
+  margin: 0.75em 0;
 }
 
 .mux-markdown a {
   color: var(--status-link);
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--status-link) 40%, transparent);
-  text-underline-offset: 3px;
+  text-underline-offset: 2px;
 }
 .mux-markdown a:hover {
   text-decoration-color: var(--status-link);
@@ -318,13 +715,14 @@ body,
 .mux-markdown table {
   width: 100%;
   border-collapse: collapse;
-  margin: 0.95em 0;
-  font-size: 13px;
+  margin: 0.55em 0;
+  font-size: 12.5px;
+  line-height: 1.38;
 }
 .mux-markdown th,
 .mux-markdown td {
   border: 1px solid var(--border-subtle);
-  padding: 6px 10px;
+  padding: 4px 8px;
   text-align: left;
 }
 .mux-markdown th {
@@ -341,19 +739,19 @@ body,
   font-size: 0.86em;
   background: color-mix(in srgb, var(--ink-primary) 6%, var(--surface-canvas));
   border: 1px solid var(--border-subtle);
-  padding: 1px 5px;
+  padding: 0.5px 4px;
   color: var(--ink-strong);
 }
 
-/* Shiki highlighted block reset — blends cleanly with code-surface in both themes */
+/* Shiki highlighted block reset — blends cleanly with code-surface in every theme */
 .mux-shiki pre {
   margin: 0 !important;
-  padding: 12px 14px !important;
+  padding: 8px 12px !important;
   background: var(--surface-code) !important;
   overflow-x: auto;
   font-family: var(--font-mono);
   font-size: 12.5px;
-  line-height: 1.58;
+  line-height: 1.4;
 }
 .mux-shiki code {
   font-family: var(--font-mono);
@@ -371,7 +769,7 @@ body,
 /* xterm.js container polish */
 .xterm {
   height: 100%;
-  padding: 10px 12px;
+  padding: 4px 6px;
 }
 .xterm-viewport {
   background-color: var(--surface-terminal) !important;

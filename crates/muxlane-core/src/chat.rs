@@ -192,6 +192,8 @@ pub enum TimelineEntry {
         streaming: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Box<MessageUsage>>,
         created_at_ms: u64,
     },
     ToolCall {
@@ -318,6 +320,170 @@ pub struct ChatModelInfo {
     pub name: String,
 }
 
+fn default_slash_command_kind() -> String {
+    "command".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatSlashCommand {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// "command" | "skill" | "prompt"
+    #[serde(default = "default_slash_command_kind")]
+    pub kind: String,
+    /// Optional source tag such as "extension" | "skill" | "prompt" | "builtin"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedMessage {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub behavior: StreamingBehavior,
+    #[serde(default)]
+    pub attachments_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MessageUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SessionStats {
+    #[serde(default)]
+    pub turns: u32,
+    #[serde(default)]
+    pub steps: u32,
+    #[serde(default)]
+    pub tool_calls: u32,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub llm_ms: u64,
+    #[serde(default)]
+    pub tool_ms: u64,
+    #[serde(default)]
+    pub ttft_ms: u64,
+    #[serde(default)]
+    pub ttft_steps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionGoal {
+    pub objective: String,
+    /// "active" | "paused" | "complete"
+    pub status: String,
+    #[serde(default)]
+    pub rounds: u32,
+    #[serde(default)]
+    pub max_rounds: u32,
+    #[serde(default)]
+    pub armed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTask {
+    pub id: String,
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// "pending" | "in_progress" | "completed"
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSubagent {
+    pub id: String,
+    pub agent: String,
+    pub description: String,
+    /// "queued" | "running" | "completed" | "error" | "stopped" | "interrupted"
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub turns: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackgroundJob {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// "running" | "completed" | "failed" | "killed"
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_written: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ChatSessionMeta {
     #[serde(default)]
@@ -341,6 +507,10 @@ pub struct ChatSessionMeta {
     #[serde(default)]
     pub available_thinking_levels: Vec<String>,
     #[serde(default)]
+    pub available_commands: Vec<ChatSlashCommand>,
+    #[serde(default)]
+    pub queued_messages: Vec<QueuedMessage>,
+    #[serde(default)]
     pub is_streaming: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_used_tokens: Option<u64>,
@@ -348,6 +518,16 @@ pub struct ChatSessionMeta {
     pub context_window_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<Box<SessionStats>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<Box<SessionGoal>>,
+    #[serde(default)]
+    pub tasks: Vec<SessionTask>,
+    #[serde(default)]
+    pub subagents: Vec<SessionSubagent>,
+    #[serde(default)]
+    pub background_jobs: Vec<BackgroundJob>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
@@ -385,6 +565,10 @@ pub enum ChatDeltaOp {
         entry_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
+    },
+    SetAssistantUsage {
+        entry_id: String,
+        usage: Box<MessageUsage>,
     },
     MetaUpdated {
         meta: ChatSessionMeta,
@@ -568,6 +752,15 @@ impl ChatTimelineState {
                     }
                 }
             }
+            ChatDeltaOp::SetAssistantUsage { entry_id, usage } => {
+                if let Some(&idx) = self.index.get(&entry_id) {
+                    if let TimelineEntry::AssistantText { usage: slot, .. } =
+                        &mut self.entries[idx]
+                    {
+                        *slot = Some(usage);
+                    }
+                }
+            }
             ChatDeltaOp::MetaUpdated { meta } => {
                 self.meta = meta;
             }
@@ -669,6 +862,7 @@ mod tests {
                     text: "Hello ".into(),
                     streaming: true,
                     model: Some("sonnet".into()),
+                    usage: None,
                     created_at_ms: 1500,
                 },
             },
@@ -685,6 +879,22 @@ mod tests {
         assert!(state.apply(ChatDeltaEvent {
             agent: "pi-1".into(),
             seq: 6,
+            delta: ChatDeltaOp::SetAssistantUsage {
+                entry_id: "a1".into(),
+                usage: Box::new(MessageUsage {
+                    input_tokens: 120,
+                    output_tokens: 45,
+                    cache_read_tokens: 80,
+                    total_tokens: 245,
+                    duration_ms: Some(1350),
+                    ttft_ms: Some(210),
+                    ..Default::default()
+                }),
+            },
+        }));
+        assert!(state.apply(ChatDeltaEvent {
+            agent: "pi-1".into(),
+            seq: 7,
             delta: ChatDeltaOp::TurnFinished {
                 turn_id: Some("turn-1".into()),
                 error: None,
@@ -707,10 +917,15 @@ mod tests {
         }
         match &state.entries[1] {
             TimelineEntry::AssistantText {
-                text, streaming, ..
+                text,
+                streaming,
+                usage,
+                ..
             } => {
                 assert_eq!(text, "Hello world");
                 assert!(!streaming);
+                assert_eq!(usage.as_deref().map(|u| u.total_tokens), Some(245));
+                assert_eq!(usage.as_deref().and_then(|u| u.duration_ms), Some(1350));
             }
             other => panic!("unexpected entry: {other:?}"),
         }
@@ -770,6 +985,7 @@ mod tests {
                     text: "hi".into(),
                     streaming: true,
                     model: None,
+                    usage: None,
                     created_at_ms: 200,
                 },
             },

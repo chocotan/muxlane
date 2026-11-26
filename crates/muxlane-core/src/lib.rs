@@ -20,8 +20,10 @@ pub use bot::{
 };
 
 pub use chat::{
-    ChatAttachment, ChatDeltaEvent, ChatDeltaOp, ChatDriverKind, ChatModelInfo, ChatSessionMeta,
-    ChatTimelineState, PendingApproval, SessionDriverMode, SessionViewMode, TimelineEntry,
+    BackgroundJob, ChatAttachment, ChatDeltaEvent, ChatDeltaOp, ChatDriverKind, ChatModelInfo,
+    ChatSessionMeta, ChatSlashCommand, ChatTimelineState, MessageUsage, PendingApproval,
+    QueuedMessage, SessionDriverMode, SessionGoal, SessionStats, SessionSubagent, SessionTask,
+    SessionViewMode, TimelineEntry,
 };
 pub use detect::DetectionEngine;
 pub use model::{

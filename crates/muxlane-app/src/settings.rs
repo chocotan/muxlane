@@ -230,9 +230,6 @@ impl MuxlaneApp {
         for term in self.terms.values() {
             term.update(cx, |term, cx| term.set_theme(theme, cx));
         }
-        for chat in self.chats.values() {
-            chat.update(cx, |chat, cx| chat.set_theme_mode(mode, cx));
-        }
         self.bot_studio.set_theme_mode(mode, cx);
     }
 
@@ -263,10 +260,6 @@ impl MuxlaneApp {
                 term.set_font_family(family, cx);
                 term.set_theme(theme, cx);
             });
-        }
-        for chat in self.chats.values() {
-            let family = family.clone();
-            chat.update(cx, |chat, cx| chat.set_mono_font(family.into(), cx));
         }
         self.persist();
         cx.notify();
@@ -328,9 +321,6 @@ impl MuxlaneApp {
             input.update(cx, |input, cx| {
                 input.set_placeholder(i18n::text(language, key), cx)
             });
-        }
-        for chat in self.chats.values() {
-            chat.update(cx, |chat, cx| chat.set_language(language, cx));
         }
         self.dismiss_settings_menus();
         self.persist();

@@ -3,7 +3,7 @@ import {
   Events,
   Methods,
   presetChatDriver,
-  supportsChatBridge,
+  type AddHostInput,
   type AgentInstance,
   type AgentPreset,
   type ApprovalReply,
@@ -16,9 +16,9 @@ import {
   type ChatSessionSummary,
   type ChatSubscribeResult,
   type DaemonConnectionStatus,
+  type HostsState,
   type PendingApproval,
   type Project,
-  type SessionDriverMode,
   type SessionViewMode,
   type Snapshot,
   type StreamingBehavior,
@@ -64,12 +64,28 @@ export function encodeStringToBase64(str: string): string {
   return btoa(bin);
 }
 
-export function useMuxlaneStore() {
+export interface MuxlaneStoreOptions {
+  notificationsEnabled?: boolean;
+}
+
+export function isChatOnlySession(agent: AgentInstance | undefined): boolean {
+  return Boolean(agent && !agent.tmux_session);
+}
+
+export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
+  const notificationsEnabledRef = useRef(options.notificationsEnabled ?? true);
+  notificationsEnabledRef.current = options.notificationsEnabled ?? true;
+
   const [status, setStatus] = useState<DaemonConnectionStatus>({
     connected: false,
     connecting: true,
     socketPath: "",
     error: null,
+  });
+  const [hostsState, setHostsState] = useState<HostsState>({
+    activeHostId: "local",
+    hosts: [],
+    tunnelStatus: null,
   });
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [chatSummaries, setChatSummaries] = useState<Record<string, ChatSessionSummary>>({});
@@ -77,12 +93,12 @@ export function useMuxlaneStore() {
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<"workspace" | "bots">("workspace");
-  const [viewModes, setViewModes] = useState<Record<string, SessionViewMode>>({});
   const [globalApprovals, setGlobalApprovals] = useState<PendingApproval[]>([]);
   const [bots, setBots] = useState<BotDefinition[]>([]);
   const [botRuns, setBotRuns] = useState<BotRunRecord[]>([]);
   const [presetsByProject, setPresetsByProject] = useState<Record<string, AgentPreset[]>>({});
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [outdatedDaemon, setOutdatedDaemon] = useState(false);
 
   const chatSubsRef = useRef<Map<string, string>>(new Map());
   const pendingChatSubsRef = useRef<Set<string>>(new Set());
@@ -107,15 +123,23 @@ export function useMuxlaneStore() {
 
   const refreshState = useCallback(async () => {
     try {
+      let chatUnsupported = false;
       const [snap, chatList, botList, runsRes] = await Promise.all([
         window.muxlane.rpc<Snapshot>(Methods.STATE_LIST),
-        window.muxlane.rpc<ChatListResult>(Methods.CHAT_LIST).catch(() => ({ sessions: [] })),
+        window.muxlane.rpc<ChatListResult>(Methods.CHAT_LIST).catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes("unknown method") || msg.includes("unknown_method")) {
+            chatUnsupported = true;
+          }
+          return { sessions: [] };
+        }),
         window.muxlane.rpc<{ bots: BotDefinition[] }>(Methods.BOT_LIST).catch(() => ({ bots: [] })),
         window.muxlane
           .rpc<{ runs: BotRunRecord[] }>(Methods.BOT_RUNS, { limit: 60 })
           .catch(() => ({ runs: [] })),
       ]);
 
+      setOutdatedDaemon(chatUnsupported);
       setSnapshot(snap);
       const summaryMap: Record<string, ChatSessionSummary> = {};
       for (const s of chatList.sessions ?? []) {
@@ -172,20 +196,29 @@ export function useMuxlaneStore() {
     await window.muxlane.rpc(Methods.CHAT_UNSUBSCRIBE, { sub_id: subId }).catch(() => {});
   }, []);
 
-  // Wire daemon status + real-time push event listeners
+  // Wire daemon status + hosts + real-time push event listeners
   useEffect(() => {
     let mounted = true;
+    void window.muxlane.listHosts().then((hs) => {
+      if (mounted) setHostsState(hs);
+    }).catch(() => {});
+
     void window.muxlane.getStatus().then((st) => {
       if (!mounted) return;
       setStatus(st);
       if (st.connected) void refreshState();
     });
 
+    const offHosts = window.muxlane.onHostsChanged((hs) => {
+      if (!mounted) return;
+      setHostsState(hs);
+    });
+
     const offStatus = window.muxlane.onStatus((next) => {
       if (!mounted) return;
       setStatus(next);
       if (next.connected) {
-        // Re-sync state and clear stale subscription ids after reconnect.
+        // Re-sync state and clear stale subscription ids after reconnect or host switch.
         chatSubsRef.current.clear();
         pendingChatSubsRef.current.clear();
         void refreshState().then(() => {
@@ -220,6 +253,11 @@ export function useMuxlaneStore() {
                 has_pty: true,
                 available_models: [],
                 available_thinking_levels: [],
+                available_commands: [],
+                queued_messages: [],
+                tasks: [],
+                subagents: [],
+                background_jobs: [],
                 is_streaming: false,
               },
               entries: [],
@@ -246,6 +284,16 @@ export function useMuxlaneStore() {
               ...prev.filter((a) => a.id !== approval.id),
               approval,
             ]);
+            if (
+              notificationsEnabledRef.current &&
+              typeof Notification !== "undefined" &&
+              Notification.permission === "granted" &&
+              (document.hidden || activeAgentRef.current !== approval.agent)
+            ) {
+              new Notification(`Muxlane · ${approval.title}`, {
+                body: approval.message || "有会话等待你的审批确认",
+              });
+            }
           } else if (ev.delta.op === "approval_resolved") {
             const resolvedId = ev.delta.approval_id;
             setGlobalApprovals((prev) => prev.filter((a) => a.id !== resolvedId));
@@ -257,6 +305,16 @@ export function useMuxlaneStore() {
           if (notice.approval) {
             const ap = notice.approval;
             setGlobalApprovals((prev) => [...prev.filter((a) => a.id !== ap.id), ap]);
+            if (
+              notificationsEnabledRef.current &&
+              typeof Notification !== "undefined" &&
+              Notification.permission === "granted" &&
+              (document.hidden || activeAgentRef.current !== ap.agent)
+            ) {
+              new Notification(`Muxlane · ${ap.title}`, {
+                body: ap.message || "有会话等待你的审批确认",
+              });
+            }
           }
           if (notice.resolved_id) {
             setGlobalApprovals((prev) => prev.filter((a) => a.id !== notice.resolved_id));
@@ -304,44 +362,19 @@ export function useMuxlaneStore() {
 
     return () => {
       mounted = false;
+      offHosts();
       offStatus();
       offEvent();
     };
   }, [ensureChatSubscribed, refreshState]);
 
-  const defaultModeForAgent = useCallback(
-    (agent: AgentInstance | undefined): SessionViewMode => {
-      if (!agent) return "chat";
-      if (!supportsChatBridge(agent.agent_type)) return "terminal";
-      const summary = chatSummaries[agent.id];
-      const hasPty = Boolean(agent.tmux_session || summary?.meta.has_pty);
-      // PTY-backed AI agents default to Split so live two-way sync shines immediately;
-      // headless structured RPC/ACP agents default to Chat.
-      return hasPty ? "split" : "chat";
-    },
-    [chatSummaries],
-  );
-
-  const getViewMode = useCallback(
-    (agentId: string): SessionViewMode => {
-      const explicit = viewModes[agentId];
-      const agent = snapshot?.agents.find((a) => a.id === agentId);
-      if (agent && !supportsChatBridge(agent.agent_type)) return "terminal";
-      return explicit ?? defaultModeForAgent(agent);
-    },
-    [defaultModeForAgent, snapshot?.agents, viewModes],
-  );
-
   const openAgent = useCallback(
-    (agentId: string, preferredMode?: SessionViewMode) => {
+    (agentId: string) => {
       setActiveSection("workspace");
       setActiveAgentId(agentId);
       setOpenTabs((prev) => (prev.includes(agentId) ? prev : [...prev, agentId]));
-      if (preferredMode) {
-        setViewModes((prev) => ({ ...prev, [agentId]: preferredMode }));
-      }
       const agent = snapshotRef.current?.agents.find((a) => a.id === agentId);
-      if (!agent || supportsChatBridge(agent.agent_type)) {
+      if (isChatOnlySession(agent)) {
         void ensureChatSubscribed(agentId);
       }
       if (agent && (!agent.seen || agent.status === "done" || agent.status === "failed")) {
@@ -365,63 +398,6 @@ export function useMuxlaneStore() {
       });
     },
     [unsubscribeChat],
-  );
-
-  const setAgentViewMode = useCallback(
-    async (agentId: string, nextMode: SessionViewMode) => {
-      const agent = snapshotRef.current?.agents.find((a) => a.id === agentId);
-      if (agent && !supportsChatBridge(agent.agent_type) && nextMode !== "terminal") {
-        return;
-      }
-      const meta = timelines[agentId]?.meta ?? chatSummaries[agentId]?.meta;
-      const hasPty = Boolean(agent?.tmux_session || meta?.has_pty);
-
-      // Orca Dual-Lane rule: if the agent already runs in a live PTY, switching between
-      // Chat / Split / Terminal NEVER restarts the PTY process!
-      if (!hasPty && (nextMode === "terminal" || nextMode === "split")) {
-        if (meta && !meta.supports_terminal_switch) {
-          pushToast("当前会话不支持切换到交互终端", "error");
-          return;
-        }
-        try {
-          await window.muxlane.rpc(Methods.CHAT_SWITCH_MODE, {
-            agent: agentId,
-            target: "terminal_pty" satisfies SessionDriverMode,
-          });
-          await refreshState();
-          await unsubscribeChat(agentId);
-          await ensureChatSubscribed(agentId);
-        } catch (err) {
-          pushToast(`切换终端失败: ${(err as Error).message}`, "error");
-          return;
-        }
-      }
-
-      setViewModes((prev) => ({ ...prev, [agentId]: nextMode }));
-      if (nextMode === "chat" || nextMode === "split") {
-        void ensureChatSubscribed(agentId);
-      }
-    },
-    [chatSummaries, ensureChatSubscribed, pushToast, refreshState, timelines, unsubscribeChat],
-  );
-
-  const takeOverNativeDriver = useCallback(
-    async (agentId: string) => {
-      const agent = snapshotRef.current?.agents.find((a) => a.id === agentId);
-      const driver = agent ? presetChatDriver(agent.agent_type) : "pi_rpc";
-      const target: SessionDriverMode = driver === "acp" ? "acp" : "pi_rpc";
-      try {
-        await window.muxlane.rpc(Methods.CHAT_SWITCH_MODE, { agent: agentId, target });
-        await refreshState();
-        await unsubscribeChat(agentId);
-        await ensureChatSubscribed(agentId);
-        setViewModes((prev) => ({ ...prev, [agentId]: "chat" }));
-        pushToast("已切换为原生结构化驱动", "success");
-      } catch (err) {
-        pushToast(`接管驱动失败: ${(err as Error).message}`, "error");
-      }
-    },
-    [ensureChatSubscribed, pushToast, refreshState, unsubscribeChat],
   );
 
   const registerTermListener = useCallback((agentId: string, fn: TermListener) => {
@@ -487,7 +463,7 @@ export function useMuxlaneStore() {
     async (opts: {
       projectId: string;
       preset: AgentPreset;
-      surface: "chat" | "terminal" | "split";
+      surface: SessionViewMode;
       initialPrompt?: string;
     }) => {
       try {
@@ -512,20 +488,7 @@ export function useMuxlaneStore() {
           });
         }
         await refreshState();
-        const targetView: SessionViewMode =
-          opts.preset.agent_type === "shell" ? "terminal" : opts.surface;
-        openAgent(inst.id, targetView);
-        if (opts.surface !== "chat" && opts.initialPrompt?.trim() && supportsChatBridge(inst.agent_type)) {
-          setTimeout(() => {
-            void window.muxlane
-              .rpc(Methods.CHAT_SEND, {
-                agent: inst.id,
-                text: opts.initialPrompt!.trim(),
-                attachments: [],
-              })
-              .catch(() => {});
-          }, 800);
-        }
+        openAgent(inst.id);
         return inst;
       } catch (err) {
         pushToast(`启动会话失败: ${(err as Error).message}`, "error");
@@ -672,17 +635,67 @@ export function useMuxlaneStore() {
     [pushToast, refreshState],
   );
 
-  // Auto-subscribe active agent's chat stream whenever active tab changes
+  const resetHostWorkspaceState = useCallback(() => {
+    chatSubsRef.current.clear();
+    pendingChatSubsRef.current.clear();
+    setSnapshot(null);
+    setChatSummaries({});
+    setTimelines({});
+    setOpenTabs([]);
+    setActiveAgentId(null);
+    setGlobalApprovals([]);
+    setBots([]);
+    setBotRuns([]);
+    setPresetsByProject({});
+    setOutdatedDaemon(false);
+  }, []);
+
+  const addHost = useCallback(
+    async (input: AddHostInput) => {
+      resetHostWorkspaceState();
+      const next = await window.muxlane.addHost(input);
+      setHostsState(next);
+      pushToast(`已添加并连接到远程主机 ${input.name?.trim() || input.target}`, "success");
+      return next;
+    },
+    [pushToast, resetHostWorkspaceState],
+  );
+
+  const removeHost = useCallback(
+    async (hostId: string) => {
+      const wasActive = hostsState.activeHostId === hostId;
+      if (wasActive) resetHostWorkspaceState();
+      const next = await window.muxlane.removeHost(hostId);
+      setHostsState(next);
+      pushToast("已移除远程主机", "info");
+      return next;
+    },
+    [hostsState.activeHostId, pushToast, resetHostWorkspaceState],
+  );
+
+  const selectHost = useCallback(
+    async (hostId: string) => {
+      if (hostsState.activeHostId === hostId && status.connected) return hostsState;
+      resetHostWorkspaceState();
+      const next = await window.muxlane.selectHost(hostId);
+      setHostsState(next);
+      return next;
+    },
+    [hostsState, resetHostWorkspaceState, status.connected],
+  );
+
+  // Auto-subscribe only for pure chat sessions (native pi_rpc / acp without tmux PTY).
+  const activeAgentObj = snapshot?.agents.find((a) => a.id === activeAgentId);
+  const activeIsChat = isChatOnlySession(activeAgentObj);
   useEffect(() => {
-    if (!status.connected || !activeAgentId) return;
-    const mode = getViewMode(activeAgentId);
-    if (mode === "chat" || mode === "split") {
-      void ensureChatSubscribed(activeAgentId);
-    }
-  }, [activeAgentId, ensureChatSubscribed, getViewMode, status.connected]);
+    if (!status.connected || !activeAgentId || !activeIsChat) return;
+    void ensureChatSubscribed(activeAgentId);
+  }, [activeAgentId, activeIsChat, ensureChatSubscribed, status.connected]);
 
   return {
     status,
+    hostsState,
+    outdatedDaemon,
     snapshot,
     chatSummaries,
     timelines,
@@ -698,11 +711,8 @@ export function useMuxlaneStore() {
     dismissToast,
     pushToast,
     refreshState,
-    getViewMode,
     openAgent,
     closeTab,
-    setAgentViewMode,
-    takeOverNativeDriver,
     registerTermListener,
     loadPresets,
     addProject,
@@ -717,6 +727,9 @@ export function useMuxlaneStore() {
     saveBot,
     deleteBot,
     triggerBot,
+    addHost,
+    removeHost,
+    selectHost,
   };
 }
 

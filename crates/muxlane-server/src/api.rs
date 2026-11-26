@@ -323,12 +323,27 @@ impl MuxlaneServer {
             .lock()
             .await
             .insert(agent_id.clone(), Arc::clone(&session));
+        let spawn_cwd = project.path.clone();
+        let spawn_started_secs = instance.status_since;
         self.state
             .write()
             .await
             .add_agent(project, instance.clone());
         if agent_type.supports_chat_bridge() {
-            let _ = self.ensure_pty_bridge_for_agent(&agent_id).await;
+            let _ = self
+                .chat
+                .ensure_pty_bridge_with_context(
+                    &agent_id,
+                    agent_type,
+                    spawn_cwd,
+                    None,
+                    spawn_started_secs,
+                    Some(spawn_started_secs),
+                    false,
+                    true,
+                    None,
+                )
+                .await;
         }
         self.dirty.bump();
         self.persist_runtime_state().await?;
@@ -540,17 +555,8 @@ impl MuxlaneServer {
         session: Arc<muxlane_term::PtySession>,
     ) {
         let id = instance.id.clone();
-        let agent_type = instance.agent_type;
-        let cwd = project.path.clone();
-        let started_secs = instance.status_since;
-        self.sessions.lock().await.insert(id.clone(), session);
+        self.sessions.lock().await.insert(id, session);
         self.state.write().await.add_agent(project, instance);
-        if agent_type.supports_chat_bridge() {
-            let _ = self
-                .chat
-                .ensure_pty_bridge(&id, agent_type, cwd, started_secs, true, None)
-                .await;
-        }
     }
 
     pub(crate) fn bump_dirty(&self) {
@@ -712,6 +718,22 @@ impl MuxlaneServer {
         &self,
         agent: &AgentId,
     ) -> Option<muxlane_core::ChatSessionMeta> {
+        self.ensure_pty_bridge_for_agent_inner(agent, true).await
+    }
+
+    /// 前台从裸 Shell 刚启动新 Agent 时注册全新 PTY Bridge（禁止回退吸附历史老会话 JSONL）。
+    pub async fn ensure_fresh_pty_bridge_for_agent(
+        &self,
+        agent: &AgentId,
+    ) -> Option<muxlane_core::ChatSessionMeta> {
+        self.ensure_pty_bridge_for_agent_inner(agent, false).await
+    }
+
+    async fn ensure_pty_bridge_for_agent_inner(
+        &self,
+        agent: &AgentId,
+        allow_older_fallback: bool,
+    ) -> Option<muxlane_core::ChatSessionMeta> {
         self.session(agent).await?;
         let (inst, project) = {
             let state = self.state.read().await;
@@ -726,13 +748,29 @@ impl MuxlaneServer {
         if !inst.agent_type.supports_chat_bridge() {
             return None;
         }
+        let runtime = match inst.tmux_session.as_deref() {
+            Some(tmux_name) => crate::foreground::sample_pane_runtime(tmux_name).await,
+            None => None,
+        };
+        let (primary_cwd, fallback_cwd, proc_start_secs) = match runtime {
+            Some(info) => (info.cwd, Some(project.path), info.fg_proc_start_secs),
+            None => (project.path, None, None),
+        };
+        let effective_started = if allow_older_fallback {
+            inst.status_since
+        } else {
+            proc_start_secs.unwrap_or_else(muxlane_core::model::now_secs)
+        };
         Some(
             self.chat
-                .ensure_pty_bridge(
+                .ensure_pty_bridge_with_context(
                     agent,
                     inst.agent_type,
-                    project.path,
-                    inst.status_since,
+                    primary_cwd,
+                    fallback_cwd,
+                    effective_started,
+                    proc_start_secs,
+                    allow_older_fallback,
                     true,
                     None,
                 )
@@ -749,7 +787,13 @@ impl MuxlaneServer {
         if live_ids.is_empty() {
             return;
         }
-        let candidates: Vec<(AgentId, muxlane_core::model::AgentType, PathBuf, u64)> = {
+        let candidates: Vec<(
+            AgentId,
+            muxlane_core::model::AgentType,
+            PathBuf,
+            Option<String>,
+            u64,
+        )> = {
             let state = self.state.read().await;
             state
                 .agents
@@ -761,15 +805,34 @@ impl MuxlaneServer {
                         a.id.clone(),
                         a.agent_type,
                         project.path.clone(),
+                        a.tmux_session.clone(),
                         a.status_since,
                     ))
                 })
                 .collect()
         };
-        for (agent_id, agent_type, cwd, started_secs) in candidates {
+        for (agent_id, agent_type, project_cwd, tmux_session, started_secs) in candidates {
+            let runtime = match tmux_session.as_deref() {
+                Some(tmux_name) => crate::foreground::sample_pane_runtime(tmux_name).await,
+                None => None,
+            };
+            let (primary_cwd, fallback_cwd, proc_start_secs) = match runtime {
+                Some(info) => (info.cwd, Some(project_cwd), info.fg_proc_start_secs),
+                None => (project_cwd, None, None),
+            };
             let _ = self
                 .chat
-                .ensure_pty_bridge(&agent_id, agent_type, cwd, started_secs, true, None)
+                .ensure_pty_bridge_with_context(
+                    &agent_id,
+                    agent_type,
+                    primary_cwd,
+                    fallback_cwd,
+                    started_secs,
+                    proc_start_secs,
+                    true,
+                    true,
+                    None,
+                )
                 .await;
         }
     }
@@ -782,34 +845,15 @@ impl MuxlaneServer {
         if let Some(history) = self.chat.history(agent).await {
             return Ok(history);
         }
-        let (inst, project) = {
+        let inst = {
             let state = self.state.read().await;
-            let inst = state
+            state
                 .agents
                 .iter()
                 .find(|a| &a.id == agent)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("no such agent: {agent}"))?;
-            let project = state
-                .projects
-                .iter()
-                .find(|p| p.id == inst.project)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("no such project: {}", inst.project))?;
-            (inst, project)
+                .ok_or_else(|| anyhow::anyhow!("no such agent: {agent}"))?
         };
-        if let Some(history) = self
-            .chat
-            .refresh_pty_transcript_if_needed(
-                agent,
-                inst.agent_type,
-                project.path,
-                inst.status_since.saturating_sub(3600),
-            )
-            .await
-        {
-            return Ok(history);
-        }
         Ok(muxlane_core::protocol::ChatHistoryResult {
             agent: agent.clone(),
             seq: 0,

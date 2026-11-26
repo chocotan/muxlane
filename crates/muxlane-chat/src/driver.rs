@@ -120,3 +120,36 @@ pub fn extract_text_blocks(value: &serde_json::Value) -> Option<String> {
     }
     None
 }
+
+/// Derive a clean single-line session title from the first non-slash user prompt.
+pub fn derive_prompt_title(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('/') && !trimmed.starts_with("/skill:") {
+        return None;
+    }
+    let first_line = trimmed
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let collapsed: String = first_line
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut chars = collapsed.chars();
+    let head: String = chars.by_ref().take(48).collect();
+    if chars.next().is_some() {
+        Some(format!("{head}…"))
+    } else {
+        Some(head)
+    }
+}
+

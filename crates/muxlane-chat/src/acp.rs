@@ -5,8 +5,9 @@ use crate::transcript::infer_tool_diff;
 use anyhow::Context;
 use muxlane_core::chat::{
     now_ms, ApprovalOption, ApprovalReply, ApprovalSource, ChatAttachment, ChatDeltaOp,
-    ChatModelInfo, ChatSessionMeta, NoticeLevel, PendingApproval, PlanEntry, PlanEntryStatus,
-    SessionDriverMode, TextDeltaKind, TimelineEntry, ToolCallKind, ToolCallState, ToolDiff,
+    ChatModelInfo, ChatSessionMeta, ChatSlashCommand, MessageUsage, NoticeLevel, PendingApproval,
+    PlanEntry, PlanEntryStatus, SessionDriverMode, SessionStats, TextDeltaKind, TimelineEntry,
+    ToolCallKind, ToolCallState, ToolDiff,
 };
 use muxlane_core::model::AgentStatus;
 use serde_json::{json, Value};
@@ -562,10 +563,17 @@ pub(crate) struct AcpTranslator {
     pub active_turn_id: Option<String>,
     active_think_entry: Option<String>,
     active_text_entry: Option<String>,
+    last_text_entry_id: Option<String>,
+    turn_started_at: Option<Instant>,
+    turn_first_token_ms: Option<u64>,
+    turn_tool_ms: u64,
+    session_stats: SessionStats,
     thinking_started_at: Option<Instant>,
     tool_started_at: HashMap<String, Instant>,
     tool_cache: HashMap<String, TimelineEntry>,
     pending_permissions: HashMap<String, (Value, Vec<ApprovalOption>)>,
+    has_derived_title: bool,
+    has_explicit_title: bool,
 }
 
 impl AcpTranslator {
@@ -574,6 +582,7 @@ impl AcpTranslator {
         meta: ChatSessionMeta,
         events: mpsc::UnboundedSender<DriverEvent>,
     ) -> Self {
+        let session_stats = meta.stats.as_deref().cloned().unwrap_or_default();
         Self {
             agent: agent.to_string(),
             meta,
@@ -583,10 +592,17 @@ impl AcpTranslator {
             active_turn_id: None,
             active_think_entry: None,
             active_text_entry: None,
+            last_text_entry_id: None,
+            turn_started_at: None,
+            turn_first_token_ms: None,
+            turn_tool_ms: 0,
+            session_stats,
             thinking_started_at: None,
             tool_started_at: HashMap::new(),
             tool_cache: HashMap::new(),
             pending_permissions: HashMap::new(),
+            has_derived_title: false,
+            has_explicit_title: false,
         }
     }
 
@@ -596,9 +612,21 @@ impl AcpTranslator {
         self.active_turn_id = Some(turn_id.clone());
         self.active_think_entry = None;
         self.active_text_entry = None;
+        self.last_text_entry_id = None;
+        self.turn_started_at = Some(Instant::now());
+        self.turn_first_token_ms = None;
+        self.turn_tool_ms = 0;
+        self.session_stats.turns = self.session_stats.turns.saturating_add(1);
+        self.meta.stats = Some(Box::new(self.session_stats.clone()));
         self.meta.is_streaming = true;
         self.meta.last_error = None;
         self.emit_meta();
+        if !self.has_explicit_title && !self.has_derived_title {
+            if let Some(title) = crate::driver::derive_prompt_title(text) {
+                self.has_derived_title = true;
+                let _ = self.events.send(DriverEvent::Title(title));
+            }
+        }
         let _ = self
             .events
             .send(DriverEvent::Delta(ChatDeltaOp::UpsertEntry {
@@ -620,6 +648,35 @@ impl AcpTranslator {
     pub fn finish_turn(&mut self, error: Option<String>) {
         self.close_active_text();
         self.close_active_thinking();
+        let total_turn_ms = self
+            .turn_started_at
+            .take()
+            .map(|t| t.elapsed().as_millis() as u64);
+        let ttft_ms = self.turn_first_token_ms.take();
+        if let Some(total_ms) = total_turn_ms {
+            let llm_ms = total_ms.saturating_sub(self.turn_tool_ms);
+            self.session_stats.steps = self.session_stats.steps.saturating_add(1);
+            self.session_stats.llm_ms = self.session_stats.llm_ms.saturating_add(llm_ms);
+            if let Some(ttft) = ttft_ms {
+                self.session_stats.ttft_ms = self.session_stats.ttft_ms.saturating_add(ttft);
+                self.session_stats.ttft_steps = self.session_stats.ttft_steps.saturating_add(1);
+            }
+            if let Some(entry_id) = self.last_text_entry_id.take() {
+                let _ = self
+                    .events
+                    .send(DriverEvent::Delta(ChatDeltaOp::SetAssistantUsage {
+                        entry_id,
+                        usage: Box::new(MessageUsage {
+                            duration_ms: Some(total_ms),
+                            ttft_ms,
+                            ..Default::default()
+                        }),
+                    }));
+            }
+        } else {
+            self.last_text_entry_id = None;
+        }
+        self.meta.stats = Some(Box::new(self.session_stats.clone()));
         let turn_id = self.active_turn_id.take();
         self.meta.is_streaming = false;
         self.meta.last_error = error.clone();
@@ -647,6 +704,9 @@ impl AcpTranslator {
     pub fn finish_turn_cancelled(&mut self) {
         self.close_active_text();
         self.close_active_thinking();
+        self.turn_started_at = None;
+        self.turn_first_token_ms = None;
+        self.last_text_entry_id = None;
         let turn_id = self.active_turn_id.take();
         self.meta.is_streaming = false;
         self.emit_meta();
@@ -818,6 +878,10 @@ impl AcpTranslator {
                     if text.is_empty() {
                         return;
                     }
+                    if self.turn_first_token_ms.is_none() {
+                        self.turn_first_token_ms =
+                            self.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
+                    }
                     self.close_active_text();
                     let entry_id = if let Some(id) = &self.active_think_entry {
                         id.clone()
@@ -854,6 +918,10 @@ impl AcpTranslator {
                     if text.is_empty() {
                         return;
                     }
+                    if self.turn_first_token_ms.is_none() {
+                        self.turn_first_token_ms =
+                            self.turn_started_at.map(|t| t.elapsed().as_millis() as u64);
+                    }
                     self.close_active_thinking();
                     let entry_id = if let Some(id) = &self.active_text_entry {
                         id.clone()
@@ -861,6 +929,7 @@ impl AcpTranslator {
                         self.block_seq += 1;
                         let id = format!("acp-text-{}", self.block_seq);
                         self.active_text_entry = Some(id.clone());
+                        self.last_text_entry_id = Some(id.clone());
                         let model = self.meta.current_model.as_ref().map(|m| m.name.clone());
                         let _ = self
                             .events
@@ -871,6 +940,7 @@ impl AcpTranslator {
                                     text: String::new(),
                                     streaming: true,
                                     model,
+                                    usage: None,
                                     created_at_ms: now_ms(),
                                 },
                             }));
@@ -943,7 +1013,51 @@ impl AcpTranslator {
             }
             "session_info_update" => {
                 if let Some(title) = update.get("title").and_then(|v| v.as_str()) {
-                    let _ = self.events.send(DriverEvent::Title(title.to_string()));
+                    let trimmed = title.trim();
+                    if !trimmed.is_empty() {
+                        self.has_explicit_title = true;
+                        let _ = self.events.send(DriverEvent::Title(trimmed.to_string()));
+                    }
+                }
+            }
+            "available_commands_update" => {
+                if let Some(arr) = update.get("availableCommands").and_then(|v| v.as_array()) {
+                    let commands: Vec<ChatSlashCommand> = arr
+                        .iter()
+                        .filter_map(|item| {
+                            let raw_name = item.get("name")?.as_str()?.trim();
+                            if raw_name.is_empty() {
+                                return None;
+                            }
+                            let name = raw_name.trim_start_matches('/').to_string();
+                            let description = item
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string);
+                            let argument_hint = item
+                                .pointer("/input/hint")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string);
+                            let kind = if name.starts_with("skill:") {
+                                "skill".to_string()
+                            } else {
+                                "command".to_string()
+                            };
+                            Some(ChatSlashCommand {
+                                name,
+                                description,
+                                kind,
+                                source: Some("acp".to_string()),
+                                argument_hint,
+                            })
+                        })
+                        .collect();
+                    self.meta.available_commands = commands;
+                    self.emit_meta();
                 }
             }
             _ => {}
@@ -1051,9 +1165,18 @@ impl AcpTranslator {
                 .or_insert_with(Instant::now);
         }
         let duration_ms = if matches!(state, ToolCallState::Completed | ToolCallState::Failed) {
-            self.tool_started_at
+            let dur = self
+                .tool_started_at
                 .remove(call_id)
-                .map(|t| t.elapsed().as_millis() as u64)
+                .map(|t| t.elapsed().as_millis() as u64);
+            if dur.is_some() {
+                self.session_stats.tool_calls = self.session_stats.tool_calls.saturating_add(1);
+                let ms = dur.unwrap_or(0);
+                self.session_stats.tool_ms = self.session_stats.tool_ms.saturating_add(ms);
+                self.turn_tool_ms = self.turn_tool_ms.saturating_add(ms);
+                self.meta.stats = Some(Box::new(self.session_stats.clone()));
+            }
+            dur
         } else {
             None
         };

@@ -5,6 +5,20 @@ region = "bottom"
 contains = [
     "Agy requires approval",
     "Agy is waiting for input",
+    "Do you want to proceed?",
+    "Allow once",
+    "Confirm [y/n]",
+]
+
+[[rules]]
+status = "working"
+region = "bottom"
+contains = [
+    "esc to cancel",
+    "Esc to cancel",
+]
+regex = [
+    "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷◐◑◒◓]",
 ]
 
 [[rules]]
@@ -15,4 +29,10 @@ regex = ["(?i)agy.*(working|thinking|running)"]
 [[rules]]
 status = "idle"
 region = "bottom"
-regex = ["(?i)^\\s*agy\\s*[>❯]\\s*$"]
+contains = [
+    "? for shortcuts",
+]
+regex = [
+    "(?i)^\\s*agy\\s*[>❯]\\s*$",
+    "^\\s*[>❯]\\s*$",
+]

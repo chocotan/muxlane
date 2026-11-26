@@ -42,6 +42,7 @@ export function shouldIgnoreRun(ctx) {
 }
 
 export default function (pi) {
+  if (process.argv.includes("--mode") && process.argv.includes("rpc")) return
   registerInlineImages(pi)
   let latestAssistant = ""
   // 最近一条 assistant 错误消息（stopReason === "error"）。agent_end/agent_settled

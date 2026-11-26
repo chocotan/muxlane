@@ -4,19 +4,29 @@ import {
   Command,
   Layers,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
+  Server,
+  Settings,
   Sun,
 } from "lucide-react";
 import type { DaemonConnectionStatus } from "../shared/protocol";
-import type { AppTheme } from "../state/useTheme";
+import { isDarkTheme, type AppTheme } from "../state/useTheme";
 
 interface AppRailProps {
   activeSection: "workspace" | "bots";
+  sidebarOpen: boolean;
   approvalsCount: number;
   botsCount: number;
+  isRemoteHost: boolean;
+  remoteHostsCount: number;
   status: DaemonConnectionStatus;
   theme: AppTheme;
   onSelectSection: (section: "workspace" | "bots") => void;
+  onToggleSidebar: () => void;
+  onOpenRemotes: () => void;
+  onOpenSettings: () => void;
   onOpenPalette: () => void;
   onToggleTheme: () => void;
   onReconnect: () => void;
@@ -24,15 +34,23 @@ interface AppRailProps {
 
 export const AppRail: React.FC<AppRailProps> = ({
   activeSection,
+  sidebarOpen,
   approvalsCount,
   botsCount,
+  isRemoteHost,
+  remoteHostsCount,
   status,
   theme,
   onSelectSection,
+  onToggleSidebar,
+  onOpenRemotes,
+  onOpenSettings,
   onOpenPalette,
   onToggleTheme,
   onReconnect,
 }) => {
+  const dark = isDarkTheme(theme);
+
   return (
     <nav
       aria-label="主导航"
@@ -41,7 +59,7 @@ export const AppRail: React.FC<AppRailProps> = ({
       {/* Top: Brand Mark + Primary Views */}
       <div className="flex w-full flex-col items-center">
         <div
-          title="Muxlane Desktop"
+          title="Muxlane"
           className="flex h-9 w-full items-center justify-center border-b border-line-subtle"
         >
           <span className="flex h-5 w-5 items-center justify-center bg-primary-btn font-mono text-[11px] font-bold tracking-tighter text-primary-btn-fg">
@@ -89,10 +107,26 @@ export const AppRail: React.FC<AppRailProps> = ({
             )}
             <Bot className="h-[17px] w-[17px]" strokeWidth={1.75} />
           </button>
+
+          <button
+            type="button"
+            onClick={onOpenRemotes}
+            title={
+              remoteHostsCount > 0
+                ? `远程机器 (${remoteHostsCount}) · Ctrl+Shift+M`
+                : "添加远程机器 (Ctrl+Shift+M)"
+            }
+            className="relative flex h-9 w-full items-center justify-center text-ink-muted hover:bg-hover/70 hover:text-ink transition-colors cursor-pointer"
+          >
+            <Server className="h-[16px] w-[16px]" strokeWidth={1.75} />
+            {isRemoteHost && (
+              <span className="absolute right-2 top-2 h-1.5 w-1.5 bg-unread" />
+            )}
+          </button>
         </div>
       </div>
 
-      {/* Bottom: Utilities + Theme + Daemon Health */}
+      {/* Bottom: Palette, Theme, Settings (reconnect button only shown when disconnected/connecting) */}
       <div className="mb-2 flex w-full flex-col items-center gap-1">
         <button
           type="button"
@@ -106,10 +140,10 @@ export const AppRail: React.FC<AppRailProps> = ({
         <button
           type="button"
           onClick={onToggleTheme}
-          title={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
+          title={dark ? "切换到浅色主题" : "切换到深色主题"}
           className="flex h-8 w-8 items-center justify-center text-ink-muted hover:bg-hover hover:text-ink transition-colors cursor-pointer"
         >
-          {theme === "dark" ? (
+          {dark ? (
             <Sun className="h-[15px] w-[15px]" strokeWidth={1.75} />
           ) : (
             <Moon className="h-[15px] w-[15px]" strokeWidth={1.75} />
@@ -118,28 +152,50 @@ export const AppRail: React.FC<AppRailProps> = ({
 
         <button
           type="button"
-          onClick={onReconnect}
-          title={
-            status.connected
-              ? `muxlane-server 已连接 · ${status.socketPath}`
-              : status.connecting
-                ? "正在连接 muxlane-server…"
-                : `${status.error || "守护进程未连接"}（点击重连）`
-          }
+          onClick={onOpenSettings}
+          title="设置 (Ctrl+,)"
           className="flex h-8 w-8 items-center justify-center text-ink-muted hover:bg-hover hover:text-ink transition-colors cursor-pointer"
         >
-          {!status.connected && !status.connecting ? (
-            <RefreshCw className="h-3.5 w-3.5 text-danger" />
+          <Settings className="h-[15px] w-[15px]" strokeWidth={1.75} />
+        </button>
+
+        <button
+          type="button"
+          onClick={onToggleSidebar}
+          title={sidebarOpen ? "隐藏左侧边栏 (Ctrl+B)" : "展开左侧边栏 (Ctrl+B)"}
+          aria-label={sidebarOpen ? "隐藏左侧边栏" : "展开左侧边栏"}
+          className={`flex h-8 w-8 items-center justify-center transition-colors cursor-pointer ${
+            sidebarOpen
+              ? "text-ink-muted hover:bg-hover hover:text-ink"
+              : "bg-active text-ink-strong hover:bg-hover"
+          }`}
+        >
+          {sidebarOpen ? (
+            <PanelLeftClose className="h-[15px] w-[15px]" strokeWidth={1.75} />
           ) : (
-            <span
-              className={`h-2 w-2 ${
-                status.connected
-                  ? "bg-success"
-                  : "bg-working animate-pulse"
-              }`}
-            />
+            <PanelLeftOpen className="h-[15px] w-[15px]" strokeWidth={1.75} />
           )}
         </button>
+
+        {(!status.connected || status.connecting) && (
+          <button
+            type="button"
+            onClick={onReconnect}
+            title={
+              status.connecting
+                ? "正在连接 muxlane-server…"
+                : `未连接: ${status.error || status.socketPath}，点击重连`
+            }
+            className="flex h-8 w-8 items-center justify-center text-ink-muted hover:bg-hover hover:text-ink transition-colors cursor-pointer"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${
+                status.connecting ? "animate-spin text-working" : "text-danger"
+              }`}
+              strokeWidth={1.8}
+            />
+          </button>
+        )}
       </div>
     </nav>
   );

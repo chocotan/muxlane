@@ -1,39 +1,112 @@
 import React, { useEffect, useState } from "react";
-import { FolderPlus, Plus, RefreshCw, X } from "lucide-react";
-import { useMuxlaneStore } from "../state/useMuxlaneStore";
-import { useTheme } from "../state/useTheme";
+import { FolderPlus, Plus, RefreshCw, Server, X } from "lucide-react";
+import { isChatOnlySession, useMuxlaneStore } from "../state/useMuxlaneStore";
+import { resolveTerminalFontCss, useSettings } from "../state/useSettings";
 import { AppRail } from "./AppRail";
 import { BotsPanel } from "./BotsPanel";
 import { ChatPane } from "./ChatPane";
 import { CommandPalette } from "./CommandPalette";
 import { NewSessionModal } from "./NewSessionModal";
+import { RemoteMachinesModal } from "./RemoteMachinesModal";
+import { RightSidebar, type RightSidebarTab } from "./RightSidebar";
+import { SettingsModal } from "./SettingsModal";
 import { Sidebar } from "./Sidebar";
-import { SplitWorkspace } from "./SplitWorkspace";
 import { TerminalPane } from "./TerminalPane";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 
+const RIGHT_SIDEBAR_STORAGE_KEY = "muxlane.desktop.rightSidebar.v1";
+
+interface RightSidebarState {
+  open: boolean;
+  width: number;
+  tab: RightSidebarTab;
+}
+
+function loadRightSidebarState(): RightSidebarState {
+  try {
+    const raw = window.localStorage.getItem(RIGHT_SIDEBAR_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<RightSidebarState>;
+      const tab: RightSidebarTab =
+        parsed.tab === "changes" || parsed.tab === "info" ? parsed.tab : "changes";
+      const width =
+        typeof parsed.width === "number" && parsed.width >= 280 && parsed.width <= 680
+          ? Math.round(parsed.width)
+          : 380;
+      return {
+        open: parsed.open === true,
+        width,
+        tab,
+      };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return { open: false, width: 380, tab: "changes" };
+}
+
 export const App: React.FC = () => {
-  const store = useMuxlaneStore();
-  const { theme, toggleTheme } = useTheme();
+  const { settings, updateSettings, toggleTheme, resetSettings } = useSettings();
+  const store = useMuxlaneStore({
+    notificationsEnabled: settings.notificationsEnabled,
+  });
+
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [sidebarWidth, setSidebarWidth] = useState(252);
+  const [rightSidebar, setRightSidebar] = useState<RightSidebarState>(loadRightSidebarState);
   const [newSessionProjectId, setNewSessionProjectId] = useState<string | null>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [remotesOpen, setRemotesOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [remoteProjectOpen, setRemoteProjectOpen] = useState(false);
+  const [remoteProjectPath, setRemoteProjectPath] = useState("");
+  const [remoteProjectCreate, setRemoteProjectCreate] = useState(false);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RIGHT_SIDEBAR_STORAGE_KEY, JSON.stringify(rightSidebar));
+    } catch {
+      // ignore storage errors
+    }
+  }, [rightSidebar]);
 
   const projects = store.snapshot?.projects ?? [];
   const agents = store.snapshot?.agents ?? [];
   const activeAgent = agents.find((a) => a.id === store.activeAgentId);
+  const activeProject = activeAgent
+    ? projects.find((p) => p.id === activeAgent.project)
+    : undefined;
   const activeTimeline = store.activeAgentId ? store.timelines[store.activeAgentId] : undefined;
-  const activeMeta =
-    activeTimeline?.meta ??
-    (store.activeAgentId ? store.chatSummaries[store.activeAgentId]?.meta : undefined);
-  const activeViewMode = store.activeAgentId ? store.getViewMode(store.activeAgentId) : "chat";
+  const activeIsChat = isChatOnlySession(activeAgent);
+
+  const activeHost = store.hostsState.hosts.find((h) => h.id === store.hostsState.activeHostId);
+  const isRemoteHost = Boolean(activeHost && activeHost.kind !== "local");
+  const remoteHostsCount = store.hostsState.hosts.filter((h) => h.kind !== "local").length;
+  const displayMachineName =
+    activeHost?.name || store.snapshot?.machine.name || "本机";
+  const terminalFontCss = resolveTerminalFontCss(settings.terminalFontFamily);
 
   const handleAddProject = async () => {
+    if (isRemoteHost) {
+      setRemoteProjectPath("");
+      setRemoteProjectCreate(false);
+      setRemoteProjectOpen(true);
+      return;
+    }
     const dir = await window.muxlane.pickDirectory();
     if (dir) {
       await store.addProject(dir, false);
+    }
+  };
+
+  const handleSubmitRemoteProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!remoteProjectPath.trim()) return;
+    const proj = await store.addProject(remoteProjectPath.trim(), remoteProjectCreate);
+    if (proj) {
+      setRemoteProjectOpen(false);
+      setRemoteProjectPath("");
     }
   };
 
@@ -46,33 +119,35 @@ export const App: React.FC = () => {
     setNewSessionOpen(true);
   };
 
-  // Global keyboard shortcuts
+  // Global keyboard shortcuts (do not hijack plain Ctrl+B/K/N/W when focused inside terminal)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
-      if (!mod) return;
+      if (!mod || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const inTerminal = Boolean(target?.closest(".xterm"));
       const key = e.key.toLowerCase();
-      if (key === "k") {
+      if (key === ",") {
+        e.preventDefault();
+        setSettingsOpen((v) => !v);
+      } else if (e.shiftKey && key === "m") {
+        e.preventDefault();
+        setRemotesOpen((v) => !v);
+      } else if (key === "]") {
+        e.preventDefault();
+        setRightSidebar((prev) => ({ ...prev, open: !prev.open }));
+      } else if (key === "k" && (!inTerminal || e.shiftKey)) {
         e.preventDefault();
         setPaletteOpen((v) => !v);
-      } else if (key === "b") {
+      } else if (key === "b" && (!inTerminal || e.shiftKey)) {
         e.preventDefault();
         setSidebarOpen((v) => !v);
-      } else if (key === "n") {
+      } else if (key === "n" && (!inTerminal || e.shiftKey)) {
         e.preventDefault();
         openNewSession();
-      } else if (key === "w" && store.activeAgentId) {
+      } else if (key === "w" && (!inTerminal || e.shiftKey) && store.activeAgentId) {
         e.preventDefault();
         store.closeTab(store.activeAgentId);
-      } else if (key === "1" && store.activeAgentId) {
-        e.preventDefault();
-        void store.setAgentViewMode(store.activeAgentId, "chat");
-      } else if (key === "2" && store.activeAgentId) {
-        e.preventDefault();
-        void store.setAgentViewMode(store.activeAgentId, "split");
-      } else if (key === "3" && store.activeAgentId) {
-        e.preventDefault();
-        void store.setAgentViewMode(store.activeAgentId, "terminal");
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -81,31 +156,40 @@ export const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-base text-ink">
-      {/* Orca-style 44px Left App Rail */}
+      {/* 44px Left App Rail */}
       <AppRail
         activeSection={store.activeSection}
+        sidebarOpen={sidebarOpen}
         approvalsCount={store.globalApprovals.length}
         botsCount={store.bots.length}
+        isRemoteHost={isRemoteHost}
+        remoteHostsCount={remoteHostsCount}
         status={store.status}
-        theme={theme}
+        theme={settings.theme}
         onSelectSection={store.setActiveSection}
+        onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        onOpenRemotes={() => setRemotesOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
         onOpenPalette={() => setPaletteOpen(true)}
         onToggleTheme={toggleTheme}
         onReconnect={() => void window.muxlane.reconnect()}
       />
 
-      {/* Resizable Workspace Navigation Sidebar (hidden on Bots page or when collapsed) */}
+      {/* Resizable Left Workspace Navigation Sidebar */}
       {store.activeSection === "workspace" && sidebarOpen && (
         <Sidebar
           width={sidebarWidth}
           onResize={setSidebarWidth}
-          machineName={store.snapshot?.machine.name ?? "local"}
+          machineName={displayMachineName}
+          isRemoteHost={isRemoteHost}
+          remoteHostsCount={remoteHostsCount}
           projects={projects}
           agents={agents}
           chatSummaries={store.chatSummaries}
           activeAgentId={store.activeAgentId}
           activeSection={store.activeSection}
           globalApprovals={store.globalApprovals}
+          onOpenRemotes={() => setRemotesOpen(true)}
           onSelectAgent={(id) => store.openAgent(id)}
           onAddProject={() => void handleAddProject()}
           onDeleteProject={(pid) => void store.deleteProject(pid)}
@@ -126,40 +210,51 @@ export const App: React.FC = () => {
             onSaveBot={store.saveBot}
             onDeleteBot={store.deleteBot}
             onTriggerBot={store.triggerBot}
-            onOpenAgent={(id) => store.openAgent(id, "chat")}
+            onOpenAgent={(id) => store.openAgent(id)}
           />
         ) : (
           <>
             <WorkspaceHeader
-              sidebarOpen={sidebarOpen}
-              onToggleSidebar={() => setSidebarOpen((v) => !v)}
+              rightSidebarOpen={rightSidebar.open}
+              onToggleRightSidebar={() =>
+                setRightSidebar((prev) => ({ ...prev, open: !prev.open }))
+              }
               openTabs={store.openTabs}
               activeAgentId={store.activeAgentId}
               agents={agents}
-              activeMeta={activeMeta}
-              activeViewMode={activeViewMode}
               onSelectTab={(id) => store.openAgent(id)}
               onCloseTab={store.closeTab}
               onNewTab={() => openNewSession()}
-              onChangeViewMode={(mode) => {
-                if (store.activeAgentId) void store.setAgentViewMode(store.activeAgentId, mode);
-              }}
-              onTakeOverNative={() => {
-                if (store.activeAgentId) void store.takeOverNativeDriver(store.activeAgentId);
-              }}
             />
 
-            {!store.status.connected && (
-              <div className="flex items-center justify-between border-b border-line-subtle bg-working-soft px-4 py-1.5 text-[12px] text-working">
+            {store.status.connected && store.outdatedDaemon && (
+              <div className="flex items-center justify-between gap-3 border-b border-line-subtle bg-question-soft px-4 py-1.5 text-[12px] text-question">
                 <span>
-                  {store.status.connecting
-                    ? "正在连接 muxlane-server 守护进程（若未运行将自动启动 muxlane --headless）…"
-                    : store.status.error || "尚未连接到 muxlane-server"}
+                  当前连接的 muxlane 守护进程为旧版本，请退出旧版 muxlane 后重启守护进程（所有运行中的 tmux 会话会自动保留）。
                 </span>
                 <button
                   type="button"
                   onClick={() => void window.muxlane.reconnect()}
-                  className="flex items-center gap-1.5 border border-line bg-elevated px-2.5 py-0.5 text-[11.5px] text-ink hover:bg-hover transition-colors cursor-pointer"
+                  className="flex shrink-0 items-center gap-1.5 border border-line bg-elevated px-2.5 py-0.5 text-[11.5px] text-ink hover:bg-hover transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  <span>重新检测</span>
+                </button>
+              </div>
+            )}
+
+            {!store.status.connected && (
+              <div className="flex items-center justify-between gap-3 border-b border-line-subtle bg-working-soft px-4 py-1.5 text-[12px] text-working">
+                <span className="truncate">
+                  {store.hostsState.tunnelStatus ||
+                    (store.status.connecting
+                      ? `正在连接 ${displayMachineName} 守护进程…`
+                      : store.status.error || "尚未连接到 muxlane-server")}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void window.muxlane.reconnect()}
+                  className="flex shrink-0 items-center gap-1.5 border border-line bg-elevated px-2.5 py-0.5 text-[11.5px] text-ink hover:bg-hover transition-colors cursor-pointer"
                 >
                   <RefreshCw className="h-3 w-3" />
                   <span>重新连接</span>
@@ -167,11 +262,11 @@ export const App: React.FC = () => {
               </div>
             )}
 
-            <main className="min-h-0 flex-1">
+            {/* Main Session Viewport — pure fixed surface per session (Chat OR Terminal) */}
+            <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
               {!activeAgent ? (
-                /* Serene Orca + DeepSeek Harness Editorial Landing */
                 <div className="flex h-full items-center justify-center bg-canvas px-6">
-                  <div className="w-full max-w-[440px]">
+                  <div className="w-full max-w-[420px]">
                     <div className="flex items-center gap-3">
                       <span className="flex h-7 w-7 items-center justify-center bg-primary-btn font-mono text-[13px] font-bold text-primary-btn-fg">
                         M
@@ -180,15 +275,11 @@ export const App: React.FC = () => {
                         Muxlane
                       </h1>
                     </div>
-                    <p className="mt-3 text-[13.5px] leading-[1.65] text-ink-2">
-                      连接本地{" "}
-                      <code className="border border-line-subtle bg-code-surface px-1.5 py-0.5 font-mono text-[12px] text-ink">
-                        muxlane-server
-                      </code>{" "}
-                      守护进程，在统一工作台内编排 Pi / Pie / OpenCode / ACP 原生结构化对话与终端 PTY 双向实时分屏。
+                    <p className="mt-3 text-[13.5px] leading-[1.55] text-ink-2">
+                      选择左侧项目或新建对话 / 终端会话开始工作，也支持通过 SSH 连接远程主机。
                     </p>
 
-                    <div className="mt-6 flex flex-wrap items-center gap-2.5">
+                    <div className="mt-6 flex flex-wrap items-center gap-2">
                       {projects.length === 0 ? (
                         <button
                           type="button"
@@ -196,7 +287,7 @@ export const App: React.FC = () => {
                           className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
                         >
                           <FolderPlus className="h-4 w-4" />
-                          <span>添加本地项目</span>
+                          <span>添加项目</span>
                         </button>
                       ) : (
                         <>
@@ -206,7 +297,7 @@ export const App: React.FC = () => {
                             className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
                           >
                             <Plus className="h-4 w-4" />
-                            <span>新建 Agent / 终端会话</span>
+                            <span>新建会话</span>
                           </button>
                           <button
                             type="button"
@@ -218,6 +309,14 @@ export const App: React.FC = () => {
                           </button>
                         </>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => setRemotesOpen(true)}
+                        className="flex h-9 items-center gap-2 border border-line bg-canvas px-3.5 text-[13px] text-ink hover:bg-hover transition-colors cursor-pointer"
+                      >
+                        <Server className="h-4 w-4 text-ink-muted" />
+                        <span>远程机器</span>
+                      </button>
                     </div>
 
                     <div className="mt-8 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-line-subtle pt-4 font-mono text-[11px] text-ink-muted">
@@ -230,64 +329,42 @@ export const App: React.FC = () => {
                         <span className="text-ink-2">Ctrl+K</span>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span>侧边栏</span>
-                        <span className="text-ink-2">Ctrl+B</span>
+                        <span>切换右侧栏</span>
+                        <span className="text-ink-2">Ctrl+]</span>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span>对话 / 分屏 / 终端</span>
-                        <span className="text-ink-2">Ctrl+1/2/3</span>
+                        <span>设置</span>
+                        <span className="text-ink-2">Ctrl+,</span>
                       </div>
                     </div>
                   </div>
                 </div>
-              ) : activeViewMode === "terminal" ? (
-                <TerminalPane
-                  agentId={activeAgent.id}
-                  connected={store.status.connected}
-                  theme={theme}
-                  registerTermListener={store.registerTermListener}
-                />
-              ) : activeViewMode === "split" ? (
-                <SplitWorkspace
-                  left={
-                    <ChatPane
-                      agentId={activeAgent.id}
-                      agentTitle={activeAgent.title}
-                      theme={theme}
-                      timeline={activeTimeline}
-                      onSend={(text, atts, behavior) =>
-                        store.sendChatPrompt(activeAgent.id, text, atts, behavior)
-                      }
-                      onAbort={() => void store.abortChat(activeAgent.id)}
-                      onApprove={(apId, reply) => void store.approveChat(activeAgent.id, apId, reply)}
-                      onConfigure={(opts) => void store.configureChat(activeAgent.id, opts)}
-                      onOpenTerminal={() => void store.setAgentViewMode(activeAgent.id, "terminal")}
-                      onTakeOverNative={() => void store.takeOverNativeDriver(activeAgent.id)}
-                    />
-                  }
-                  right={
-                    <TerminalPane
-                      agentId={activeAgent.id}
-                      connected={store.status.connected}
-                      theme={theme}
-                      registerTermListener={store.registerTermListener}
-                    />
-                  }
-                />
-              ) : (
+              ) : activeIsChat ? (
                 <ChatPane
+                  key={activeAgent.id}
                   agentId={activeAgent.id}
                   agentTitle={activeAgent.title}
-                  theme={theme}
+                  theme={settings.theme}
                   timeline={activeTimeline}
                   onSend={(text, atts, behavior) =>
                     store.sendChatPrompt(activeAgent.id, text, atts, behavior)
                   }
                   onAbort={() => void store.abortChat(activeAgent.id)}
-                  onApprove={(apId, reply) => void store.approveChat(activeAgent.id, apId, reply)}
+                  onApprove={(apId, reply) =>
+                    void store.approveChat(activeAgent.id, apId, reply)
+                  }
                   onConfigure={(opts) => void store.configureChat(activeAgent.id, opts)}
-                  onOpenTerminal={() => void store.setAgentViewMode(activeAgent.id, "terminal")}
-                  onTakeOverNative={() => void store.takeOverNativeDriver(activeAgent.id)}
+                />
+              ) : (
+                <TerminalPane
+                  key={activeAgent.id}
+                  agentId={activeAgent.id}
+                  connected={store.status.connected}
+                  theme={settings.theme}
+                  fontSize={settings.terminalFontSize}
+                  fontFamily={terminalFontCss}
+                  visible
+                  registerTermListener={store.registerTermListener}
                 />
               )}
             </main>
@@ -295,15 +372,53 @@ export const App: React.FC = () => {
         )}
       </div>
 
+      {/* Orca-style Collapsible & Resizable Right Sidebar */}
+      {store.activeSection === "workspace" && (
+        <RightSidebar
+          open={rightSidebar.open}
+          width={rightSidebar.width}
+          tab={rightSidebar.tab}
+          onChangeTab={(tab) => setRightSidebar((prev) => ({ ...prev, tab }))}
+          onResize={(width) => setRightSidebar((prev) => ({ ...prev, width }))}
+          onClose={() => setRightSidebar((prev) => ({ ...prev, open: false }))}
+          activeAgent={activeAgent}
+          activeProject={activeProject}
+          isRemoteHost={isRemoteHost}
+          timeline={activeTimeline}
+        />
+      )}
+
       {/* Modals */}
       <NewSessionModal
         open={newSessionOpen}
         projects={projects}
         initialProjectId={newSessionProjectId}
+        defaultSurface={settings.defaultViewMode}
         presetsByProject={store.presetsByProject}
         onLoadPresets={store.loadPresets}
         onClose={() => setNewSessionOpen(false)}
         onSpawn={store.spawnSession}
+      />
+
+      <RemoteMachinesModal
+        open={remotesOpen}
+        hostsState={store.hostsState}
+        connectionStatus={store.status}
+        onClose={() => setRemotesOpen(false)}
+        onSelectHost={store.selectHost}
+        onAddHost={store.addHost}
+        onRemoveHost={store.removeHost}
+      />
+
+      <SettingsModal
+        open={settingsOpen}
+        settings={settings}
+        connectionStatus={store.status}
+        machine={store.snapshot?.machine}
+        onUpdateSettings={updateSettings}
+        onResetSettings={resetSettings}
+        onReconnect={() => void window.muxlane.reconnect()}
+        onClose={() => setSettingsOpen(false)}
       />
 
       <CommandPalette
@@ -315,9 +430,80 @@ export const App: React.FC = () => {
         onNewSession={() => openNewSession()}
         onAddProject={() => void handleAddProject()}
         onOpenBots={() => store.setActiveSection("bots")}
+        onOpenRemotes={() => setRemotesOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
-      {/* Orca-style Lifted Monochrome Toast Stack */}
+      {/* Remote Project Path Input Modal */}
+      {remoteProjectOpen && (
+        <div
+          onClick={() => setRemoteProjectOpen(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4"
+        >
+          <form
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={(e) => void handleSubmitRemoteProject(e)}
+            className="mux-popover-shadow w-full max-w-[460px] border border-line-strong bg-elevated"
+          >
+            <div className="flex h-11 items-center justify-between border-b border-line-subtle px-4">
+              <span className="text-[13.5px] font-semibold text-ink-strong">
+                在 {displayMachineName} 添加项目
+              </span>
+              <button
+                type="button"
+                onClick={() => setRemoteProjectOpen(false)}
+                className="flex h-6 w-6 items-center justify-center text-ink-muted hover:bg-hover hover:text-ink-strong cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-3 p-4">
+              <div>
+                <label className="mb-1.5 block text-[11.5px] text-ink-muted">
+                  远端项目目录路径
+                </label>
+                <input
+                  autoFocus
+                  required
+                  value={remoteProjectPath}
+                  onChange={(e) => setRemoteProjectPath(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setRemoteProjectOpen(false);
+                  }}
+                  placeholder="例如：~/workspace/my-repo"
+                  className="h-9 w-full border border-line bg-canvas px-3 font-mono text-[12.5px] text-ink-strong placeholder:text-ink-muted focus:border-line-strong focus:outline-none select-text"
+                />
+              </div>
+              <label className="flex items-center gap-2 text-[12px] text-ink-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={remoteProjectCreate}
+                  onChange={(e) => setRemoteProjectCreate(e.target.checked)}
+                />
+                <span>如果目录不存在则自动创建</span>
+              </label>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-line-subtle px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setRemoteProjectOpen(false)}
+                className="h-8 border border-line bg-canvas px-3 text-[12px] text-ink-2 hover:bg-hover hover:text-ink-strong cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={!remoteProjectPath.trim()}
+                className="h-8 bg-primary-btn px-3.5 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover disabled:opacity-45 cursor-pointer"
+              >
+                添加项目
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Toast Stack */}
       {store.toasts.length > 0 && (
         <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
           {store.toasts.map((toast) => (
@@ -335,7 +521,7 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => store.dismissToast(toast.id)}
-                className="shrink-0 text-ink-muted hover:text-ink-strong cursor-pointer"
+                className="flex h-5 w-5 shrink-0 items-center justify-center text-ink-muted hover:text-ink-strong cursor-pointer"
               >
                 <X className="h-3.5 w-3.5" />
               </button>

@@ -3,7 +3,6 @@ mod actions;
 mod app;
 mod bootstrap;
 mod bots;
-mod chat;
 mod dialogs;
 mod editors;
 mod floating;

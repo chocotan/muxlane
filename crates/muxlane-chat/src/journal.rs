@@ -91,6 +91,7 @@ mod tests {
                         text: "hi ".into(),
                         streaming: true,
                         model: None,
+                        usage: None,
                         created_at_ms: 100,
                     },
                 },

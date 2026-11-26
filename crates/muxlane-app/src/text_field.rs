@@ -1,9 +1,9 @@
 use crate::theme::{Theme, ThemeMode};
 use crate::ui_scale::px as ui_px;
 use gpui::{
-    canvas, div, point, prelude::*, rgba, size, Bounds, ClipboardEntry, Context,
-    ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Focusable, ImageFormat,
-    Pixels, Point, Render, SharedString, Subscription, UTF16Selection, Window,
+    canvas, div, point, prelude::*, rgba, size, Bounds, Context, ElementInputHandler,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Pixels, Point, Render, SharedString,
+    Subscription, UTF16Selection, Window,
 };
 use std::ops::Range;
 
@@ -115,9 +115,7 @@ fn line_edge(content: &str, cursor: usize, home: bool) -> usize {
 
 #[derive(Clone, Debug)]
 pub enum TextFieldEvent {
-    Submit { steer: bool },
     Changed,
-    PasteImage { bytes: Vec<u8>, format: ImageFormat },
 }
 
 pub struct TextField {
@@ -128,7 +126,6 @@ pub struct TextField {
     marked_range: Option<Range<usize>>,
     secure: bool,
     multiline: bool,
-    submit_on_enter: bool,
     borderless: bool,
     theme_mode: ThemeMode,
     click_origin: Option<(f32, f32)>,
@@ -155,7 +152,6 @@ impl TextField {
             marked_range: None,
             secure: false,
             multiline: false,
-            submit_on_enter: false,
             borderless: false,
             theme_mode: ThemeMode::Light,
             click_origin: None,
@@ -173,14 +169,13 @@ impl TextField {
         field
     }
 
-    pub fn new_chat_composer(
+    pub fn new_multiline(
         placeholder: impl Into<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut field = Self::new(placeholder, window, cx);
         field.multiline = true;
-        field.submit_on_enter = true;
         field.borderless = true;
         field
     }
@@ -201,58 +196,6 @@ impl TextField {
 
     pub fn text(&self) -> String {
         self.content.clone()
-    }
-
-    pub fn cursor_token_before_caret(&self) -> Option<(Range<usize>, char, String)> {
-        let caret = self.selected_range.start.min(self.content.len());
-        if !self.content.is_char_boundary(caret) || caret == 0 {
-            return None;
-        }
-        let prefix = &self.content[..caret];
-        let mut token_start = 0;
-        for (idx, ch) in prefix.char_indices().rev() {
-            if ch.is_whitespace() {
-                token_start = idx + ch.len_utf8();
-                break;
-            }
-        }
-        let token = &self.content[token_start..caret];
-        let mut chars = token.chars();
-        let trigger = chars.next()?;
-        if trigger == '@' {
-            let valid_prefix = token_start == 0
-                || self.content[..token_start]
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_whitespace);
-            return valid_prefix.then(|| (token_start..caret, trigger, chars.as_str().to_string()));
-        }
-        if trigger == '/' {
-            let line_start = token_start == 0 || self.content.as_bytes()[token_start - 1] == b'\n';
-            return line_start.then(|| (token_start..caret, trigger, chars.as_str().to_string()));
-        }
-        None
-    }
-
-    pub fn replace_byte_range(
-        &mut self,
-        range: Range<usize>,
-        replacement: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let start = range.start.min(self.content.len());
-        let end = range.end.min(self.content.len()).max(start);
-        if !self.content.is_char_boundary(start) || !self.content.is_char_boundary(end) {
-            return;
-        }
-        self.content.replace_range(start..end, replacement);
-        let cursor = start + replacement.len();
-        self.selected_range = cursor..cursor;
-        self.marked_range = None;
-        window.invalidate_character_coordinates();
-        cx.emit(TextFieldEvent::Changed);
-        cx.notify();
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
@@ -508,15 +451,6 @@ impl TextField {
 
     fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
-            for entry in &item.entries {
-                if let ClipboardEntry::Image(image) = entry {
-                    cx.emit(TextFieldEvent::PasteImage {
-                        bytes: image.bytes.clone(),
-                        format: image.format,
-                    });
-                    return;
-                }
-            }
             if let Some(text) = item.text() {
                 self.replace_text_in_range(None, &text, window, cx);
             }
@@ -861,13 +795,7 @@ impl Render for TextField {
                 let ctrl_or_cmd = ctrl || platform;
 
                 let handled = match key {
-                    "enter" if this.submit_on_enter && !shift && !alt => {
-                        cx.emit(TextFieldEvent::Submit {
-                            steer: ctrl || platform,
-                        });
-                        true
-                    }
-                    "enter" if this.multiline && !alt && (!ctrl || this.submit_on_enter) => {
+                    "enter" if this.multiline && !alt && !ctrl => {
                         this.replace_text_in_range(None, "\n", window, cx);
                         true
                     }

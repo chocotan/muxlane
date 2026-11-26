@@ -1,7 +1,10 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webFrame } from "electron";
 import type {
+  AddHostInput,
   DaemonConnectionStatus,
+  HostsState,
   MuxlaneDesktopBridge,
+  RelayConfig,
   RpcEventMessage,
 } from "../src/shared/protocol";
 
@@ -18,8 +21,39 @@ const api: MuxlaneDesktopBridge = {
   pickDirectory(): Promise<string | null> {
     return ipcRenderer.invoke("muxlane:pick-directory");
   },
+  pickFile(title?: string): Promise<string | null> {
+    return ipcRenderer.invoke("muxlane:pick-file", title);
+  },
   openExternal(url: string): Promise<void> {
     return ipcRenderer.invoke("muxlane:open-external", url);
+  },
+  setZoomFactor(factor: number): void {
+    const clamped = Math.min(1.5, Math.max(0.75, factor));
+    webFrame.setZoomFactor(clamped);
+  },
+  listHosts(): Promise<HostsState> {
+    return ipcRenderer.invoke("muxlane:hosts-list");
+  },
+  addHost(input: AddHostInput): Promise<HostsState> {
+    return ipcRenderer.invoke("muxlane:hosts-add", input);
+  },
+  removeHost(hostId: string): Promise<HostsState> {
+    return ipcRenderer.invoke("muxlane:hosts-remove", hostId);
+  },
+  selectHost(hostId: string): Promise<HostsState> {
+    return ipcRenderer.invoke("muxlane:hosts-select", hostId);
+  },
+  getRelayConfig(): Promise<RelayConfig> {
+    return ipcRenderer.invoke("muxlane:relay-get");
+  },
+  saveRelayConfig(cfg: RelayConfig): Promise<RelayConfig> {
+    return ipcRenderer.invoke("muxlane:relay-save", cfg);
+  },
+  getGitChanges(cwd: string) {
+    return ipcRenderer.invoke("muxlane:git-changes", cwd);
+  },
+  getGitFileDiff(cwd: string, filePath: string, status: string) {
+    return ipcRenderer.invoke("muxlane:git-file-diff", cwd, filePath, status);
   },
   onEvent(handler: (msg: RpcEventMessage) => void): () => void {
     const listener = (_ev: Electron.IpcRendererEvent, msg: RpcEventMessage) => handler(msg);
@@ -31,6 +65,11 @@ const api: MuxlaneDesktopBridge = {
       handler(status);
     ipcRenderer.on("muxlane:status", listener);
     return () => ipcRenderer.removeListener("muxlane:status", listener);
+  },
+  onHostsChanged(handler: (state: HostsState) => void): () => void {
+    const listener = (_ev: Electron.IpcRendererEvent, state: HostsState) => handler(state);
+    ipcRenderer.on("muxlane:hosts-changed", listener);
+    return () => ipcRenderer.removeListener("muxlane:hosts-changed", listener);
   },
 };
 

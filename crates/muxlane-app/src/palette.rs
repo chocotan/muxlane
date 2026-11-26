@@ -310,11 +310,7 @@ impl MuxlaneApp {
             }
             PaletteItem::Preset { preset } => {
                 self.palette_open = false;
-                if preset.chat_driver_kind().is_some() {
-                    self.spawn_chat_preset(&preset, window, cx);
-                } else {
-                    self.spawn_preset(&preset, window, cx);
-                }
+                self.spawn_preset(&preset, window, cx);
             }
             PaletteItem::Action { id, .. } => {
                 self.palette_open = false;
@@ -581,94 +577,35 @@ impl MuxlaneApp {
                                     .child(path),
                             )
                     }
-                    PaletteItem::Preset { preset } => {
-                        let supports_chat = preset.chat_driver_kind().is_some();
-                        let preset_term = preset.clone();
-                        div()
-                            .id(gpui::ElementId::Name(
-                                format!("pal-preset-{}", preset.id).into(),
-                            ))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .text_size(ui_px(12.))
-                            .text_color(rgba(theme.fg0))
-                            .when(is_selected, |el| el.bg(rgba(theme.bg2)))
-                            .hover(|s| s.bg(rgba(theme.bg2)))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                this.execute_palette_item(item_for_click.clone(), window, cx);
-                            }))
-                            .child(panel_icon(PLUS_ICON, theme.accent))
-                            .child(
-                                i18n::text(self.language, "palette.new")
-                                    .replace("{name}", &preset.label),
-                            )
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .when(supports_chat, |el| {
-                                        el.child(
-                                            div()
-                                                .px_1p5()
-                                                .py_0p5()
-                                                .bg(rgba(crate::ui::mix(
-                                                    theme.accent,
-                                                    theme.bg1,
-                                                    0.15,
-                                                )))
-                                                .border_1()
-                                                .border_color(rgba(theme.accent))
-                                                .text_size(ui_px(9.5))
-                                                .text_color(rgba(theme.accent))
-                                                .child(i18n::text(
-                                                    self.language,
-                                                    "chat.launch_chat",
-                                                )),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(gpui::ElementId::Name(
-                                                    format!("pal-preset-term-{}", preset.id).into(),
-                                                ))
-                                                .px_1p5()
-                                                .py_0p5()
-                                                .bg(rgba(theme.bg0))
-                                                .border_1()
-                                                .border_color(rgba(theme.line))
-                                                .text_size(ui_px(9.5))
-                                                .text_color(rgba(theme.fg1))
-                                                .hover(|s| {
-                                                    s.bg(rgba(theme.bg2))
-                                                        .text_color(rgba(theme.fg0))
-                                                })
-                                                .on_click(cx.listener(
-                                                    move |this, _ev, window, cx| {
-                                                        cx.stop_propagation();
-                                                        this.palette_open = false;
-                                                        this.spawn_preset(&preset_term, window, cx);
-                                                        cx.notify();
-                                                    },
-                                                ))
-                                                .child(i18n::text(
-                                                    self.language,
-                                                    "chat.launch_term",
-                                                )),
-                                        )
-                                    })
-                                    .child(
-                                        div()
-                                            .text_size(ui_px(10.))
-                                            .text_color(rgba(theme.fg2))
-                                            .child(preset.program),
-                                    ),
-                            )
-                    }
+                    PaletteItem::Preset { preset } => div()
+                        .id(gpui::ElementId::Name(
+                            format!("pal-preset-{}", preset.id).into(),
+                        ))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .text_size(ui_px(12.))
+                        .text_color(rgba(theme.fg0))
+                        .when(is_selected, |el| el.bg(rgba(theme.bg2)))
+                        .hover(|s| s.bg(rgba(theme.bg2)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.execute_palette_item(item_for_click.clone(), window, cx);
+                        }))
+                        .child(panel_icon(PLUS_ICON, theme.accent))
+                        .child(
+                            i18n::text(self.language, "palette.new")
+                                .replace("{name}", &preset.label),
+                        )
+                        .child(
+                            div()
+                                .ml_auto()
+                                .text_size(ui_px(10.))
+                                .text_color(rgba(theme.fg2))
+                                .child(preset.program),
+                        ),
                     PaletteItem::Action {
                         label,
                         shortcut,
@@ -857,8 +794,6 @@ impl MuxlaneApp {
             let is_focused = focused_column == PaletteColumn::Presets && index == preset_index;
             let label = i18n::text(self.language, "palette.new").replace("{name}", &preset.label);
             let program = preset.program.clone();
-            let supports_chat = preset.chat_driver_kind().is_some();
-            let preset_term = preset.clone();
             preset_list = preset_list.child(
                 div()
                     .id(gpui::ElementId::Name(
@@ -877,11 +812,7 @@ impl MuxlaneApp {
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.palette_open = false;
                         // 不能在此清 new_session_target：spawn_preset 要 take 它决定项目。
-                        if supports_chat {
-                            this.spawn_chat_preset(&preset, window, cx);
-                        } else {
-                            this.spawn_preset(&preset, window, cx);
-                        }
+                        this.spawn_preset(&preset, window, cx);
                         cx.notify();
                     }))
                     .child(panel_icon(PLUS_ICON, theme.accent))
@@ -889,52 +820,9 @@ impl MuxlaneApp {
                     .child(
                         div()
                             .ml_auto()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .when(supports_chat, |el| {
-                                el.child(
-                                    div()
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .bg(rgba(crate::ui::mix(theme.accent, theme.bg1, 0.15)))
-                                        .border_1()
-                                        .border_color(rgba(theme.accent))
-                                        .text_size(ui_px(9.5))
-                                        .text_color(rgba(theme.accent))
-                                        .child(i18n::text(self.language, "chat.launch_chat")),
-                                )
-                                .child(
-                                    div()
-                                        .id(gpui::ElementId::Name(
-                                            format!("pal-col-preset-term-{}", preset_term.id)
-                                                .into(),
-                                        ))
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .bg(rgba(theme.bg0))
-                                        .border_1()
-                                        .border_color(rgba(theme.line))
-                                        .text_size(ui_px(9.5))
-                                        .text_color(rgba(theme.fg1))
-                                        .hover(|s| {
-                                            s.bg(rgba(theme.bg2)).text_color(rgba(theme.fg0))
-                                        })
-                                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                                            cx.stop_propagation();
-                                            this.palette_open = false;
-                                            this.spawn_preset(&preset_term, window, cx);
-                                            cx.notify();
-                                        }))
-                                        .child(i18n::text(self.language, "chat.launch_term")),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .text_size(ui_px(10.))
-                                    .text_color(rgba(theme.fg2))
-                                    .child(program),
-                            ),
+                            .text_size(ui_px(10.))
+                            .text_color(rgba(theme.fg2))
+                            .child(program),
                     ),
             );
         }

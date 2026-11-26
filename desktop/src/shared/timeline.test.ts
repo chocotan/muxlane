@@ -116,3 +116,67 @@ describe("timeline reducer & display helpers", () => {
     expect(agents.map((a) => a.id)).toEqual(["pi", "opencode", "claude"]);
   });
 });
+import {
+  computeCacheHitPct,
+  computeTps,
+  formatDurationMs,
+  formatTokensCompact,
+} from "./formatStats";
+
+describe("usage reducer & formatStats helpers", () => {
+  it("applies set_assistant_usage onto assistant_text entries", () => {
+    const history: ChatHistoryResult = {
+      agent: "pie_1",
+      seq: 1,
+      meta: defaultChatMeta(),
+      entries: [
+        {
+          type: "assistant_text",
+          id: "a1",
+          text: "Done.",
+          streaming: false,
+          model: "DeepSeek",
+          created_at_ms: 100,
+        },
+      ],
+      pending_approvals: [],
+    };
+    let state = timelineFromHistory(history);
+    state = applyChatDelta(state, {
+      agent: "pie_1",
+      seq: 2,
+      delta: {
+        op: "set_assistant_usage",
+        entry_id: "a1",
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 200,
+          cache_read_tokens: 3000,
+          cache_write_tokens: 0,
+          reasoning_tokens: 0,
+          total_tokens: 4200,
+          duration_ms: 2000,
+          ttft_ms: 350,
+          cost_usd: 0.004,
+        },
+      },
+    });
+    expect(state.entries[0]).toMatchObject({
+      type: "assistant_text",
+      usage: { total_tokens: 4200, duration_ms: 2000 },
+    });
+  });
+
+  it("formats compact tokens, durations, cache hit %, and TPS cleanly", () => {
+    expect(formatTokensCompact(850)).toBe("850");
+    expect(formatTokensCompact(4200)).toBe("4.2K");
+    expect(formatTokensCompact(150_000)).toBe("150K");
+    expect(formatTokensCompact(1_250_000)).toBe("1.25M");
+    expect(formatDurationMs(420)).toBe("420ms");
+    expect(formatDurationMs(2450)).toBe("2.5s");
+    expect(formatDurationMs(75_000)).toBe("1m 15s");
+    expect(computeCacheHitPct(1000, 3000)).toBe(75);
+    expect(computeTps(200, 2000)).toBe("100");
+    expect(computeTps(50, 2000)).toBe("25.0");
+  });
+});

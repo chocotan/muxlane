@@ -24,7 +24,7 @@ import langToml from "shiki/langs/toml.mjs";
 import langTsx from "shiki/langs/tsx.mjs";
 import langTypescript from "shiki/langs/typescript.mjs";
 import langYaml from "shiki/langs/yaml.mjs";
-import type { AppTheme } from "../state/useTheme";
+import { isDarkTheme, type AppTheme } from "../state/useTheme";
 
 let highlighterPromise: Promise<HighlighterCore> | null = null;
 const loadedLangs = new Set<string>([
@@ -105,7 +105,7 @@ const CodeBlock: React.FC<{ language: string; code: string; theme: AppTheme }> =
     const [html, setHtml] = useState<string | null>(null);
     const [copied, setCopied] = useState(false);
     const lang = useMemo(() => normalizeLang(language), [language]);
-    const lineCount = useMemo(() => code.split("\n").length, [code]);
+    const shikiTheme = isDarkTheme(theme) ? "github-dark-default" : "github-light-default";
 
     useEffect(() => {
       let active = true;
@@ -123,7 +123,7 @@ const CodeBlock: React.FC<{ language: string; code: string; theme: AppTheme }> =
           }
           const rendered = hl.codeToHtml(code, {
             lang: resolved,
-            theme: theme === "light" ? "github-light-default" : "github-dark-default",
+            theme: shikiTheme,
           });
           if (active) setHtml(rendered);
         })
@@ -133,7 +133,7 @@ const CodeBlock: React.FC<{ language: string; code: string; theme: AppTheme }> =
       return () => {
         active = false;
       };
-    }, [code, lang, theme]);
+    }, [code, lang, shikiTheme]);
 
     const handleCopy = () => {
       void navigator.clipboard.writeText(code);
@@ -142,24 +142,21 @@ const CodeBlock: React.FC<{ language: string; code: string; theme: AppTheme }> =
     };
 
     return (
-      <div className="group/code my-3 border border-line-subtle bg-code-surface select-text">
-        <div className="flex h-8 items-center justify-between border-b border-line-subtle bg-code-header px-3 font-mono text-[11px] text-ink-muted select-none">
-          <div className="flex items-center gap-2">
-            <span className="lowercase text-ink-2">{lang}</span>
-            <span className="text-ink-faint">·</span>
-            <span className="text-ink-muted">{lineCount} lines</span>
-          </div>
+      <div className="group/code my-1.5 border border-line-subtle bg-code-surface select-text">
+        <div className="flex h-7 items-center justify-between border-b border-line-subtle bg-code-header px-3 font-mono text-[11px] text-ink-muted select-none">
+          <span className="lowercase text-ink-2">{lang}</span>
           <button
             type="button"
             onClick={handleCopy}
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
+            title={copied ? "已复制" : "复制代码"}
+            aria-label={copied ? "已复制" : "复制代码"}
+            className="flex h-6 w-6 shrink-0 items-center justify-center text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
           >
             {copied ? (
-              <Check className="h-3 w-3 text-success" />
+              <Check className="h-3.5 w-3.5 text-success" />
             ) : (
-              <Copy className="h-3 w-3" />
+              <Copy className="h-3.5 w-3.5" />
             )}
-            <span>{copied ? "已复制" : "复制"}</span>
           </button>
         </div>
         {html ? (
@@ -168,7 +165,7 @@ const CodeBlock: React.FC<{ language: string; code: string; theme: AppTheme }> =
             dangerouslySetInnerHTML={{ __html: html }}
           />
         ) : (
-          <pre className="m-0 overflow-x-auto bg-code-surface px-3.5 py-3 font-mono text-[12.5px] leading-[1.58] text-ink">
+          <pre className="m-0 overflow-x-auto bg-code-surface px-3 py-2 font-mono text-[12.5px] leading-[1.4] text-ink">
             <code>{code}</code>
           </pre>
         )}
@@ -185,7 +182,7 @@ export const MarkdownView: React.FC<{
   streaming?: boolean;
 }> = React.memo(({ text, theme, streaming }) => {
   return (
-    <div className="mux-markdown select-text">
+    <div className="mux-markdown min-w-0 overflow-x-hidden select-text">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -204,6 +201,13 @@ export const MarkdownView: React.FC<{
           },
           pre({ children }) {
             return <>{children}</>;
+          },
+          table({ children }) {
+            return (
+              <div className="my-1.5 w-full overflow-x-auto">
+                <table>{children}</table>
+              </div>
+            );
           },
           a({ href, children }) {
             return (

@@ -60,7 +60,7 @@ impl BotStudioState {
         ) -> Entity<TextField> {
             cx.new(|cx| {
                 let mut f = if multi {
-                    TextField::new_chat_composer(placeholder, window, cx)
+                    TextField::new_multiline(placeholder, window, cx)
                 } else {
                     TextField::new(placeholder, window, cx)
                 };

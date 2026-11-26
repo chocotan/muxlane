@@ -124,6 +124,7 @@ export type TimelineEntry =
       text: string;
       streaming: boolean;
       model?: string | null;
+      usage?: MessageUsage | null;
       created_at_ms: number;
     }
   | {
@@ -194,6 +195,100 @@ export interface ChatModelInfo {
   name: string;
 }
 
+export interface ChatSlashCommand {
+  name: string;
+  description?: string | null;
+  /** "command" | "skill" | "prompt" */
+  kind: "command" | "skill" | "prompt" | string;
+  source?: string | null;
+  argument_hint?: string | null;
+}
+
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  behavior: StreamingBehavior;
+  attachments_count?: number;
+}
+
+export interface MessageUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  cost_usd?: number | null;
+  duration_ms?: number | null;
+  ttft_ms?: number | null;
+}
+
+export interface SessionStats {
+  turns: number;
+  steps: number;
+  tool_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  total_cost_usd?: number | null;
+  llm_ms: number;
+  tool_ms: number;
+  ttft_ms: number;
+  ttft_steps: number;
+}
+
+export interface SessionGoal {
+  objective: string;
+  status: "active" | "paused" | "complete" | string;
+  rounds: number;
+  max_rounds: number;
+  armed: boolean;
+}
+
+export interface SessionTask {
+  id: string;
+  subject: string;
+  description?: string | null;
+  status: "pending" | "in_progress" | "completed" | string;
+  active_form?: string | null;
+  agent_type?: string | null;
+  owner?: string | null;
+  blocked_by: string[];
+}
+
+export interface SessionSubagent {
+  id: string;
+  agent: string;
+  description: string;
+  status: "queued" | "running" | "completed" | "error" | "stopped" | "interrupted" | string;
+  model?: string | null;
+  turns: number;
+  max_turns?: number | null;
+  active_tool?: string | null;
+  output?: string | null;
+  error?: string | null;
+  task_id?: string | null;
+  started_at_ms?: number | null;
+  finished_at_ms?: number | null;
+}
+
+export interface BackgroundJob {
+  id: string;
+  name: string;
+  description: string;
+  command?: string | null;
+  status: "running" | "completed" | "failed" | "killed" | string;
+  exit_code?: number | null;
+  output_path?: string | null;
+  bytes_written?: number | null;
+  error?: string | null;
+  started_at_ms?: number | null;
+  finished_at_ms?: number | null;
+}
+
 export interface ChatSessionMeta {
   driver: SessionDriverMode;
   supports_chat_input: boolean;
@@ -205,10 +300,17 @@ export interface ChatSessionMeta {
   available_models: ChatModelInfo[];
   thinking_level?: string | null;
   available_thinking_levels: string[];
+  available_commands?: ChatSlashCommand[];
+  queued_messages?: QueuedMessage[];
   is_streaming: boolean;
   context_used_tokens?: number | null;
   context_window_tokens?: number | null;
   total_cost_usd?: number | null;
+  stats?: SessionStats | null;
+  goal?: SessionGoal | null;
+  tasks?: SessionTask[];
+  subagents?: SessionSubagent[];
+  background_jobs?: BackgroundJob[];
   last_error?: string | null;
 }
 
@@ -226,6 +328,7 @@ export type ChatDeltaOp =
       finish?: boolean;
     }
   | { op: "finish_entry"; entry_id: string; duration_ms?: number | null }
+  | { op: "set_assistant_usage"; entry_id: string; usage: MessageUsage }
   | { op: "meta_updated"; meta: ChatSessionMeta }
   | { op: "approval_requested"; approval: PendingApproval }
   | { op: "approval_resolved"; approval_id: string }
@@ -434,14 +537,79 @@ export function presetChatDriver(agentType: AgentType): ChatDriverKind | null {
   return null;
 }
 
+export type HostKind = "local" | "ssh" | "socket";
+export type SshAuthKind = "ssh_config" | "public_key";
+
+export interface HostEntry {
+  id: string;
+  name: string;
+  kind: HostKind;
+  target: string;
+  authKind?: SshAuthKind;
+  username?: string;
+  port?: number;
+  identityFile?: string;
+  remoteSocketPath?: string;
+}
+
+export interface AddHostInput {
+  name?: string;
+  kind: "ssh" | "socket";
+  target: string;
+  authKind?: SshAuthKind;
+  username?: string;
+  port?: number;
+  identityFile?: string;
+  remoteSocketPath?: string;
+}
+
+export interface HostsState {
+  activeHostId: string;
+  hosts: HostEntry[];
+  tunnelStatus?: string | null;
+}
+
+export interface RelayConfig {
+  relayEnabled: boolean;
+  relayUrl: string;
+}
+
+export interface WorkspaceGitFile {
+  path: string;
+  /** M | A | D | R | ? | U */
+  status: string;
+  staged: boolean;
+  unstaged: boolean;
+  additions: number;
+  deletions: number;
+}
+
+export interface WorkspaceGitChanges {
+  isRepo: boolean;
+  branch: string | null;
+  files: WorkspaceGitFile[];
+  error?: string | null;
+}
+
 export interface MuxlaneDesktopBridge {
   rpc<T = unknown>(method: string, params?: unknown): Promise<T>;
   getStatus(): Promise<DaemonConnectionStatus>;
   reconnect(): Promise<void>;
   pickDirectory(): Promise<string | null>;
+  pickFile(title?: string): Promise<string | null>;
   openExternal(url: string): Promise<void>;
+  setZoomFactor(factor: number): void;
+  listHosts(): Promise<HostsState>;
+  addHost(input: AddHostInput): Promise<HostsState>;
+  removeHost(hostId: string): Promise<HostsState>;
+  selectHost(hostId: string): Promise<HostsState>;
+  getRelayConfig(): Promise<RelayConfig>;
+  saveRelayConfig(cfg: RelayConfig): Promise<RelayConfig>;
+  getGitChanges(cwd: string): Promise<WorkspaceGitChanges>;
+  getGitFileDiff(cwd: string, filePath: string, status: string): Promise<string>;
   onEvent(handler: (msg: RpcEventMessage) => void): () => void;
   onStatus(handler: (status: DaemonConnectionStatus) => void): () => void;
+  onHostsChanged(handler: (state: HostsState) => void): () => void;
 }
 
 declare global {

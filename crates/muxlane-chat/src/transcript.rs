@@ -1,7 +1,7 @@
 //! Pi / Pie 磁盘 JSONL Session 实时解析（用于 PTY/tmux 会话向 Chat 视图实时增量同步与续接）。
 use muxlane_core::chat::{
-    ChatModelInfo, ChatSessionMeta, NoticeLevel, SessionDriverMode, TimelineEntry, ToolCallKind,
-    ToolCallState, ToolDiff,
+    ChatModelInfo, ChatSessionMeta, MessageUsage, NoticeLevel, SessionDriverMode, TimelineEntry,
+    ToolCallKind, ToolCallState, ToolDiff,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -26,53 +26,250 @@ pub fn pi_session_dir_name(cwd: &Path) -> String {
     format!("--{safe}--")
 }
 
+pub fn pi_sessions_roots(is_pie: bool) -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    if is_pie {
+        // Pie's getAgentDir() is ~/.pie -> sessions live in ~/.pie/sessions/.
+        // Keep ~/.pie/agent/sessions as secondary fallback for older builds.
+        vec![home.join(".pie/sessions"), home.join(".pie/agent/sessions")]
+    } else {
+        vec![home.join(".pi/agent/sessions"), home.join(".pi/sessions")]
+    }
+}
+
 pub fn pi_sessions_root(is_pie: bool) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    Some(
-        home.join(if is_pie { ".pie" } else { ".pi" })
-            .join("agent/sessions"),
+    pi_sessions_roots(is_pie).into_iter().next()
+}
+
+/// Converts a proleptic Gregorian calendar date to days since 1970-01-01 (Howard Hinnant algorithm).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m = u64::from(month);
+    let d = u64::from(day);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + (doe as i64) - 719_468
+}
+
+/// Parses Pi/Pie session filename timestamp prefix (`YYYY-MM-DDTHH-MM-SS-mmmZ_<uuid>.jsonl`) into Unix seconds.
+pub fn parse_session_filename_unix_secs(path: &Path) -> Option<u64> {
+    let name = path.file_name()?.to_str()?;
+    // Prefix: "2026-11-25T06-29-18" (19 bytes)
+    if name.len() < 19 {
+        return None;
+    }
+    let bytes = name.as_bytes();
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b'-'
+        || bytes[16] != b'-'
+    {
+        return None;
+    }
+    let year: i64 = name[0..4].parse().ok()?;
+    let month: u32 = name[5..7].parse().ok()?;
+    let day: u32 = name[8..10].parse().ok()?;
+    let hour: u64 = name[11..13].parse().ok()?;
+    let min: u64 = name[14..16].parse().ok()?;
+    let sec: u64 = name[17..19].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    if days < 0 {
+        return None;
+    }
+    Some((days as u64) * 86_400 + hour * 3_600 + min * 60 + sec)
+}
+
+pub fn discover_pi_session_file_in_roots(
+    roots: &[PathBuf],
+    cwds: &[&Path],
+    started_after_unix_secs: u64,
+    proc_start_unix_secs: Option<u64>,
+    allow_older_fallback: bool,
+    claimed_files: &[PathBuf],
+) -> Option<PathBuf> {
+    let mut candidates: Vec<(PathBuf, u64, Option<u64>)> = Vec::new();
+    let mut seen_dirs: Vec<PathBuf> = Vec::new();
+
+    for cwd in cwds {
+        let dir_name = pi_session_dir_name(cwd);
+        for root in roots {
+            let dir = root.join(&dir_name);
+            if seen_dirs.contains(&dir) {
+                continue;
+            }
+            seen_dirs.push(dir.clone());
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if claimed_files.iter().any(|c| c == &path) {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                let Ok(modified) = meta.modified() else {
+                    continue;
+                };
+                let mod_secs = modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let created_secs = parse_session_filename_unix_secs(&path);
+                candidates.push((path, mod_secs, created_secs));
+            }
+        }
+        // If the primary (live pane) cwd already has matching session files, prefer them
+        // over a stale project fallback cwd.
+        if !candidates.is_empty() {
+            break;
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Freshly spawned sessions (`allow_older_fallback == false`) MUST NOT bind an older
+    // transcript created before this session launched. Wait until Pi/Pie writes its own file.
+    if !allow_older_fallback {
+        let floor = started_after_unix_secs.saturating_sub(2);
+        return candidates
+            .into_iter()
+            .filter(|(_, mod_secs, created_opt)| {
+                created_opt.map_or(*mod_secs >= floor, |created| created >= floor)
+            })
+            .max_by_key(|(_, mod_secs, _)| *mod_secs)
+            .map(|(path, _, _)| path);
+    }
+
+    // Tier 1 (pre-existing sessions): Match by exact foreground process birth timestamp against
+    // session filename timestamp. Uniquely binds concurrent Pi/Pie tabs in the same directory.
+    if let Some(proc_start) = proc_start_unix_secs {
+        let mut best_birth: Option<(u64, u64, &PathBuf)> = None;
+        for (path, mod_secs, created_opt) in &candidates {
+            let Some(created) = *created_opt else {
+                continue;
+            };
+            let delta = created.abs_diff(proc_start);
+            if delta > 120 {
+                continue;
+            }
+            let penalty = if created + 5 >= proc_start { 0 } else { 15 };
+            let score = delta + penalty;
+            let replace = match best_birth {
+                None => true,
+                Some((best_score, best_mod, _)) => {
+                    score < best_score || (score == best_score && *mod_secs > best_mod)
+                }
+            };
+            if replace {
+                best_birth = Some((score, *mod_secs, path));
+            }
+        }
+        if let Some((_, _, path)) = best_birth {
+            return Some(path.clone());
+        }
+    }
+
+    // Tier 2: Most recently modified unclaimed session active since `started_after_unix_secs`.
+    if let Some((path, _, _)) = candidates
+        .iter()
+        .filter(|(_, mod_secs, _)| mod_secs + 2 >= started_after_unix_secs)
+        .max_by_key(|(_, mod_secs, _)| *mod_secs)
+    {
+        return Some(path.clone());
+    }
+
+    // Tier 3: Fallback to the latest unclaimed JSONL in this cwd so older idle sessions hydrate.
+    candidates
+        .into_iter()
+        .max_by_key(|(_, mod_secs, _)| *mod_secs)
+        .map(|(path, _, _)| path)
+}
+
+/// 根据主工作目录（优先实时 pane cwd）、回退项目目录、进程启动时间与活跃时间戳发现匹配的 Pi/Pie session JSONL 文件。
+pub fn discover_pi_session_file_with_context(
+    primary_cwd: &Path,
+    fallback_cwd: Option<&Path>,
+    is_pie: bool,
+    started_after_unix_secs: u64,
+    proc_start_unix_secs: Option<u64>,
+    allow_older_fallback: bool,
+    claimed_files: &[PathBuf],
+) -> Option<PathBuf> {
+    let roots = pi_sessions_roots(is_pie);
+    let mut cwds = vec![primary_cwd];
+    if let Some(fallback) = fallback_cwd {
+        if fallback != primary_cwd {
+            cwds.push(fallback);
+        }
+    }
+    discover_pi_session_file_in_roots(
+        &roots,
+        &cwds,
+        started_after_unix_secs,
+        proc_start_unix_secs,
+        allow_older_fallback,
+        claimed_files,
     )
 }
 
-/// 根据 cwd 与启动时间戳发现匹配的 Pi session JSONL 文件。
+/// 根据 cwd 与启动时间戳发现匹配的 Pi/Pie session JSONL 文件。
 pub fn discover_pi_session_file(
     cwd: &Path,
     is_pie: bool,
     started_after_unix_secs: u64,
 ) -> Option<PathBuf> {
-    let root = pi_sessions_root(is_pie)?;
-    let dir = root.join(pi_session_dir_name(cwd));
-    let entries = std::fs::read_dir(&dir).ok()?;
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        let Ok(modified) = meta.modified() else {
-            continue;
-        };
-        let mod_secs = modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if mod_secs + 2 < started_after_unix_secs {
-            continue;
-        }
-        if best.as_ref().is_none_or(|(prev, _)| modified > *prev) {
-            best = Some((modified, path));
-        }
-    }
-    best.map(|(_, path)| path)
+    discover_pi_session_file_with_context(
+        cwd,
+        None,
+        is_pie,
+        started_after_unix_secs,
+        None,
+        false,
+        &[],
+    )
 }
 
 #[derive(Debug, Clone)]
 struct PiTranscriptParserState {
     meta: ChatSessionMeta,
     tool_calls: HashMap<String, TimelineEntry>,
+    explicit_title: Option<String>,
+    derived_title: Option<String>,
+}
+
+fn derive_title_from_prompt(text: &str) -> Option<String> {
+    let first_line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    if first_line.starts_with('/') {
+        return None;
+    }
+    let clean: String = first_line.chars().filter(|ch| !ch.is_control()).collect();
+    let trimmed = clean.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const MAX_CHARS: usize = 42;
+    let mut chars = trimmed.chars();
+    let head: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        Some(format!("{}…", head.trim_end()))
+    } else {
+        Some(head)
+    }
 }
 
 impl PiTranscriptParserState {
@@ -87,16 +284,25 @@ impl PiTranscriptParserState {
                 ..Default::default()
             },
             tool_calls: HashMap::new(),
+            explicit_title: None,
+            derived_title: None,
         }
+    }
+
+    fn session_title(&self) -> Option<String> {
+        self.explicit_title
+            .clone()
+            .or_else(|| self.derived_title.clone())
     }
 
     fn parse_record(
         &mut self,
         record: &Value,
         live_tools_running: bool,
-    ) -> (bool, Vec<TimelineEntry>) {
+    ) -> (bool, Vec<TimelineEntry>, Option<TranscriptTurnState>) {
         let mut meta_changed = false;
         let mut out = Vec::new();
+        let mut turn_state = None;
         let kind = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match kind {
             "session" => {
@@ -104,6 +310,23 @@ impl PiTranscriptParserState {
                     if self.meta.provider_session_id.as_deref() != Some(id) {
                         self.meta.provider_session_id = Some(id.to_string());
                         meta_changed = true;
+                    }
+                }
+            }
+            "session_info" => {
+                if let Some(name) = record
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let clean: String = name
+                        .chars()
+                        .filter(|ch| !ch.is_control())
+                        .take(80)
+                        .collect();
+                    if !clean.is_empty() {
+                        self.explicit_title = Some(clean);
                     }
                 }
             }
@@ -157,6 +380,7 @@ impl PiTranscriptParserState {
                     text: summary,
                     created_at_ms: parse_timestamp_ms(record.get("timestamp")),
                 });
+                turn_state = Some(TranscriptTurnState::Completed);
             }
             "message" => {
                 let entry_id = record
@@ -165,7 +389,7 @@ impl PiTranscriptParserState {
                     .unwrap_or("msg")
                     .to_string();
                 let Some(message) = record.get("message") else {
-                    return (meta_changed, out);
+                    return (meta_changed, out, turn_state);
                 };
                 let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 let ts = message
@@ -176,6 +400,9 @@ impl PiTranscriptParserState {
                     "user" => {
                         let text = extract_message_text(message);
                         if !text.is_empty() {
+                            if self.derived_title.is_none() {
+                                self.derived_title = derive_title_from_prompt(&text);
+                            }
                             out.push(TimelineEntry::UserMessage {
                                 id: format!("pi-user-{entry_id}"),
                                 turn_id: None,
@@ -184,6 +411,7 @@ impl PiTranscriptParserState {
                                 created_at_ms: ts,
                             });
                         }
+                        turn_state = Some(TranscriptTurnState::Active);
                     }
                     "assistant" => {
                         let model = message
@@ -205,7 +433,22 @@ impl PiTranscriptParserState {
                                 meta_changed = true;
                             }
                         }
+                        let msg_usage = message.get("usage").and_then(parse_pi_usage);
+                        let mut has_tool_call = false;
                         if let Some(parts) = message.get("content").and_then(|v| v.as_array()) {
+                            let last_text_idx = parts
+                                .iter()
+                                .enumerate()
+                                .rev()
+                                .find(|(_, p)| {
+                                    p.get("type").and_then(|v| v.as_str()) == Some("text")
+                                        && !p
+                                            .get("text")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .is_empty()
+                                })
+                                .map(|(i, _)| i);
                             for (idx, part) in parts.iter().enumerate() {
                                 let part_type =
                                     part.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -241,11 +484,17 @@ impl PiTranscriptParserState {
                                                 text,
                                                 streaming: false,
                                                 model: model.clone(),
+                                                usage: if last_text_idx == Some(idx) {
+                                                    msg_usage.clone().map(Box::new)
+                                                } else {
+                                                    None
+                                                },
                                                 created_at_ms: ts,
                                             });
                                         }
                                     }
                                     "toolCall" => {
+                                        has_tool_call = true;
                                         let call_id = part
                                             .get("id")
                                             .and_then(|v| v.as_str())
@@ -295,9 +544,18 @@ impl PiTranscriptParserState {
                                     text,
                                     streaming: false,
                                     model,
+                                    usage: msg_usage.map(Box::new),
                                     created_at_ms: ts,
                                 });
                             }
+                        }
+                        let stop_reason = message.get("stopReason").and_then(|v| v.as_str());
+                        if matches!(stop_reason, Some("toolUse"))
+                            || (stop_reason.is_none() && has_tool_call)
+                        {
+                            turn_state = Some(TranscriptTurnState::Active);
+                        } else {
+                            turn_state = Some(TranscriptTurnState::Completed);
                         }
                     }
                     "toolResult" => {
@@ -310,16 +568,21 @@ impl PiTranscriptParserState {
                             .get("isError")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        let tool_duration = message.get("durationMs").and_then(|v| v.as_u64());
                         if let Some(existing) = self.tool_calls.get_mut(call_id) {
                             if let TimelineEntry::ToolCall {
                                 output,
                                 is_error: err_slot,
                                 state,
+                                duration_ms,
                                 ..
                             } = existing
                             {
                                 *output = Some(output_text);
                                 *err_slot = is_error;
+                                if tool_duration.is_some() {
+                                    *duration_ms = tool_duration;
+                                }
                                 *state = if is_error {
                                     ToolCallState::Failed
                                 } else {
@@ -328,14 +591,26 @@ impl PiTranscriptParserState {
                             }
                             out.push(existing.clone());
                         }
+                        turn_state = Some(TranscriptTurnState::Active);
                     }
                     _ => {}
                 }
             }
             _ => {}
         }
-        (meta_changed, out)
+        (meta_changed, out, turn_state)
     }
+}
+
+/// Turn lifecycle signal inferred from the final record(s) in an incremental transcript poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptTurnState {
+    /// A user prompt, tool invocation (`stopReason == "toolUse"`), or tool result was appended,
+    /// meaning the agent turn is still running.
+    Active,
+    /// An assistant turn concluded (`stopReason` is `"stop"`, `"end_turn"`, `"length"`,
+    /// `"error"`, `"aborted"`, or plain assistant text without tool calls) or compaction finished.
+    Completed,
 }
 
 /// Output of a single incremental poll cycle on a Pi/Pie JSONL session transcript.
@@ -343,9 +618,13 @@ impl PiTranscriptParserState {
 pub struct TranscriptPoll {
     /// True if the file was truncated, rewritten, replaced, or switched to a different session file.
     pub reset: bool,
+    /// True on the very first read of a newly opened transcript file.
+    pub initial_load: bool,
     pub meta_changed: bool,
     pub meta: ChatSessionMeta,
     pub upserted_entries: Vec<TimelineEntry>,
+    pub turn_state: Option<TranscriptTurnState>,
+    pub session_title: Option<String>,
 }
 
 /// Orca-style byte-offset incremental JSONL transcript watcher with boundary SHA-256 fingerprint
@@ -467,24 +746,90 @@ impl IncrementalPiTranscript {
 
         let mut poll = TranscriptPoll {
             reset: is_reset,
+            initial_load,
             meta_changed: initial_load || is_reset,
             meta: self.parser.meta.clone(),
             upserted_entries: Vec::new(),
+            turn_state: None,
+            session_title: None,
         };
 
+        let live_tools_running = !initial_load && !is_reset;
         for line in complete_lines {
             let Ok(record) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            let (mc, entries) = self.parser.parse_record(&record, true);
+            let (mc, entries, record_turn_state) =
+                self.parser.parse_record(&record, live_tools_running);
             if mc {
                 poll.meta_changed = true;
+            }
+            if let Some(ts) = record_turn_state {
+                poll.turn_state = Some(ts);
             }
             poll.upserted_entries.extend(entries);
         }
         poll.meta = self.parser.meta.clone();
+        poll.session_title = self.parser.session_title();
         Ok(poll)
     }
+}
+
+pub(crate) fn parse_pi_usage(usage: &Value) -> Option<MessageUsage> {
+    let input_tokens = usage
+        .get("input")
+        .or_else(|| usage.get("inputTokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output")
+        .or_else(|| usage.get("outputTokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cacheRead")
+        .or_else(|| usage.get("cacheReadTokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_write_tokens = usage
+        .get("cacheWrite")
+        .or_else(|| usage.get("cacheWriteTokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("reasoning")
+        .or_else(|| usage.get("reasoningTokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let computed_total = input_tokens
+        .saturating_add(output_tokens)
+        .saturating_add(cache_read_tokens)
+        .saturating_add(cache_write_tokens)
+        .saturating_add(reasoning_tokens);
+    let total_tokens = usage
+        .get("totalTokens")
+        .and_then(|v| v.as_u64())
+        .filter(|&v| v > 0)
+        .unwrap_or(computed_total);
+    let cost_usd = usage
+        .pointer("/cost/total")
+        .or_else(|| usage.get("cost").and_then(|v| v.as_f64().map(|_| v)))
+        .and_then(|v| v.as_f64())
+        .filter(|c| c.is_finite() && *c > 0.0);
+    if total_tokens == 0 && cost_usd.is_none() {
+        return None;
+    }
+    Some(MessageUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        total_tokens,
+        cost_usd,
+        duration_ms: None,
+        ttft_ms: None,
+    })
 }
 
 /// 全量解析一个 Pi session `.jsonl` 文件为统一的 `TimelineEntry` 列表与会话元数据。
@@ -502,7 +847,7 @@ pub fn parse_pi_session_file(path: &Path) -> anyhow::Result<(ChatSessionMeta, Ve
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let (_, emitted) = parser.parse_record(&record, false);
+        let (_, emitted, _) = parser.parse_record(&record, false);
         for entry in emitted {
             if let Some(&pos) = index.get(entry.id()) {
                 entries[pos] = entry;
@@ -740,5 +1085,68 @@ mod tests {
         assert!(switched.reset);
         assert_eq!(switched.meta.provider_session_id.as_deref(), Some("sess-2"));
         assert_eq!(switched.upserted_entries.len(), 1);
+    }
+
+    #[test]
+    fn pie_sessions_root_prioritizes_dot_pie_sessions_and_matches_by_birth_time() {
+        let parsed = parse_session_filename_unix_secs(Path::new(
+            "/home/choco/.pie/sessions/--home-choco--/2026-11-25T06-29-18-601Z_01a21164.jsonl",
+        ));
+        assert_eq!(parsed, Some(1_795_588_158));
+
+        let roots = pi_sessions_roots(true);
+        assert!(roots[0].ends_with(".pie/sessions"));
+        assert!(roots[1].ends_with(".pie/agent/sessions"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pie_sessions = tmp.path().join(".pie/sessions");
+        let cwd = Path::new("/home/choco/proj");
+        let dir = pie_sessions.join(pi_session_dir_name(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let older = dir.join("2026-11-24T10-00-00-000Z_older.jsonl");
+        let target = dir.join("2026-11-25T06-29-18-601Z_target.jsonl");
+        let newer = dir.join("2026-11-25T08-00-00-000Z_newer.jsonl");
+        std::fs::write(&older, "{}\n").unwrap();
+        std::fs::write(&target, "{}\n").unwrap();
+        std::fs::write(&newer, "{}\n").unwrap();
+
+        // Fresh spawn (`allow_older_fallback = false`) MUST NOT bind older files created before spawn.
+        let fresh_none = discover_pi_session_file_in_roots(
+            std::slice::from_ref(&pie_sessions),
+            &[cwd],
+            1_795_600_000,
+            Some(1_795_600_000),
+            false,
+            &[],
+        );
+        assert!(fresh_none.is_none());
+
+        // Pre-existing session (`allow_older_fallback = true`) started at 1795588158 -> uniquely binds `target`.
+        let picked = discover_pi_session_file_in_roots(
+            std::slice::from_ref(&pie_sessions),
+            &[cwd],
+            u64::MAX,
+            Some(1_795_588_158),
+            true,
+            &[],
+        );
+        assert_eq!(picked.as_deref(), Some(target.as_path()));
+
+        // Claimed file is excluded for sibling sessions.
+        let unclaimed = discover_pi_session_file_in_roots(
+            std::slice::from_ref(&pie_sessions),
+            &[cwd],
+            u64::MAX,
+            Some(1_795_588_158),
+            true,
+            std::slice::from_ref(&target),
+        );
+        assert_ne!(unclaimed.as_deref(), Some(target.as_path()));
+
+        // Old idle session with no birth match still falls back to an unclaimed JSONL in that cwd.
+        let fallback =
+            discover_pi_session_file_in_roots(&[pie_sessions], &[cwd], u64::MAX, None, true, &[]);
+        assert!(fallback.is_some());
     }
 }

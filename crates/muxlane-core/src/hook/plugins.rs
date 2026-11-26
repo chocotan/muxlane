@@ -29,12 +29,16 @@ pub fn install_agent_plugins(home: &Path) -> Result<()> {
     write_file_if_changed(&opencode, OPENCODE_PLUGIN)?;
     let pi = home.join(".pi/agent/extensions/muxlane.ts");
     write_file_if_changed(&pi, PI_EXTENSION)?;
-    // Pie is a Pi-compatible CLI with its own config directory.
-    let pie = home.join(".pie/agent/extensions/muxlane.ts");
+    // Pie resolves getAgentDir() to ~/.pie (loading extensions from ~/.pie/extensions),
+    // while older Pie builds looked under ~/.pie/agent/extensions. Install to both.
+    let pie = home.join(".pie/extensions/muxlane.ts");
     write_file_if_changed(&pie, PI_EXTENSION)?;
+    let pie_legacy_dir = home.join(".pie/agent/extensions/muxlane.ts");
+    write_file_if_changed(&pie_legacy_dir, PI_EXTENSION)?;
     for legacy in [
         ".config/opencode/plugins/lmux.ts",
         ".pi/agent/extensions/lmux.ts",
+        ".pie/extensions/lmux.ts",
         ".pie/agent/extensions/lmux.ts",
     ] {
         std::fs::remove_file(home.join(legacy)).ok();
@@ -315,10 +319,12 @@ assert.equal(reports[0].streaming_preview, "Streaming answer body")
                 .unwrap();
         let pi =
             std::fs::read_to_string(dir.path().join(".pi/agent/extensions/muxlane.ts")).unwrap();
-        let pie =
+        let pie = std::fs::read_to_string(dir.path().join(".pie/extensions/muxlane.ts")).unwrap();
+        let pie_legacy =
             std::fs::read_to_string(dir.path().join(".pie/agent/extensions/muxlane.ts")).unwrap();
         assert!(opencode.contains("client.session.messages"));
         assert_eq!(pi, pie);
+        assert_eq!(pi, pie_legacy);
         assert!(pi.contains("willRetry === false"));
         assert!(pi.contains("SETTLE_DEBOUNCE_MS"));
         assert!(pi.contains("agent_settled"));
