@@ -10,7 +10,6 @@ import {
   classifySshFailure,
   execSshScript,
   LOCAL_HOST_ID,
-  sharedMasterArgs,
   shQuote,
   spawnSshProcess,
   type HostConnectionContext,
@@ -412,6 +411,32 @@ export function buildRemoteDshScript(
 }
 
 /**
+ * Build SSH arguments for a persistent remote DSH local port-forward tunnel.
+ * Disabling ControlMaster/ControlPath is critical so OpenSSH does not hand off to
+ * an existing shared master and exit immediately with code 0 without holding `-L`.
+ */
+export function buildRemoteDshForwardArgs(forwardSpec: string, destination: string): string[] {
+  return [
+    "-NT",
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    "ControlPersist=no",
+    "-o",
+    "ExitOnForwardFailure=yes",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-L",
+    forwardSpec,
+    destination,
+  ];
+}
+
+/**
  * Host-aware machine-level singleton manager for DeepSeek Harness (`dsh web`).
  * - On local host: detects a running local `dsh web` or starts ONE shared local instance.
  * - On remote SSH host: detects or starts ONE shared `dsh web` ON THE REMOTE MACHINE and
@@ -619,19 +644,7 @@ export class DshWebManager {
     const { proc, cleanupSecret } = spawnSshProcess(
       hostContext.host,
       hostContext.password,
-      [
-        ...sharedMasterArgs(destination),
-        "-N",
-        "-o",
-        "ExitOnForwardFailure=yes",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=3",
-        "-L",
-        forwardSpec,
-        destination,
-      ],
+      buildRemoteDshForwardArgs(forwardSpec, destination),
       ["ignore", "ignore", "pipe"],
     );
 

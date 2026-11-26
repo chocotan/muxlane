@@ -2,6 +2,7 @@ import http from "node:http";
 import { describe, expect, it } from "vitest";
 import {
   buildDshWebArgs,
+  buildRemoteDshForwardArgs,
   buildRemoteDshScript,
   extractDshWebUrl,
   normalizeCustomDshUrl,
@@ -74,5 +75,18 @@ describe("dsh-manager helpers", () => {
     expect(script).toContain("SSH_CONNECTION=");
     expect(script).not.toContain("--no-open");
     expect(script).not.toContain("--profile");
+  });
+
+  it("disables ControlMaster and ControlPath on remote DSH port-forward tunnels", () => {
+    const args = buildRemoteDshForwardArgs("127.0.0.1:41234:127.0.0.1:41234", "alice@remote");
+    expect(args).toContain("-NT");
+    expect(args).toContain("ControlMaster=no");
+    expect(args).toContain("ControlPath=none");
+    expect(args).toContain("ControlPersist=no");
+    expect(args).toContain("ExitOnForwardFailure=yes");
+    expect(args).toContain("-L");
+    expect(args).toContain("127.0.0.1:41234:127.0.0.1:41234");
+    expect(args[args.length - 1]).toBe("alice@remote");
+    expect(args.join(" ")).not.toContain("ControlMaster=auto");
   });
 });
