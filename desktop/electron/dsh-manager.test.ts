@@ -1,4 +1,8 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildDshWebArgs,
@@ -75,6 +79,30 @@ describe("dsh-manager helpers", () => {
     expect(script).toContain("SSH_CONNECTION=");
     expect(script).not.toContain("--no-open");
     expect(script).not.toContain("--profile");
+    expect(script).not.toContain("\\x27");
+  });
+
+  it("remote script extract_url preserves full tokens containing x, 2, 7 and ANSI colors", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "muxlane-dsh-test-"));
+    try {
+      const dataDir = path.join(tmpDir, "muxlane");
+      fs.mkdirSync(dataDir, { recursive: true });
+      const expectedUrl =
+        "http://127.0.0.1:39409/?token=AbC_x27_0123456789-xyzXYZ_EndToken72x";
+      fs.writeFileSync(path.join(dataDir, "dsh-web.pid"), `${process.pid}\n`);
+      fs.writeFileSync(
+        path.join(dataDir, "dsh-web.log"),
+        `\x1b[32mdsh web:\x1b[0m ${expectedUrl}\r\n`,
+      );
+      const script = buildRemoteDshScript(tmpDir, 39409, false);
+      const out = execFileSync("sh", ["-c", script], {
+        env: { ...process.env, XDG_DATA_HOME: tmpDir },
+        encoding: "utf8",
+      });
+      expect(out.trim()).toBe(`DSH_URL\t${expectedUrl}`);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("disables ControlMaster and ControlPath on remote DSH port-forward tunnels", () => {
