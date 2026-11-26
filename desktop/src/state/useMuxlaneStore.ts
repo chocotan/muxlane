@@ -32,13 +32,23 @@ import {
   type ChatTimelineState,
 } from "../shared/timeline";
 import {
-  closeAgentTabInWorkspace,
-  closeDshInWorkspace,
+  createWebSessionId,
+  deriveTitleFromUrl,
+  isWebSessionId,
+  loadWebSessions,
+  MACHINE_DEFAULT_WORKSPACE_ID,
+  normalizeWebUrl,
+  saveWebSessions,
+  type WebSession,
+  type WebSessionKind,
+} from "./webSessions";
+import {
+  closeTabInWorkspace,
   getVisibleWorkspaceView,
   loadHostWorkspaceTabs,
-  openAgentInWorkspace,
-  openDshInWorkspace,
+  openTabInWorkspace,
   reconcileWorkspaceTabsWithSnapshot,
+  removeTabEverywhere,
   saveHostWorkspaceTabs,
   selectProjectWorkspace,
   toggleProjectWorkspacesMode,
@@ -110,7 +120,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
   const [workspaceTabs, setWorkspaceTabs] = useState<HostWorkspaceTabsState>(() =>
     loadHostWorkspaceTabs("local"),
   );
-  const [openDshProjects, setOpenDshProjects] = useState<string[]>([]);
+  const [webSessions, setWebSessions] = useState<WebSession[]>(() => loadWebSessions("local"));
   const [activeSection, setActiveSection] = useState<"workspace" | "bots">("workspace");
   const [globalApprovals, setGlobalApprovals] = useState<PendingApproval[]>([]);
   const [bots, setBots] = useState<BotDefinition[]>([]);
@@ -125,7 +135,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
   const activeHostIdRef = useRef<string>(hostsState.activeHostId);
   const activeAgentRef = useRef<string | null>(null);
   const snapshotRef = useRef<Snapshot | null>(null);
-  const openDshProjectsRef = useRef<string[]>([]);
+  const webSessionsRef = useRef<WebSession[]>(webSessions);
   const prevProjectWorkspacesRef = useRef<boolean>(projectWorkspacesEnabled);
 
   const visibleView = useMemo(
@@ -133,22 +143,40 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
       getVisibleWorkspaceView(
         workspaceTabs,
         projectWorkspacesEnabled,
-        openDshProjects,
         snapshot?.agents ?? [],
+        webSessions,
       ),
-    [openDshProjects, projectWorkspacesEnabled, snapshot?.agents, workspaceTabs],
+    [projectWorkspacesEnabled, snapshot?.agents, webSessions, workspaceTabs],
   );
 
   const activeProjectId = visibleView.activeProjectId;
   const openTabs = visibleView.openTabs;
-  const activeAgentId = visibleView.activeAgentId;
-  const visibleDshProjects = visibleView.visibleDshProjects;
-  const activeDshProjectId = visibleView.activeDshProjectId;
+  const activeTabId = visibleView.activeTabId;
+  const activeAgentId = activeTabId && !isWebSessionId(activeTabId) ? activeTabId : null;
+  const activeWebSessionId = activeTabId && isWebSessionId(activeTabId) ? activeTabId : null;
+
+  // All open web session IDs across projects (kept mounted in background for instant switching)
+  const mountedWebSessionIds = useMemo(() => {
+    const ids = new Set<string>();
+    const valid = new Set(webSessions.map((w) => w.id));
+    for (const id of workspaceTabs.shared.tabs) {
+      if (isWebSessionId(id) && valid.has(id)) ids.add(id);
+    }
+    for (const group of Object.values(workspaceTabs.byProject)) {
+      for (const id of group.tabs) {
+        if (isWebSessionId(id) && valid.has(id)) ids.add(id);
+      }
+    }
+    if (activeWebSessionId && valid.has(activeWebSessionId)) {
+      ids.add(activeWebSessionId);
+    }
+    return Array.from(ids);
+  }, [activeWebSessionId, webSessions, workspaceTabs]);
 
   activeHostIdRef.current = hostsState.activeHostId;
   activeAgentRef.current = activeAgentId;
   snapshotRef.current = snapshot;
-  openDshProjectsRef.current = openDshProjects;
+  webSessionsRef.current = webSessions;
 
   const updateWorkspaceTabs = useCallback(
     (updater: (prev: HostWorkspaceTabsState) => HostWorkspaceTabsState) => {
@@ -161,13 +189,21 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     [],
   );
 
-  // Switch loaded per-host workspace tabs whenever activeHostId changes
+  const updateWebSessions = useCallback((updater: (prev: WebSession[]) => WebSession[]) => {
+    setWebSessions((prev) => {
+      const next = updater(prev);
+      saveWebSessions(activeHostIdRef.current, next);
+      return next;
+    });
+  }, []);
+
+  // Switch loaded per-host workspace tabs & web sessions whenever activeHostId changes
   const lastLoadedHostRef = useRef<string>(hostsState.activeHostId);
   useEffect(() => {
     if (lastLoadedHostRef.current !== hostsState.activeHostId) {
       lastLoadedHostRef.current = hostsState.activeHostId;
       setWorkspaceTabs(loadHostWorkspaceTabs(hostsState.activeHostId));
-      setOpenDshProjects([]);
+      setWebSessions(loadWebSessions(hostsState.activeHostId));
     }
   }, [hostsState.activeHostId]);
 
@@ -180,6 +216,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
           prev,
           projectWorkspacesEnabled,
           snapshotRef.current?.agents ?? [],
+          webSessionsRef.current,
         ),
       );
     }
@@ -226,19 +263,24 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
       setBotRuns(runsRes.runs ?? []);
 
       const validProjectIds = new Set(snap.projects.map((p) => p.id));
-      setOpenDshProjects((prev) => prev.filter((pid) => validProjectIds.has(pid)));
+      validProjectIds.add(MACHINE_DEFAULT_WORKSPACE_ID);
+      const filteredWeb = webSessionsRef.current.filter((w) => validProjectIds.has(w.projectId));
+      if (filteredWeb.length !== webSessionsRef.current.length) {
+        updateWebSessions(() => filteredWeb);
+      }
       updateWorkspaceTabs((prev) =>
         reconcileWorkspaceTabsWithSnapshot(
           prev,
           snap.projects,
           snap.agents,
           projectWorkspacesEnabledRef.current,
+          filteredWeb,
         ),
       );
     } catch (err) {
       pushToast(`刷新状态失败: ${(err as Error).message}`, "error");
     }
-  }, [pushToast, updateWorkspaceTabs]);
+  }, [pushToast, updateWebSessions, updateWorkspaceTabs]);
 
   const ensureChatSubscribed = useCallback(async (agentId: string) => {
     if (chatSubsRef.current.has(agentId) || pendingChatSubsRef.current.has(agentId)) return;
@@ -450,63 +492,109 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     [updateWorkspaceTabs],
   );
 
-  const openAgent = useCallback(
-    (agentId: string) => {
+  const openTab = useCallback(
+    (tabId: string) => {
       setActiveSection("workspace");
-      const agent = snapshotRef.current?.agents.find((a) => a.id === agentId);
+      if (isWebSessionId(tabId)) {
+        const ws = webSessionsRef.current.find((w) => w.id === tabId);
+        updateWorkspaceTabs((prev) =>
+          openTabInWorkspace(
+            prev,
+            tabId,
+            ws?.projectId ?? null,
+            projectWorkspacesEnabledRef.current,
+          ),
+        );
+        return;
+      }
+      const agent = snapshotRef.current?.agents.find((a) => a.id === tabId);
       updateWorkspaceTabs((prev) =>
-        openAgentInWorkspace(
+        openTabInWorkspace(
           prev,
-          agentId,
+          tabId,
           agent?.project ?? null,
           projectWorkspacesEnabledRef.current,
         ),
       );
       if (isChatOnlySession(agent)) {
-        void ensureChatSubscribed(agentId);
+        void ensureChatSubscribed(tabId);
       }
       if (agent && (!agent.seen || agent.status === "done" || agent.status === "failed")) {
-        void window.muxlane.rpc(Methods.AGENT_MARK_SEEN, { agent: agentId }).catch(() => {});
+        void window.muxlane.rpc(Methods.AGENT_MARK_SEEN, { agent: tabId }).catch(() => {});
       }
     },
     [ensureChatSubscribed, updateWorkspaceTabs],
   );
 
+  const openAgent = openTab;
+
   const closeTab = useCallback(
-    (agentId: string) => {
-      void unsubscribeChat(agentId);
-      const agent = snapshotRef.current?.agents.find((a) => a.id === agentId);
+    (tabId: string) => {
+      if (!isWebSessionId(tabId)) {
+        void unsubscribeChat(tabId);
+      }
+      const ownerProjectId = isWebSessionId(tabId)
+        ? (webSessionsRef.current.find((w) => w.id === tabId)?.projectId ?? null)
+        : (snapshotRef.current?.agents.find((a) => a.id === tabId)?.project ?? null);
       updateWorkspaceTabs((prev) =>
-        closeAgentTabInWorkspace(
-          prev,
-          agentId,
-          agent?.project ?? null,
-          projectWorkspacesEnabledRef.current,
-          openDshProjectsRef.current,
-        ),
+        closeTabInWorkspace(prev, tabId, ownerProjectId, projectWorkspacesEnabledRef.current),
       );
     },
     [unsubscribeChat, updateWorkspaceTabs],
   );
 
-  const openDshForProject = useCallback(
-    (projectId: string) => {
+  const createWebSession = useCallback(
+    (opts: { projectId: string; kind: WebSessionKind; url?: string; title?: string }): WebSession => {
+      const normalizedUrl = opts.url?.trim() ? normalizeWebUrl(opts.url) : "";
+      if (opts.kind === "web" && !normalizedUrl) {
+        throw new Error("请输入要访问的网页地址");
+      }
+      const customTitle = opts.title?.trim() || "";
+      const session: WebSession = {
+        id: createWebSessionId(),
+        projectId: opts.projectId,
+        kind: opts.kind,
+        title: customTitle || deriveTitleFromUrl(normalizedUrl, opts.kind),
+        titleIsCustom: Boolean(customTitle),
+        url: normalizedUrl,
+        createdAt: Date.now(),
+      };
+      updateWebSessions((prev) => [...prev, session]);
       setActiveSection("workspace");
-      setOpenDshProjects((prev) => (prev.includes(projectId) ? prev : [...prev, projectId]));
       updateWorkspaceTabs((prev) =>
-        openDshInWorkspace(prev, projectId, projectWorkspacesEnabledRef.current),
+        openTabInWorkspace(prev, session.id, opts.projectId, projectWorkspacesEnabledRef.current),
       );
+      return session;
     },
-    [updateWorkspaceTabs],
+    [updateWebSessions, updateWorkspaceTabs],
   );
 
-  const closeDshForProject = useCallback(
-    (projectId: string) => {
-      setOpenDshProjects((prev) => prev.filter((id) => id !== projectId));
-      updateWorkspaceTabs((prev) => closeDshInWorkspace(prev, projectId));
-      void window.muxlane.stopDshWeb(projectId);
+  const updateWebSession = useCallback(
+    (id: string, patch: Partial<Pick<WebSession, "url" | "title" | "titleIsCustom">>) => {
+      updateWebSessions((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+      );
     },
-    [updateWorkspaceTabs],
+    [updateWebSessions],
+  );
+
+  const renameWebSession = useCallback(
+    (id: string, nextTitle: string) => {
+      const trimmed = nextTitle.trim();
+      if (!trimmed) return;
+      updateWebSessions((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, title: trimmed, titleIsCustom: true } : s)),
+      );
+    },
+    [updateWebSessions],
+  );
+
+  const deleteWebSession = useCallback(
+    (id: string) => {
+      updateWebSessions((prev) => prev.filter((s) => s.id !== id));
+      updateWorkspaceTabs((prev) => removeTabEverywhere(prev, id));
+    },
+    [updateWebSessions, updateWorkspaceTabs],
   );
 
   const registerTermListener = useCallback((agentId: string, fn: TermListener) => {
@@ -764,7 +852,6 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     setSnapshot(null);
     setChatSummaries({});
     setTimelines({});
-    setOpenDshProjects([]);
     setGlobalApprovals([]);
     setBots([]);
     setBotRuns([]);
@@ -821,12 +908,13 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     snapshot,
     chatSummaries,
     timelines,
+    webSessions,
+    mountedWebSessionIds,
     activeProjectId,
     openTabs,
+    activeTabId,
     activeAgentId,
-    openDshProjects,
-    visibleDshProjects,
-    activeDshProjectId,
+    activeWebSessionId,
     activeSection,
     setActiveSection,
     globalApprovals,
@@ -838,10 +926,13 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     pushToast,
     refreshState,
     selectProject,
+    openTab,
     openAgent,
     closeTab,
-    openDshForProject,
-    closeDshForProject,
+    createWebSession,
+    updateWebSession,
+    renameWebSession,
+    deleteWebSession,
     registerTermListener,
     loadPresets,
     addProject,

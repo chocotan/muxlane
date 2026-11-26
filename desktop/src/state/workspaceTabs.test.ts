@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { AgentInstance, Project } from "../shared/protocol";
+import type { WebSession } from "./webSessions";
 import {
-  closeAgentTabInWorkspace,
-  closeDshInWorkspace,
+  closeTabInWorkspace,
   createEmptyWorkspaceTabsState,
   getVisibleWorkspaceView,
-  openAgentInWorkspace,
-  openDshInWorkspace,
+  openTabInWorkspace,
   reconcileWorkspaceTabsWithSnapshot,
   selectProjectWorkspace,
   toggleProjectWorkspacesMode,
@@ -38,96 +37,87 @@ const agents: AgentInstance[] = [
   makeAgent("b2", "p2"),
 ];
 
-describe("project-scoped workspace tabs", () => {
+const webSessions: WebSession[] = [
+  { id: "web_dsh_1", projectId: "p1", kind: "dsh", title: "DeepSeek Harness", url: "", createdAt: 1 },
+  {
+    id: "web_doc_2",
+    projectId: "p2",
+    kind: "web",
+    title: "localhost:3000",
+    url: "http://localhost:3000",
+    createdAt: 2,
+  },
+];
+
+describe("project-scoped workspace tabs (agents + web/dsh sessions)", () => {
   it("hydrates only the active project's first session on initial load", () => {
     const initial = reconcileWorkspaceTabsWithSnapshot(
       createEmptyWorkspaceTabsState(),
       projects,
       agents,
       true,
+      webSessions,
     );
-    const view = getVisibleWorkspaceView(initial, true, [], agents);
+    const view = getVisibleWorkspaceView(initial, true, agents, webSessions);
     expect(view.activeProjectId).toBe("p1");
     expect(view.openTabs).toEqual(["a1"]);
-    expect(view.activeAgentId).toBe("a1");
+    expect(view.activeTabId).toBe("a1");
   });
 
-  it("isolates open tabs per project and restores them when switching back", () => {
+  it("isolates open agent and web tabs per project and restores them when switching back", () => {
     let state = reconcileWorkspaceTabsWithSnapshot(
       createEmptyWorkspaceTabsState(),
       projects,
       agents,
       true,
+      webSessions,
     );
-    state = openAgentInWorkspace(state, "a2", "p1", true);
-    state = openAgentInWorkspace(state, "b1", "p2", true);
+    state = openTabInWorkspace(state, "web_dsh_1", "p1", true);
+    state = openTabInWorkspace(state, "web_doc_2", "p2", true);
 
-    // Now on p2: only b1 is visible, p1's tabs are hidden
-    let view = getVisibleWorkspaceView(state, true, [], agents);
+    let view = getVisibleWorkspaceView(state, true, agents, webSessions);
     expect(view.activeProjectId).toBe("p2");
-    expect(view.openTabs).toEqual(["b1"]);
-    expect(view.activeAgentId).toBe("b1");
+    expect(view.openTabs).toEqual(["web_doc_2"]);
+    expect(view.activeTabId).toBe("web_doc_2");
 
-    // Switch back to p1 by clicking the project row: restores [a1, a2] with a2 active
     state = selectProjectWorkspace(state, "p1");
-    view = getVisibleWorkspaceView(state, true, [], agents);
+    view = getVisibleWorkspaceView(state, true, agents, webSessions);
     expect(view.activeProjectId).toBe("p1");
-    expect(view.openTabs).toEqual(["a1", "a2"]);
-    expect(view.activeAgentId).toBe("a2");
+    expect(view.openTabs).toEqual(["a1", "web_dsh_1"]);
+    expect(view.activeTabId).toBe("web_dsh_1");
   });
 
-  it("scopes DSH WebUI tabs to their project and falls back on close", () => {
+  it("closes a web tab and falls back to adjacent tab in the same project", () => {
     let state = reconcileWorkspaceTabsWithSnapshot(
       createEmptyWorkspaceTabsState(),
       projects,
       agents,
       true,
+      webSessions,
     );
-    state = openDshInWorkspace(state, "p1", true);
+    state = openTabInWorkspace(state, "web_dsh_1", "p1", true);
+    state = closeTabInWorkspace(state, "web_dsh_1", "p1", true);
 
-    let view = getVisibleWorkspaceView(state, true, ["p1", "p2"], agents);
-    expect(view.visibleDshProjects).toEqual(["p1"]);
-    expect(view.activeDshProjectId).toBe("p1");
-    expect(view.activeAgentId).toBeNull();
-
-    // Closing DSH on p1 returns focus to a1
-    state = closeDshInWorkspace(state, "p1");
-    view = getVisibleWorkspaceView(state, true, ["p2"], agents);
-    expect(view.visibleDshProjects).toEqual([]);
-    expect(view.activeDshProjectId).toBeNull();
-    expect(view.activeAgentId).toBe("a1");
+    const view = getVisibleWorkspaceView(state, true, agents, webSessions);
+    expect(view.openTabs).toEqual(["a1"]);
+    expect(view.activeTabId).toBe("a1");
   });
 
   it("projects shared tabs into project groups when enabling project workspaces", () => {
     let state = createEmptyWorkspaceTabsState();
-    state = openAgentInWorkspace(state, "a1", "p1", false);
-    state = openAgentInWorkspace(state, "b1", "p2", false);
-    state = openAgentInWorkspace(state, "b2", "p2", false);
+    state = openTabInWorkspace(state, "a1", "p1", false);
+    state = openTabInWorkspace(state, "b1", "p2", false);
+    state = openTabInWorkspace(state, "web_doc_2", "p2", false);
 
-    // Switch to project-scoped mode: active project is p2 with [b1, b2], p1 keeps [a1]
-    state = toggleProjectWorkspacesMode(state, true, agents);
-    let view = getVisibleWorkspaceView(state, true, [], agents);
+    state = toggleProjectWorkspacesMode(state, true, agents, webSessions);
+    let view = getVisibleWorkspaceView(state, true, agents, webSessions);
     expect(view.activeProjectId).toBe("p2");
-    expect(view.openTabs).toEqual(["b1", "b2"]);
-    expect(view.activeAgentId).toBe("b2");
+    expect(view.openTabs).toEqual(["b1", "web_doc_2"]);
+    expect(view.activeTabId).toBe("web_doc_2");
 
     state = selectProjectWorkspace(state, "p1");
-    view = getVisibleWorkspaceView(state, true, [], agents);
+    view = getVisibleWorkspaceView(state, true, agents, webSessions);
     expect(view.openTabs).toEqual(["a1"]);
-    expect(view.activeAgentId).toBe("a1");
-  });
-
-  it("closes tabs within the current project without disturbing other projects", () => {
-    let state = reconcileWorkspaceTabsWithSnapshot(
-      createEmptyWorkspaceTabsState(),
-      projects,
-      agents,
-      true,
-    );
-    state = openAgentInWorkspace(state, "a2", "p1", true);
-    state = closeAgentTabInWorkspace(state, "a2", "p1", true, []);
-    const view = getVisibleWorkspaceView(state, true, [], agents);
-    expect(view.openTabs).toEqual(["a1"]);
-    expect(view.activeAgentId).toBe("a1");
+    expect(view.activeTabId).toBe("a1");
   });
 });

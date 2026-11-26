@@ -217,12 +217,18 @@ function setupIpc(): void {
   ipcMain.handle(
     "muxlane:dsh-open",
     async (_ev, projectId: string, projectPath: string, customUrl?: string) => {
-      return dshManager.open(projectId, projectPath, customUrl);
+      const hostCtx = hostManager?.getHostContext() ?? {
+        host: { id: "local", name: "本机", kind: "local" as const, target: "" },
+      };
+      return dshManager.open(projectId, projectPath, hostCtx, customUrl);
     },
   );
 
   ipcMain.handle("muxlane:dsh-restart", async (_ev, projectId: string, projectPath: string) => {
-    return dshManager.restart(projectId, projectPath);
+    const hostCtx = hostManager?.getHostContext() ?? {
+      host: { id: "local", name: "本机", kind: "local" as const, target: "" },
+    };
+    return dshManager.restart(projectId, projectPath, hostCtx);
   });
 
   ipcMain.handle("muxlane:dsh-stop", (_ev, projectId: string) => {

@@ -2,6 +2,7 @@ import http from "node:http";
 import { describe, expect, it } from "vitest";
 import {
   buildDshWebArgs,
+  buildRemoteDshScript,
   extractDshWebUrl,
   normalizeCustomDshUrl,
   probeDshUrl,
@@ -64,5 +65,14 @@ describe("dsh-manager helpers", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it("generates remote SSH dsh script without --no-open and with trusted-host port", () => {
+    const script = buildRemoteDshScript("/srv/repo", 41234, false);
+    expect(script).toContain("dsh-web.pid");
+    expect(script).toContain("--port 41234 --trusted-host 127.0.0.1:41234");
+    expect(script).toContain("SSH_CONNECTION=");
+    expect(script).not.toContain("--no-open");
+    expect(script).not.toContain("--profile");
   });
 });

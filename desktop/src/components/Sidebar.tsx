@@ -21,6 +21,11 @@ import type {
 } from "../shared/protocol";
 import { agentTypeLabel } from "../shared/timeline";
 import { applyOrder, type DropPosition } from "../state/useSidebarOrder";
+import {
+  isWebSessionId,
+  MACHINE_DEFAULT_WORKSPACE_ID,
+  type WebSession,
+} from "../state/webSessions";
 import { ProjectFolderIcon } from "./MuxlaneIcons";
 
 interface SidebarProps {
@@ -31,6 +36,7 @@ interface SidebarProps {
   remoteHostsCount: number;
   projects: Project[];
   agents: AgentInstance[];
+  webSessions: WebSession[];
   projectOrder: string[];
   sessionOrder: Record<string, string[]>;
   onReorderProjects: (
@@ -49,27 +55,29 @@ interface SidebarProps {
   chatSummaries: Record<string, ChatSessionSummary>;
   activeProjectId: string | null;
   projectWorkspacesEnabled: boolean;
-  activeAgentId: string | null;
-  openDshProjects: string[];
-  activeDshProjectId: string | null;
+  activeTabId: string | null;
   activeSection: "workspace" | "bots";
   globalApprovals: PendingApproval[];
   onOpenRemotes: () => void;
   onSelectProject: (projectId: string) => void;
-  onSelectAgent: (agentId: string) => void;
-  onOpenDshForProject: (projectId: string) => void;
-  onCloseDshForProject: (projectId: string) => void;
+  onSelectTab: (tabId: string) => void;
   onAddProject: () => void;
   onDeleteProject: (projectId: string) => void;
   onNewSessionForProject: (projectId: string) => void;
   onNewSession: () => void;
   onRenameAgent: (agentId: string, nextTitle: string) => void;
   onDeleteAgent: (agentId: string) => void;
+  onRenameWebSession: (id: string, nextTitle: string) => void;
+  onDeleteWebSession: (id: string) => void;
 }
+
+type SidebarSessionItem =
+  | { kind: "agent"; id: string; agent: AgentInstance }
+  | { kind: "web"; id: string; web: WebSession };
 
 type DragPayload =
   | { kind: "project"; projectId: string }
-  | { kind: "session"; projectId: string; agentId: string };
+  | { kind: "session"; projectId: string; itemId: string };
 
 type DropIndicator =
   | { kind: "project"; targetId: string; position: DropPosition }
@@ -97,8 +105,6 @@ function shortAgentTag(type: AgentInstance["agent_type"]): string {
       return "CX";
     case "gemini":
       return "GM";
-    case "qwen":
-      return "QW";
     case "kimi":
       return "KM";
     case "agy":
@@ -118,6 +124,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   remoteHostsCount,
   projects,
   agents,
+  webSessions,
   projectOrder,
   sessionOrder,
   onReorderProjects,
@@ -125,22 +132,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
   chatSummaries,
   activeProjectId,
   projectWorkspacesEnabled,
-  activeAgentId,
-  openDshProjects,
-  activeDshProjectId,
+  activeTabId,
   activeSection,
   globalApprovals,
   onOpenRemotes,
   onSelectProject,
-  onSelectAgent,
-  onOpenDshForProject,
-  onCloseDshForProject,
+  onSelectTab,
   onAddProject,
   onDeleteProject,
   onNewSessionForProject,
   onNewSession,
   onRenameAgent,
   onDeleteAgent,
+  onRenameWebSession,
+  onDeleteWebSession,
 }) => {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [filterQuery, setFilterQuery] = useState("");
@@ -158,44 +163,82 @@ export const Sidebar: React.FC<SidebarProps> = ({
     [projectOrder, projects],
   );
 
+  // Built-in machine-level default workspace sessions (DSH + machine-level webpages)
+  const machineDefaultItems = useMemo(() => {
+    const raw: SidebarSessionItem[] = webSessions
+      .filter((w) => w.projectId === MACHINE_DEFAULT_WORKSPACE_ID)
+      .map((web) => ({ kind: "web", id: web.id, web }));
+    const ordered = applyOrder(raw, sessionOrder[MACHINE_DEFAULT_WORKSPACE_ID], (x) => x.id);
+    if (!normalizedQuery) return ordered;
+    if ("默认工作区".includes(normalizedQuery) || "dsh".includes(normalizedQuery)) {
+      return ordered;
+    }
+    return ordered.filter(
+      (item) =>
+        item.kind === "web" &&
+        (item.web.title.toLowerCase().includes(normalizedQuery) ||
+          item.web.url.toLowerCase().includes(normalizedQuery)),
+    );
+  }, [normalizedQuery, sessionOrder, webSessions]);
+
+  const showMachineDefault =
+    !normalizedQuery ||
+    "默认工作区".includes(normalizedQuery) ||
+    machineDefaultItems.length > 0;
+
   const filteredProjects = useMemo(() => {
     const groups = orderedProjects.map((project) => {
-      const projectAgents = applyOrder(
-        agents.filter((a) => a.project === project.id),
-        sessionOrder[project.id],
-        (a) => a.id,
-      );
-      return { project, agents: projectAgents };
+      const rawItems: SidebarSessionItem[] = [
+        ...agents
+          .filter((a) => a.project === project.id)
+          .map((agent): SidebarSessionItem => ({ kind: "agent", id: agent.id, agent })),
+        ...webSessions
+          .filter((w) => w.projectId === project.id)
+          .map((web): SidebarSessionItem => ({ kind: "web", id: web.id, web })),
+      ];
+      const items = applyOrder(rawItems, sessionOrder[project.id], (x) => x.id);
+      return { project, items };
     });
 
     if (!normalizedQuery) {
       return groups;
     }
     return groups
-      .map(({ project, agents: projectAgents }) => {
+      .map(({ project, items }) => {
         const projectMatch =
           project.name.toLowerCase().includes(normalizedQuery) ||
           (project.branch?.toLowerCase().includes(normalizedQuery) ?? false);
-        const matchingAgents = projectMatch
-          ? projectAgents
-          : projectAgents.filter(
-              (a) =>
-                a.title.toLowerCase().includes(normalizedQuery) ||
-                agentTypeLabel(a.agent_type).toLowerCase().includes(normalizedQuery),
-            );
-        return { project, agents: matchingAgents, projectMatch };
+        const matchingItems = projectMatch
+          ? items
+          : items.filter((item) => {
+              if (item.kind === "web") {
+                return (
+                  item.web.title.toLowerCase().includes(normalizedQuery) ||
+                  item.web.url.toLowerCase().includes(normalizedQuery)
+                );
+              }
+              return (
+                item.agent.title.toLowerCase().includes(normalizedQuery) ||
+                agentTypeLabel(item.agent.agent_type).toLowerCase().includes(normalizedQuery)
+              );
+            });
+        return { project, items: matchingItems, projectMatch };
       })
-      .filter((g) => g.projectMatch || g.agents.length > 0);
-  }, [agents, normalizedQuery, orderedProjects, sessionOrder]);
+      .filter((g) => g.projectMatch || g.items.length > 0);
+  }, [agents, normalizedQuery, orderedProjects, sessionOrder, webSessions]);
 
-  const startRename = (agent: AgentInstance) => {
-    setEditingId(agent.id);
-    setEditingTitle(agent.title);
+  const startRename = (id: string, title: string) => {
+    setEditingId(id);
+    setEditingTitle(title);
   };
 
   const commitRename = () => {
     if (editingId && editingTitle.trim()) {
-      onRenameAgent(editingId, editingTitle.trim());
+      if (isWebSessionId(editingId)) {
+        onRenameWebSession(editingId, editingTitle.trim());
+      } else {
+        onRenameAgent(editingId, editingTitle.trim());
+      }
     }
     setEditingId(null);
   };
@@ -233,6 +276,225 @@ export const Sidebar: React.FC<SidebarProps> = ({
     () => orderedProjects.map((p) => p.id),
     [orderedProjects],
   );
+
+  const renderSessionRows = (workspaceId: string, items: SidebarSessionItem[]) => {
+    const visibleIds = items.map((x) => x.id);
+    return (
+      <div className="mt-0.5 space-y-[1px]">
+        {items.map((item) => {
+          const isActive = activeSection === "workspace" && activeTabId === item.id;
+          const isDraggingThisSession =
+            dragPayload?.kind === "session" && dragPayload.itemId === item.id;
+          const sessionDropBefore =
+            dropIndicator?.kind === "session" &&
+            dropIndicator.projectId === workspaceId &&
+            dropIndicator.targetId === item.id &&
+            dropIndicator.position === "before";
+          const sessionDropAfter =
+            dropIndicator?.kind === "session" &&
+            dropIndicator.projectId === workspaceId &&
+            dropIndicator.targetId === item.id &&
+            dropIndicator.position === "after";
+
+          const title = item.kind === "web" ? item.web.title : item.agent.title;
+          const summary = item.kind === "agent" ? chatSummaries[item.agent.id] : undefined;
+          const streaming = summary?.meta.is_streaming === true;
+          const unread =
+            item.kind === "agent" &&
+            !item.agent.seen &&
+            (item.agent.status === "done" ||
+              item.agent.status === "failed" ||
+              item.agent.status === "blocked");
+          const badge =
+            item.kind === "web"
+              ? item.web.kind === "dsh"
+                ? "DSH"
+                : "Web"
+              : shortAgentTag(item.agent.agent_type);
+
+          return (
+            <div
+              key={item.id}
+              draggable={canDragReorder && editingId !== item.id}
+              onDragStart={(e) => {
+                if (!canDragReorder || editingId === item.id) return;
+                e.stopPropagation();
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", `session:${item.id}`);
+                setDragPayload({
+                  kind: "session",
+                  projectId: workspaceId,
+                  itemId: item.id,
+                });
+              }}
+              onDragOver={(e) => {
+                if (
+                  !canDragReorder ||
+                  dragPayload?.kind !== "session" ||
+                  dragPayload.projectId !== workspaceId ||
+                  dragPayload.itemId === item.id
+                ) {
+                  return;
+                }
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = "move";
+                const pos = computeDropPos(e);
+                setDropIndicator((prev) =>
+                  prev?.kind === "session" &&
+                  prev.targetId === item.id &&
+                  prev.position === pos
+                    ? prev
+                    : {
+                        kind: "session",
+                        projectId: workspaceId,
+                        targetId: item.id,
+                        position: pos,
+                      },
+                );
+              }}
+              onDrop={(e) => {
+                if (
+                  !canDragReorder ||
+                  dragPayload?.kind !== "session" ||
+                  dragPayload.projectId !== workspaceId
+                ) {
+                  return;
+                }
+                e.preventDefault();
+                e.stopPropagation();
+                const pos = computeDropPos(e);
+                if (dragPayload.itemId !== item.id) {
+                  onReorderSessions(workspaceId, visibleIds, dragPayload.itemId, item.id, pos);
+                }
+                clearDragState();
+              }}
+              onClick={() => onSelectTab(item.id)}
+              className={`group relative flex h-7 items-center justify-between gap-2 px-2 transition-colors cursor-pointer ${
+                isDraggingThisSession ? "opacity-45" : ""
+              } ${
+                isActive
+                  ? "bg-active text-ink-strong"
+                  : "text-ink-2 hover:bg-hover hover:text-ink"
+              }`}
+            >
+              {sessionDropBefore && (
+                <span className="pointer-events-none absolute inset-x-1 top-0 z-10 h-[2px] bg-ink-strong" />
+              )}
+              {sessionDropAfter && (
+                <span className="pointer-events-none absolute inset-x-1 bottom-0 z-10 h-[2px] bg-ink-strong" />
+              )}
+              {isActive && (
+                <span className="absolute left-0 top-1 bottom-1 w-[2px] bg-ink-strong" />
+              )}
+
+              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
+                  {item.kind === "web" ? (
+                    <Globe
+                      className={`h-3 w-3 ${
+                        item.web.kind === "dsh" ? "text-working" : "text-ink-muted"
+                      }`}
+                      strokeWidth={1.85}
+                    />
+                  ) : (
+                    <span
+                      className={`h-1.5 w-1.5 ${statusSquareClass(item.agent.status, streaming)}`}
+                    />
+                  )}
+                </span>
+                {editingId === item.id ? (
+                  <input
+                    autoFocus
+                    value={editingTitle}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setEditingTitle(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRename();
+                      if (e.key === "Escape") setEditingId(null);
+                    }}
+                    className="w-full border border-line-strong bg-canvas px-1.5 py-0.5 text-[12px] text-ink-strong focus:outline-none select-text"
+                  />
+                ) : (
+                  <span
+                    className={`truncate text-[12.5px] ${
+                      isActive ? "font-medium text-ink-strong" : ""
+                    }`}
+                  >
+                    {title}
+                  </span>
+                )}
+              </div>
+
+              {editingId !== item.id && (
+                <>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {unread && (
+                      <span className="h-1.5 w-1.5 bg-unread" title="有未读更新" />
+                    )}
+                    <span
+                      className={`font-mono text-[10px] ${
+                        item.kind === "web" && item.web.kind === "dsh"
+                          ? "text-working"
+                          : "text-ink-muted"
+                      }`}
+                    >
+                      {badge}
+                    </span>
+                  </div>
+
+                  {/* Unified hover actions for ALL session types (Agent, Shell, DSH, Web) */}
+                  <div
+                    className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
+                      isActive ? "bg-active" : "bg-hover"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      title="重命名"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        startRename(item.id, title);
+                      }}
+                      className="flex h-5 w-5 items-center justify-center text-ink-muted hover:text-ink-strong cursor-pointer"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      title="删除会话"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (item.kind === "web") {
+                          onDeleteWebSession(item.id);
+                        } else {
+                          onDeleteAgent(item.id);
+                        }
+                      }}
+                      className="flex h-5 w-5 items-center justify-center text-ink-muted hover:text-danger cursor-pointer"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const machineDefaultCollapsedDefault = machineDefaultItems.length === 0;
+  const machineDefaultCollapsed =
+    !normalizedQuery &&
+    (collapsed[MACHINE_DEFAULT_WORKSPACE_ID] ?? machineDefaultCollapsedDefault);
+  const isMachineDefaultCurrent =
+    activeSection === "workspace" &&
+    projectWorkspacesEnabled &&
+    activeProjectId === MACHINE_DEFAULT_WORKSPACE_ID;
+  const isMachineDefaultHighlighted = isMachineDefaultCurrent && !activeTabId;
 
   return (
     <aside
@@ -317,7 +579,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <button
                   key={ap.id}
                   type="button"
-                  onClick={() => onSelectAgent(ap.agent)}
+                  onClick={() => onSelectTab(ap.agent)}
                   className="block w-full truncate border-l-2 border-question bg-canvas/75 px-2 py-1 text-left text-[11.5px] text-ink hover:bg-canvas transition-colors cursor-pointer"
                 >
                   <span className="font-medium text-ink-strong">
@@ -331,32 +593,115 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      {/* Projects & Sessions Tree (supports drag-and-drop reordering for both projects and sessions) */}
+      {/* Machine Default Workspace + Projects & Sessions Tree */}
       <div
         tabIndex={-1}
         onDragEnd={clearDragState}
         className="mux-scroll-quiet flex-1 overflow-y-auto py-2 focus:outline-none"
       >
-        {projects.length === 0 ? (
-          <div className="mx-3 mt-6 border border-dashed border-line p-4 text-center">
-            <p className="text-[12px] text-ink-2">还没有项目工作区</p>
-            <button
-              type="button"
-              onClick={onAddProject}
-              className="mt-3 bg-primary-btn px-3 py-1.5 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
-            >
-              添加项目文件夹
-            </button>
-          </div>
-        ) : filteredProjects.length === 0 ? (
-          <div className="px-4 py-6 text-center text-[12px] text-ink-muted">
-            没有匹配「{filterQuery}」的会话
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {filteredProjects.map(({ project, agents: projectAgents }) => {
-              const hasOpenDsh = openDshProjects.includes(project.id);
-              const defaultCollapsed = projectAgents.length === 0 && !hasOpenDsh;
+        <div className="space-y-2">
+          {/* Built-in Machine Default Workspace (for DSH & machine-level browser tabs) */}
+          {showMachineDefault && (
+            <div className="relative px-1.5">
+              <div
+                title={`${machineName} 默认工作区（DeepSeek Harness / 网页浏览器）`}
+                className={`group relative flex h-7 items-center px-2 transition-colors ${
+                  isMachineDefaultHighlighted
+                    ? "bg-active text-ink-strong"
+                    : "hover:bg-hover"
+                }`}
+              >
+                {isMachineDefaultCurrent && (
+                  <span
+                    className={`pointer-events-none absolute left-0 top-1 bottom-1 w-[2px] ${
+                      isMachineDefaultHighlighted ? "bg-ink-strong" : "bg-ink-muted/60"
+                    }`}
+                  />
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const toggleCollapse = () =>
+                      setCollapsed((prev) => ({
+                        ...prev,
+                        [MACHINE_DEFAULT_WORKSPACE_ID]: !(
+                          prev[MACHINE_DEFAULT_WORKSPACE_ID] ?? machineDefaultCollapsedDefault
+                        ),
+                      }));
+                    if (projectWorkspacesEnabled) {
+                      if (activeProjectId === MACHINE_DEFAULT_WORKSPACE_ID) {
+                        if (machineDefaultItems.length > 0) toggleCollapse();
+                      } else {
+                        onSelectProject(MACHINE_DEFAULT_WORKSPACE_ID);
+                      }
+                    } else if (machineDefaultItems.length > 0) {
+                      toggleCollapse();
+                    }
+                  }}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left cursor-pointer"
+                >
+                  <span
+                    className={`inline-flex h-4 w-4 shrink-0 items-center justify-center ${
+                      isMachineDefaultCurrent ? "text-ink-strong" : "text-ink-muted"
+                    }`}
+                  >
+                    <ProjectFolderIcon className="h-[14px] w-[14px]" />
+                  </span>
+                  <span
+                    className={`truncate text-[12px] font-medium ${
+                      isMachineDefaultCurrent ? "text-ink-strong" : "text-ink"
+                    }`}
+                  >
+                    默认工作区
+                  </span>
+                  {machineDefaultCollapsed && machineDefaultItems.length > 0 && (
+                    <span className="ml-auto flex shrink-0 items-center gap-0.5 font-mono text-[10px] text-ink-muted group-hover:opacity-0">
+                      <span>{machineDefaultItems.length}</span>
+                      <ChevronRight className="h-3 w-3" strokeWidth={1.8} />
+                    </span>
+                  )}
+                </button>
+                <div
+                  className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-1.5 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
+                    isMachineDefaultHighlighted ? "bg-active" : "bg-hover"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    title="在默认工作区新建 DSH / 网页会话"
+                    onClick={() => onNewSessionForProject(MACHINE_DEFAULT_WORKSPACE_ID)}
+                    className="flex h-5 w-5 items-center justify-center text-ink-muted hover:bg-active hover:text-ink-strong cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {!machineDefaultCollapsed &&
+                machineDefaultItems.length > 0 &&
+                renderSessionRows(MACHINE_DEFAULT_WORKSPACE_ID, machineDefaultItems)}
+            </div>
+          )}
+
+          {/* User Projects */}
+          {projects.length === 0 ? (
+            <div className="mx-3 mt-4 border border-dashed border-line p-4 text-center">
+              <p className="text-[12px] text-ink-2">还没有项目工作区</p>
+              <button
+                type="button"
+                onClick={onAddProject}
+                className="mt-3 bg-primary-btn px-3 py-1.5 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
+              >
+                添加项目文件夹
+              </button>
+            </div>
+          ) : filteredProjects.length === 0 && !showMachineDefault ? (
+            <div className="px-4 py-6 text-center text-[12px] text-ink-muted">
+              没有匹配「{filterQuery}」的会话
+            </div>
+          ) : (
+            filteredProjects.map(({ project, items }) => {
+              const defaultCollapsed = items.length === 0;
               const isCollapsed =
                 !normalizedQuery && (collapsed[project.id] ?? defaultCollapsed);
               const isDraggingThisProject =
@@ -369,15 +714,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 dropIndicator?.kind === "project" &&
                 dropIndicator.targetId === project.id &&
                 dropIndicator.position === "after";
-              const isDshActive =
-                activeSection === "workspace" && activeDshProjectId === project.id;
               const isCurrentProject =
                 activeSection === "workspace" &&
                 projectWorkspacesEnabled &&
                 activeProjectId === project.id;
-              const isProjectRowHighlighted =
-                isCurrentProject && !activeAgentId && !activeDshProjectId;
-              const visibleSessionIds = projectAgents.map((a) => a.id);
+              const isProjectRowHighlighted = isCurrentProject && !activeTabId;
 
               return (
                 <div
@@ -414,7 +755,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <div className="pointer-events-none absolute inset-x-2 -bottom-1 z-10 h-[2px] bg-ink-strong" />
                   )}
 
-                  {/* Project Group Row — click selects project workspace (click again collapses), draggable to reorder */}
+                  {/* Project Group Row */}
                   <div
                     draggable={canDragReorder}
                     onDragStart={(e) => {
@@ -447,13 +788,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           }));
                         if (projectWorkspacesEnabled) {
                           if (activeProjectId === project.id) {
-                            if (projectAgents.length > 0 || hasOpenDsh) {
-                              toggleCollapse();
-                            }
+                            if (items.length > 0) toggleCollapse();
                           } else {
                             onSelectProject(project.id);
                           }
-                        } else if (projectAgents.length > 0 || hasOpenDsh) {
+                        } else if (items.length > 0) {
                           toggleCollapse();
                         }
                       }}
@@ -478,9 +817,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           {project.branch}
                         </span>
                       )}
-                      {isCollapsed && projectAgents.length > 0 && (
+                      {isCollapsed && items.length > 0 && (
                         <span className="ml-auto flex shrink-0 items-center gap-0.5 font-mono text-[10px] text-ink-muted group-hover:opacity-0">
-                          <span>{projectAgents.length}</span>
+                          <span>{items.length}</span>
                           <ChevronRight className="h-3 w-3" strokeWidth={1.8} />
                         </span>
                       )}
@@ -490,14 +829,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         isProjectRowHighlighted ? "bg-active" : "bg-hover"
                       }`}
                     >
-                      <button
-                        type="button"
-                        title="在标签页中打开 DeepSeek Harness WebUI"
-                        onClick={() => onOpenDshForProject(project.id)}
-                        className="flex h-5 w-5 items-center justify-center text-working hover:bg-active cursor-pointer"
-                      >
-                        <Globe className="h-3.5 w-3.5" />
-                      </button>
                       <button
                         type="button"
                         title="在此项目新建会话"
@@ -517,263 +848,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                   </div>
 
-                  {/* Session Rows + Open DSH WebUI Row */}
-                  {!isCollapsed && (
-                    <div className="mt-0.5 space-y-[1px]">
-                      {hasOpenDsh && (
-                        <div
-                          onClick={() => onOpenDshForProject(project.id)}
-                          className={`group relative flex h-7 items-center justify-between gap-2 px-2 transition-colors cursor-pointer ${
-                            isDshActive
-                              ? "bg-active text-ink-strong"
-                              : "text-ink-2 hover:bg-hover hover:text-ink"
-                          }`}
-                        >
-                          {isDshActive && (
-                            <span className="absolute left-0 top-1 bottom-1 w-[2px] bg-working" />
-                          )}
-                          <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                            <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
-                              <Globe className="h-3 w-3 text-working" strokeWidth={1.85} />
-                            </span>
-                            <span
-                              className={`truncate text-[12.5px] ${
-                                isDshActive ? "font-medium text-ink-strong" : ""
-                              }`}
-                            >
-                              DeepSeek Harness
-                            </span>
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1.5">
-                            <span className="font-mono text-[10px] text-working">Web</span>
-                          </div>
-                          <div
-                            className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
-                              isDshActive ? "bg-active" : "bg-hover"
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              title="关闭 DSH WebUI"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onCloseDshForProject(project.id);
-                              }}
-                              className="flex h-5 w-5 items-center justify-center text-ink-muted hover:text-danger cursor-pointer"
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {projectAgents.length === 0 && !hasOpenDsh ? (
-                        <button
-                          type="button"
-                          onClick={() => onNewSessionForProject(project.id)}
-                          className="flex h-7 w-full items-center gap-1.5 px-2 text-left text-[11.5px] text-ink-muted hover:bg-hover hover:text-ink transition-colors cursor-pointer"
-                        >
-                          <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
-                            <Plus className="h-3 w-3" />
-                          </span>
-                          <span>新建会话</span>
-                        </button>
-                      ) : (
-                        projectAgents.map((agent) => {
-                          const isActive =
-                            activeSection === "workspace" &&
-                            !activeDshProjectId &&
-                            activeAgentId === agent.id;
-                          const summary = chatSummaries[agent.id];
-                          const streaming = summary?.meta.is_streaming === true;
-                          const unread =
-                            !agent.seen &&
-                            (agent.status === "done" ||
-                              agent.status === "failed" ||
-                              agent.status === "blocked");
-                          const isDraggingThisSession =
-                            dragPayload?.kind === "session" && dragPayload.agentId === agent.id;
-                          const sessionDropBefore =
-                            dropIndicator?.kind === "session" &&
-                            dropIndicator.projectId === project.id &&
-                            dropIndicator.targetId === agent.id &&
-                            dropIndicator.position === "before";
-                          const sessionDropAfter =
-                            dropIndicator?.kind === "session" &&
-                            dropIndicator.projectId === project.id &&
-                            dropIndicator.targetId === agent.id &&
-                            dropIndicator.position === "after";
-
-                          return (
-                            <div
-                              key={agent.id}
-                              draggable={canDragReorder && editingId !== agent.id}
-                              onDragStart={(e) => {
-                                if (!canDragReorder || editingId === agent.id) return;
-                                e.stopPropagation();
-                                e.dataTransfer.effectAllowed = "move";
-                                e.dataTransfer.setData("text/plain", `session:${agent.id}`);
-                                setDragPayload({
-                                  kind: "session",
-                                  projectId: project.id,
-                                  agentId: agent.id,
-                                });
-                              }}
-                              onDragOver={(e) => {
-                                if (
-                                  !canDragReorder ||
-                                  dragPayload?.kind !== "session" ||
-                                  dragPayload.projectId !== project.id ||
-                                  dragPayload.agentId === agent.id
-                                ) {
-                                  return;
-                                }
-                                e.preventDefault();
-                                e.stopPropagation();
-                                e.dataTransfer.dropEffect = "move";
-                                const pos = computeDropPos(e);
-                                setDropIndicator((prev) =>
-                                  prev?.kind === "session" &&
-                                  prev.targetId === agent.id &&
-                                  prev.position === pos
-                                    ? prev
-                                    : {
-                                        kind: "session",
-                                        projectId: project.id,
-                                        targetId: agent.id,
-                                        position: pos,
-                                      },
-                                );
-                              }}
-                              onDrop={(e) => {
-                                if (
-                                  !canDragReorder ||
-                                  dragPayload?.kind !== "session" ||
-                                  dragPayload.projectId !== project.id
-                                ) {
-                                  return;
-                                }
-                                e.preventDefault();
-                                e.stopPropagation();
-                                const pos = computeDropPos(e);
-                                if (dragPayload.agentId !== agent.id) {
-                                  onReorderSessions(
-                                    project.id,
-                                    visibleSessionIds,
-                                    dragPayload.agentId,
-                                    agent.id,
-                                    pos,
-                                  );
-                                }
-                                clearDragState();
-                              }}
-                              onClick={() => onSelectAgent(agent.id)}
-                              className={`group relative flex h-7 items-center justify-between gap-2 px-2 transition-colors cursor-pointer ${
-                                isDraggingThisSession ? "opacity-45" : ""
-                              } ${
-                                isActive
-                                  ? "bg-active text-ink-strong"
-                                  : "text-ink-2 hover:bg-hover hover:text-ink"
-                              }`}
-                            >
-                              {sessionDropBefore && (
-                                <span className="pointer-events-none absolute inset-x-1 top-0 z-10 h-[2px] bg-ink-strong" />
-                              )}
-                              {sessionDropAfter && (
-                                <span className="pointer-events-none absolute inset-x-1 bottom-0 z-10 h-[2px] bg-ink-strong" />
-                              )}
-                              {isActive && (
-                                <span className="absolute left-0 top-1 bottom-1 w-[2px] bg-ink-strong" />
-                              )}
-
-                              <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                                <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
-                                  <span
-                                    className={`h-1.5 w-1.5 ${statusSquareClass(
-                                      agent.status,
-                                      streaming,
-                                    )}`}
-                                  />
-                                </span>
-                                {editingId === agent.id ? (
-                                  <input
-                                    autoFocus
-                                    value={editingTitle}
-                                    onClick={(e) => e.stopPropagation()}
-                                    onChange={(e) => setEditingTitle(e.target.value)}
-                                    onBlur={commitRename}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter") commitRename();
-                                      if (e.key === "Escape") setEditingId(null);
-                                    }}
-                                    className="w-full border border-line-strong bg-canvas px-1.5 py-0.5 text-[12px] text-ink-strong focus:outline-none select-text"
-                                  />
-                                ) : (
-                                  <span
-                                    className={`truncate text-[12.5px] ${
-                                      isActive ? "font-medium text-ink-strong" : ""
-                                    }`}
-                                  >
-                                    {agent.title}
-                                  </span>
-                                )}
-                              </div>
-
-                              {editingId !== agent.id && (
-                                <>
-                                  <div className="flex shrink-0 items-center gap-1.5">
-                                    {unread && (
-                                      <span
-                                        className="h-1.5 w-1.5 bg-unread"
-                                        title="有未读更新"
-                                      />
-                                    )}
-                                    <span className="font-mono text-[10px] text-ink-muted">
-                                      {shortAgentTag(agent.agent_type)}
-                                    </span>
-                                  </div>
-
-                                  <div
-                                    className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
-                                      isActive ? "bg-active" : "bg-hover"
-                                    }`}
-                                  >
-                                    <button
-                                      type="button"
-                                      title="重命名"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        startRename(agent);
-                                      }}
-                                      className="flex h-5 w-5 items-center justify-center text-ink-muted hover:text-ink-strong cursor-pointer"
-                                    >
-                                      <Pencil className="h-3 w-3" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      title="关闭会话"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        onDeleteAgent(agent.id);
-                                      }}
-                                      className="flex h-5 w-5 items-center justify-center text-ink-muted hover:text-danger cursor-pointer"
-                                    >
-                                      <Trash2 className="h-3 w-3" />
-                                    </button>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  )}
+                  {!isCollapsed && items.length > 0 && renderSessionRows(project.id, items)}
                 </div>
               );
-            })}
-          </div>
-        )}
+            })
+          )}
+        </div>
       </div>
 
       {/* Thin Seam Resize Handle with Invisible Wide Grab Target */}

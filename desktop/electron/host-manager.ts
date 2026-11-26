@@ -410,7 +410,7 @@ function sharedControlPath(destination: string): string {
   return path.join(dir, `cm-${sanitizeControlName(destination)}.ctl`);
 }
 
-function sharedMasterArgs(destination: string): string[] {
+export function sharedMasterArgs(destination: string): string[] {
   return [
     "-o",
     "ControlMaster=auto",
@@ -453,7 +453,7 @@ function buildSshBaseArgs(host: HostEntry): string[] {
   return args;
 }
 
-function spawnSshProcess(
+export function spawnSshProcess(
   host: HostEntry,
   password: string | undefined,
   sshArgs: string[],
@@ -502,7 +502,7 @@ function spawnSshProcess(
   return { proc, cleanupSecret: () => {} };
 }
 
-function execSshScript(
+export function execSshScript(
   host: HostEntry,
   password: string | undefined,
   destination: string,
@@ -825,6 +825,12 @@ interface ActiveTunnel {
   localSock: string;
 }
 
+export interface HostConnectionContext {
+  host: HostEntry;
+  password?: string;
+  destination?: string;
+}
+
 export class HostManager {
   private activeHostId: string;
   private remotes: HostEntry[];
@@ -843,6 +849,26 @@ export class HostManager {
     this.activeHostId = loaded.activeHostId;
     this.remotes = loaded.remotes;
     this.passwords = loaded.passwords;
+  }
+
+  getHostContext(hostId?: string): HostConnectionContext {
+    const targetId = hostId || this.activeHostId;
+    if (!targetId || targetId === LOCAL_HOST_ID) {
+      return { host: buildLocalHost() };
+    }
+    const remote = this.remotes.find((h) => h.id === targetId);
+    if (!remote) {
+      return { host: buildLocalHost() };
+    }
+    if (remote.kind === "ssh") {
+      const { destination } = resolveSshTarget(remote);
+      return {
+        host: remote,
+        password: this.passwords[remote.id],
+        destination,
+      };
+    }
+    return { host: remote };
   }
 
   getState(): HostsState {
