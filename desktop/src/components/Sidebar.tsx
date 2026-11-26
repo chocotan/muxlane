@@ -21,11 +21,7 @@ import type {
 } from "../shared/protocol";
 import { agentTypeLabel } from "../shared/timeline";
 import { applyOrder, type DropPosition } from "../state/useSidebarOrder";
-import {
-  isWebSessionId,
-  MACHINE_DEFAULT_WORKSPACE_ID,
-  type WebSession,
-} from "../state/webSessions";
+import { isWebSessionId, type WebSession } from "../state/webSessions";
 import { ProjectFolderIcon } from "./MuxlaneIcons";
 
 interface SidebarProps {
@@ -56,7 +52,7 @@ interface SidebarProps {
   activeProjectId: string | null;
   projectWorkspacesEnabled: boolean;
   activeTabId: string | null;
-  activeSection: "workspace" | "bots";
+  activeSection: "workspace" | "dsh" | "bots";
   globalApprovals: PendingApproval[];
   onOpenRemotes: () => void;
   onSelectProject: (projectId: string) => void;
@@ -162,29 +158,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
     () => applyOrder(projects, projectOrder, (p) => p.id),
     [projectOrder, projects],
   );
-
-  // Built-in machine-level default workspace sessions (DSH + machine-level webpages)
-  const machineDefaultItems = useMemo(() => {
-    const raw: SidebarSessionItem[] = webSessions
-      .filter((w) => w.projectId === MACHINE_DEFAULT_WORKSPACE_ID)
-      .map((web) => ({ kind: "web", id: web.id, web }));
-    const ordered = applyOrder(raw, sessionOrder[MACHINE_DEFAULT_WORKSPACE_ID], (x) => x.id);
-    if (!normalizedQuery) return ordered;
-    if ("默认工作区".includes(normalizedQuery) || "dsh".includes(normalizedQuery)) {
-      return ordered;
-    }
-    return ordered.filter(
-      (item) =>
-        item.kind === "web" &&
-        (item.web.title.toLowerCase().includes(normalizedQuery) ||
-          item.web.url.toLowerCase().includes(normalizedQuery)),
-    );
-  }, [normalizedQuery, sessionOrder, webSessions]);
-
-  const showMachineDefault =
-    !normalizedQuery ||
-    "默认工作区".includes(normalizedQuery) ||
-    machineDefaultItems.length > 0;
 
   const filteredProjects = useMemo(() => {
     const groups = orderedProjects.map((project) => {
@@ -305,12 +278,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             (item.agent.status === "done" ||
               item.agent.status === "failed" ||
               item.agent.status === "blocked");
-          const badge =
-            item.kind === "web"
-              ? item.web.kind === "dsh"
-                ? "DSH"
-                : "Web"
-              : shortAgentTag(item.agent.agent_type);
+          const badge = item.kind === "web" ? "Web" : shortAgentTag(item.agent.agent_type);
 
           return (
             <div
@@ -391,12 +359,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="flex min-w-0 flex-1 items-center gap-1.5">
                 <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
                   {item.kind === "web" ? (
-                    <Globe
-                      className={`h-3 w-3 ${
-                        item.web.kind === "dsh" ? "text-working" : "text-ink-muted"
-                      }`}
-                      strokeWidth={1.85}
-                    />
+                    <Globe className="h-3 w-3 text-ink-muted" strokeWidth={1.85} />
                   ) : (
                     <span
                       className={`h-1.5 w-1.5 ${statusSquareClass(item.agent.status, streaming)}`}
@@ -433,18 +396,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     {unread && (
                       <span className="h-1.5 w-1.5 bg-unread" title="有未读更新" />
                     )}
-                    <span
-                      className={`font-mono text-[10px] ${
-                        item.kind === "web" && item.web.kind === "dsh"
-                          ? "text-working"
-                          : "text-ink-muted"
-                      }`}
-                    >
-                      {badge}
-                    </span>
+                    <span className="font-mono text-[10px] text-ink-muted">{badge}</span>
                   </div>
 
-                  {/* Unified hover actions for ALL session types (Agent, Shell, DSH, Web) */}
+                  {/* Unified hover actions for ALL session types */}
                   <div
                     className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
                       isActive ? "bg-active" : "bg-hover"
@@ -485,16 +440,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
     );
   };
-
-  const machineDefaultCollapsedDefault = machineDefaultItems.length === 0;
-  const machineDefaultCollapsed =
-    !normalizedQuery &&
-    (collapsed[MACHINE_DEFAULT_WORKSPACE_ID] ?? machineDefaultCollapsedDefault);
-  const isMachineDefaultCurrent =
-    activeSection === "workspace" &&
-    projectWorkspacesEnabled &&
-    activeProjectId === MACHINE_DEFAULT_WORKSPACE_ID;
-  const isMachineDefaultHighlighted = isMachineDefaultCurrent && !activeTabId;
 
   return (
     <aside
@@ -593,114 +538,30 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      {/* Machine Default Workspace + Projects & Sessions Tree */}
+      {/* Projects & Sessions Tree */}
       <div
         tabIndex={-1}
         onDragEnd={clearDragState}
         className="mux-scroll-quiet flex-1 overflow-y-auto py-2 focus:outline-none"
       >
-        <div className="space-y-2">
-          {/* Built-in Machine Default Workspace (for DSH & machine-level browser tabs) */}
-          {showMachineDefault && (
-            <div className="relative px-1.5">
-              <div
-                title={`${machineName} 默认工作区（DeepSeek Harness / 网页浏览器）`}
-                className={`group relative flex h-7 items-center px-2 transition-colors ${
-                  isMachineDefaultHighlighted
-                    ? "bg-active text-ink-strong"
-                    : "hover:bg-hover"
-                }`}
-              >
-                {isMachineDefaultCurrent && (
-                  <span
-                    className={`pointer-events-none absolute left-0 top-1 bottom-1 w-[2px] ${
-                      isMachineDefaultHighlighted ? "bg-ink-strong" : "bg-ink-muted/60"
-                    }`}
-                  />
-                )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    const toggleCollapse = () =>
-                      setCollapsed((prev) => ({
-                        ...prev,
-                        [MACHINE_DEFAULT_WORKSPACE_ID]: !(
-                          prev[MACHINE_DEFAULT_WORKSPACE_ID] ?? machineDefaultCollapsedDefault
-                        ),
-                      }));
-                    if (projectWorkspacesEnabled) {
-                      if (activeProjectId === MACHINE_DEFAULT_WORKSPACE_ID) {
-                        if (machineDefaultItems.length > 0) toggleCollapse();
-                      } else {
-                        onSelectProject(MACHINE_DEFAULT_WORKSPACE_ID);
-                      }
-                    } else if (machineDefaultItems.length > 0) {
-                      toggleCollapse();
-                    }
-                  }}
-                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left cursor-pointer"
-                >
-                  <span
-                    className={`inline-flex h-4 w-4 shrink-0 items-center justify-center ${
-                      isMachineDefaultCurrent ? "text-ink-strong" : "text-ink-muted"
-                    }`}
-                  >
-                    <ProjectFolderIcon className="h-[14px] w-[14px]" />
-                  </span>
-                  <span
-                    className={`truncate text-[12px] font-medium ${
-                      isMachineDefaultCurrent ? "text-ink-strong" : "text-ink"
-                    }`}
-                  >
-                    默认工作区
-                  </span>
-                  {machineDefaultCollapsed && machineDefaultItems.length > 0 && (
-                    <span className="ml-auto flex shrink-0 items-center gap-0.5 font-mono text-[10px] text-ink-muted group-hover:opacity-0">
-                      <span>{machineDefaultItems.length}</span>
-                      <ChevronRight className="h-3 w-3" strokeWidth={1.8} />
-                    </span>
-                  )}
-                </button>
-                <div
-                  className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-1.5 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
-                    isMachineDefaultHighlighted ? "bg-active" : "bg-hover"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    title="在默认工作区新建 DSH / 网页会话"
-                    onClick={() => onNewSessionForProject(MACHINE_DEFAULT_WORKSPACE_ID)}
-                    className="flex h-5 w-5 items-center justify-center text-ink-muted hover:bg-active hover:text-ink-strong cursor-pointer"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-
-              {!machineDefaultCollapsed &&
-                machineDefaultItems.length > 0 &&
-                renderSessionRows(MACHINE_DEFAULT_WORKSPACE_ID, machineDefaultItems)}
-            </div>
-          )}
-
-          {/* User Projects */}
-          {projects.length === 0 ? (
-            <div className="mx-3 mt-4 border border-dashed border-line p-4 text-center">
-              <p className="text-[12px] text-ink-2">还没有项目工作区</p>
-              <button
-                type="button"
-                onClick={onAddProject}
-                className="mt-3 bg-primary-btn px-3 py-1.5 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
-              >
-                添加项目文件夹
-              </button>
-            </div>
-          ) : filteredProjects.length === 0 && !showMachineDefault ? (
-            <div className="px-4 py-6 text-center text-[12px] text-ink-muted">
-              没有匹配「{filterQuery}」的会话
-            </div>
-          ) : (
-            filteredProjects.map(({ project, items }) => {
+        {projects.length === 0 ? (
+          <div className="mx-3 mt-6 border border-dashed border-line p-4 text-center">
+            <p className="text-[12px] text-ink-2">还没有项目工作区</p>
+            <button
+              type="button"
+              onClick={onAddProject}
+              className="mt-3 bg-primary-btn px-3 py-1.5 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
+            >
+              添加项目文件夹
+            </button>
+          </div>
+        ) : filteredProjects.length === 0 ? (
+          <div className="px-4 py-6 text-center text-[12px] text-ink-muted">
+            没有匹配「{filterQuery}」的会话
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {filteredProjects.map(({ project, items }) => {
               const defaultCollapsed = items.length === 0;
               const isCollapsed =
                 !normalizedQuery && (collapsed[project.id] ?? defaultCollapsed);
@@ -851,9 +712,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   {!isCollapsed && items.length > 0 && renderSessionRows(project.id, items)}
                 </div>
               );
-            })
-          )}
-        </div>
+            })}
+          </div>
+        )}
       </div>
 
       {/* Thin Seam Resize Handle with Invisible Wide Grab Target */}

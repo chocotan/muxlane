@@ -38,11 +38,10 @@ const agents: AgentInstance[] = [
 ];
 
 const webSessions: WebSession[] = [
-  { id: "web_dsh_1", projectId: "p1", kind: "dsh", title: "DeepSeek Harness", url: "", createdAt: 1 },
+  { id: "web_doc_1", projectId: "p1", title: "localhost:5173", url: "http://localhost:5173", createdAt: 1 },
   {
     id: "web_doc_2",
     projectId: "p2",
-    kind: "web",
     title: "localhost:3000",
     url: "http://localhost:3000",
     createdAt: 2,
@@ -72,7 +71,7 @@ describe("project-scoped workspace tabs (agents + web/dsh sessions)", () => {
       true,
       webSessions,
     );
-    state = openTabInWorkspace(state, "web_dsh_1", "p1", true);
+    state = openTabInWorkspace(state, "web_doc_1", "p1", true);
     state = openTabInWorkspace(state, "web_doc_2", "p2", true);
 
     let view = getVisibleWorkspaceView(state, true, agents, webSessions);
@@ -83,8 +82,8 @@ describe("project-scoped workspace tabs (agents + web/dsh sessions)", () => {
     state = selectProjectWorkspace(state, "p1");
     view = getVisibleWorkspaceView(state, true, agents, webSessions);
     expect(view.activeProjectId).toBe("p1");
-    expect(view.openTabs).toEqual(["a1", "web_dsh_1"]);
-    expect(view.activeTabId).toBe("web_dsh_1");
+    expect(view.openTabs).toEqual(["a1", "web_doc_1"]);
+    expect(view.activeTabId).toBe("web_doc_1");
   });
 
   it("closes a web tab and falls back to adjacent tab in the same project", () => {
@@ -95,8 +94,8 @@ describe("project-scoped workspace tabs (agents + web/dsh sessions)", () => {
       true,
       webSessions,
     );
-    state = openTabInWorkspace(state, "web_dsh_1", "p1", true);
-    state = closeTabInWorkspace(state, "web_dsh_1", "p1", true);
+    state = openTabInWorkspace(state, "web_doc_1", "p1", true);
+    state = closeTabInWorkspace(state, "web_doc_1", "p1", true);
 
     const view = getVisibleWorkspaceView(state, true, agents, webSessions);
     expect(view.openTabs).toEqual(["a1"]);

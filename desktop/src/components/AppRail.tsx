@@ -2,6 +2,7 @@ import React from "react";
 import {
   Bot,
   Command,
+  Globe,
   Layers,
   Moon,
   PanelLeftClose,
@@ -16,15 +17,16 @@ import { isDarkTheme, type AppTheme } from "../state/useTheme";
 import { MuxlaneLogoIcon } from "./MuxlaneIcons";
 
 interface AppRailProps {
-  activeSection: "workspace" | "bots";
+  activeSection: "workspace" | "dsh" | "bots";
   sidebarOpen: boolean;
   approvalsCount: number;
   botsCount: number;
+  machineName: string;
   isRemoteHost: boolean;
   remoteHostsCount: number;
   status: DaemonConnectionStatus;
   theme: AppTheme;
-  onSelectSection: (section: "workspace" | "bots") => void;
+  onSelectSection: (section: "workspace" | "dsh" | "bots") => void;
   onToggleSidebar: () => void;
   onOpenRemotes: () => void;
   onOpenSettings: () => void;
@@ -38,6 +40,7 @@ export const AppRail: React.FC<AppRailProps> = ({
   sidebarOpen,
   approvalsCount,
   botsCount,
+  machineName,
   isRemoteHost,
   remoteHostsCount,
   status,
@@ -89,6 +92,25 @@ export const AppRail: React.FC<AppRailProps> = ({
                 {approvalsCount}
               </span>
             )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onSelectSection("dsh")}
+            title={`DeepSeek Harness (${machineName})`}
+            className={`relative flex h-9 w-full items-center justify-center transition-colors cursor-pointer ${
+              activeSection === "dsh"
+                ? "bg-hover text-ink-strong"
+                : "text-ink-muted hover:bg-hover/70 hover:text-ink"
+            }`}
+          >
+            {activeSection === "dsh" && (
+              <span className="absolute left-0 top-1.5 bottom-1.5 w-[2px] bg-working" />
+            )}
+            <Globe
+              className={`h-[17px] w-[17px] ${activeSection === "dsh" ? "text-working" : ""}`}
+              strokeWidth={1.75}
+            />
           </button>
 
           <button

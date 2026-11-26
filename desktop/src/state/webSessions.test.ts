@@ -15,8 +15,7 @@ describe("webSessions helpers", () => {
   });
 
   it("derives readable titles and identifies web session ids", () => {
-    expect(deriveTitleFromUrl("http://localhost:3000/app", "web")).toBe("localhost:3000");
-    expect(deriveTitleFromUrl("http://127.0.0.1:3080/?token=x", "dsh")).toBe("DeepSeek Harness");
+    expect(deriveTitleFromUrl("http://localhost:3000/app")).toBe("localhost:3000");
     expect(isWebSessionId("web_abc_123")).toBe(true);
     expect(isWebSessionId("shell_abc")).toBe(false);
     expect(isWebSessionId(null)).toBe(false);

@@ -36,11 +36,9 @@ import {
   deriveTitleFromUrl,
   isWebSessionId,
   loadWebSessions,
-  MACHINE_DEFAULT_WORKSPACE_ID,
   normalizeWebUrl,
   saveWebSessions,
   type WebSession,
-  type WebSessionKind,
 } from "./webSessions";
 import {
   closeTabInWorkspace,
@@ -121,7 +119,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     loadHostWorkspaceTabs("local"),
   );
   const [webSessions, setWebSessions] = useState<WebSession[]>(() => loadWebSessions("local"));
-  const [activeSection, setActiveSection] = useState<"workspace" | "bots">("workspace");
+  const [activeSection, setActiveSection] = useState<"workspace" | "dsh" | "bots">("workspace");
   const [globalApprovals, setGlobalApprovals] = useState<PendingApproval[]>([]);
   const [bots, setBots] = useState<BotDefinition[]>([]);
   const [botRuns, setBotRuns] = useState<BotRunRecord[]>([]);
@@ -263,7 +261,6 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
       setBotRuns(runsRes.runs ?? []);
 
       const validProjectIds = new Set(snap.projects.map((p) => p.id));
-      validProjectIds.add(MACHINE_DEFAULT_WORKSPACE_ID);
       const filteredWeb = webSessionsRef.current.filter((w) => validProjectIds.has(w.projectId));
       if (filteredWeb.length !== webSessionsRef.current.length) {
         updateWebSessions(() => filteredWeb);
@@ -544,17 +541,16 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
   );
 
   const createWebSession = useCallback(
-    (opts: { projectId: string; kind: WebSessionKind; url?: string; title?: string }): WebSession => {
-      const normalizedUrl = opts.url?.trim() ? normalizeWebUrl(opts.url) : "";
-      if (opts.kind === "web" && !normalizedUrl) {
+    (opts: { projectId: string; url: string; title?: string }): WebSession => {
+      const normalizedUrl = normalizeWebUrl(opts.url);
+      if (!normalizedUrl) {
         throw new Error("请输入要访问的网页地址");
       }
       const customTitle = opts.title?.trim() || "";
       const session: WebSession = {
         id: createWebSessionId(),
         projectId: opts.projectId,
-        kind: opts.kind,
-        title: customTitle || deriveTitleFromUrl(normalizedUrl, opts.kind),
+        title: customTitle || deriveTitleFromUrl(normalizedUrl),
         titleIsCustom: Boolean(customTitle),
         url: normalizedUrl,
         createdAt: Date.now(),

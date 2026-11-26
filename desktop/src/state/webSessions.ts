@@ -1,11 +1,6 @@
-export type WebSessionKind = "dsh" | "web";
-
-export const MACHINE_DEFAULT_WORKSPACE_ID = "__machine_default__";
-
 export interface WebSession {
   id: string;
   projectId: string;
-  kind: WebSessionKind;
   title: string;
   titleIsCustom?: boolean;
   url: string;
@@ -45,8 +40,7 @@ export function normalizeWebUrl(raw: string): string {
   throw new Error("请输入有效的网页地址，例如 https://example.com 或 http://localhost:3000");
 }
 
-export function deriveTitleFromUrl(url: string, kind: WebSessionKind): string {
-  if (kind === "dsh") return "DeepSeek Harness";
+export function deriveTitleFromUrl(url: string): string {
   try {
     const parsed = new URL(url);
     return parsed.host || url;
@@ -61,15 +55,26 @@ export function loadWebSessions(hostId: string): WebSession[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is WebSession =>
-        Boolean(item) &&
-        typeof item.id === "string" &&
-        typeof item.projectId === "string" &&
-        (item.kind === "dsh" || item.kind === "web") &&
-        typeof item.title === "string" &&
-        typeof item.url === "string",
-    );
+    return parsed
+      .filter(
+        (item): item is WebSession & { kind?: string } =>
+          Boolean(item) &&
+          typeof item.id === "string" &&
+          typeof item.projectId === "string" &&
+          item.projectId !== "__machine_default__" &&
+          item.kind !== "dsh" &&
+          typeof item.title === "string" &&
+          typeof item.url === "string" &&
+          item.url.trim().length > 0,
+      )
+      .map(({ id, projectId, title, titleIsCustom, url, createdAt }) => ({
+        id,
+        projectId,
+        title,
+        titleIsCustom,
+        url,
+        createdAt: typeof createdAt === "number" ? createdAt : Date.now(),
+      }));
   } catch {
     return [];
   }

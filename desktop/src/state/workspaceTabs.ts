@@ -1,5 +1,5 @@
 import type { AgentInstance, Project } from "../shared/protocol";
-import { MACHINE_DEFAULT_WORKSPACE_ID, type WebSession } from "./webSessions";
+import type { WebSession } from "./webSessions";
 
 export interface TabGroupState {
   tabs: string[];
@@ -317,7 +317,6 @@ export function reconcileWorkspaceTabsWithSnapshot(
   webSessions: readonly WebSession[] = [],
 ): HostWorkspaceTabsState {
   const validProjectIds = new Set(projects.map((p) => p.id));
-  validProjectIds.add(MACHINE_DEFAULT_WORKSPACE_ID);
   const ownerMap = buildTabOwnerMap(agents, webSessions);
 
   const sharedTabs = state.shared.tabs.filter((id) => ownerMap.has(id));

@@ -3,11 +3,11 @@ import { FolderPlus, Plus, RefreshCw, Server, X } from "lucide-react";
 import { isChatOnlySession, useMuxlaneStore } from "../state/useMuxlaneStore";
 import { resolveTerminalFontCss, useSettings } from "../state/useSettings";
 import { useSidebarOrder } from "../state/useSidebarOrder";
-import { MACHINE_DEFAULT_WORKSPACE_ID } from "../state/webSessions";
 import { AppRail } from "./AppRail";
 import { BotsPanel } from "./BotsPanel";
 import { ChatPane } from "./ChatPane";
 import { CommandPalette } from "./CommandPalette";
+import { DshWorkspaceView } from "./DshWorkspaceView";
 import { MuxlaneLogoIcon, ProjectFolderIcon } from "./MuxlaneIcons";
 import { NewSessionModal } from "./NewSessionModal";
 import { RemoteMachinesModal } from "./RemoteMachinesModal";
@@ -60,6 +60,7 @@ export const App: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(252);
   const [rightSidebar, setRightSidebar] = useState<RightSidebarState>(loadRightSidebarState);
+  const [mountedDshHostIds, setMountedDshHostIds] = useState<string[]>([]);
   const [newSessionProjectId, setNewSessionProjectId] = useState<string | null>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -77,22 +78,34 @@ export const App: React.FC = () => {
     }
   }, [rightSidebar]);
 
+  // Lazily mount per-host DSH webview the first time user opens DSH on that host, keeping it warm
+  useEffect(() => {
+    if (store.activeSection === "dsh") {
+      const hid = store.hostsState.activeHostId;
+      setMountedDshHostIds((prev) => (prev.includes(hid) ? prev : [...prev, hid]));
+    }
+  }, [store.activeSection, store.hostsState.activeHostId]);
+
+  // Prune DSH webview if a remote host was removed
+  useEffect(() => {
+    const validHosts = new Set(store.hostsState.hosts.map((h) => h.id));
+    validHosts.add("local");
+    setMountedDshHostIds((prev) => prev.filter((id) => validHosts.has(id)));
+  }, [store.hostsState.hosts]);
+
   const projects = store.snapshot?.projects ?? [];
   const agents = store.snapshot?.agents ?? [];
   const activeAgent = agents.find((a) => a.id === store.activeAgentId);
-  const isMachineDefaultActive = store.activeProjectId === MACHINE_DEFAULT_WORKSPACE_ID;
-  const activeProject = isMachineDefaultActive
-    ? undefined
-    : store.activeProjectId
-      ? projects.find((p) => p.id === store.activeProjectId)
-      : activeAgent
-        ? projects.find((p) => p.id === activeAgent.project)
-        : undefined;
+  const activeProject = store.activeProjectId
+    ? projects.find((p) => p.id === store.activeProjectId)
+    : activeAgent
+      ? projects.find((p) => p.id === activeAgent.project)
+      : undefined;
   const activeProjectAgents = activeProject
     ? agents.filter((a) => a.project === activeProject.id)
     : [];
-  const activeWorkspaceWebSessions = store.activeProjectId
-    ? store.webSessions.filter((w) => w.projectId === store.activeProjectId)
+  const activeWorkspaceWebSessions = activeProject
+    ? store.webSessions.filter((w) => w.projectId === activeProject.id)
     : [];
   const activeTimeline = store.activeAgentId ? store.timelines[store.activeAgentId] : undefined;
   const activeIsChat = isChatOnlySession(activeAgent);
@@ -134,12 +147,12 @@ export const App: React.FC = () => {
   };
 
   const openNewSession = (projectId?: string | null) => {
+    if (projects.length === 0) {
+      void handleAddProject();
+      return;
+    }
     setNewSessionProjectId(
-      projectId ??
-        store.activeProjectId ??
-        activeAgent?.project ??
-        projects[0]?.id ??
-        MACHINE_DEFAULT_WORKSPACE_ID,
+      projectId ?? store.activeProjectId ?? activeAgent?.project ?? projects[0]?.id ?? null,
     );
     setNewSessionOpen(true);
   };
@@ -171,7 +184,7 @@ export const App: React.FC = () => {
         e.preventDefault();
         openNewSession();
       } else if (key === "w" && (!inTerminal || e.shiftKey)) {
-        if (store.activeTabId) {
+        if (store.activeSection === "workspace" && store.activeTabId) {
           e.preventDefault();
           store.closeTab(store.activeTabId);
         }
@@ -189,6 +202,7 @@ export const App: React.FC = () => {
         sidebarOpen={sidebarOpen}
         approvalsCount={store.globalApprovals.length}
         botsCount={store.bots.length}
+        machineName={displayMachineName}
         isRemoteHost={isRemoteHost}
         remoteHostsCount={remoteHostsCount}
         status={store.status}
@@ -238,7 +252,31 @@ export const App: React.FC = () => {
       )}
 
       {/* Primary Workspace Column */}
-      <div className="flex min-w-0 flex-1 flex-col bg-canvas">
+      <div className="relative flex min-w-0 flex-1 flex-col bg-canvas">
+        {/* Keep-alive machine-scoped DeepSeek Harness WebUI views (full-bleed, no wasted project sidebar) */}
+        {mountedDshHostIds.map((hid) => {
+          const hostObj = store.hostsState.hosts.find((h) => h.id === hid);
+          const hName =
+            hostObj?.name || (hid === "local" ? store.snapshot?.machine.name || "本机" : hid);
+          const hRemote = Boolean(hostObj && hostObj.kind !== "local");
+          const fallbackPath =
+            hid === store.hostsState.activeHostId
+              ? activeProject?.path || projects[0]?.path || ""
+              : "";
+          return (
+            <DshWorkspaceView
+              key={`dsh-host:${hid}`}
+              hostId={hid}
+              hostName={hName}
+              isRemoteHost={hRemote}
+              remoteHostsCount={remoteHostsCount}
+              defaultProjectPath={fallbackPath}
+              visible={store.activeSection === "dsh" && store.hostsState.activeHostId === hid}
+              onOpenRemotes={() => setRemotesOpen(true)}
+            />
+          );
+        })}
+
         {store.activeSection === "bots" ? (
           <BotsPanel
             projects={projects}
@@ -249,7 +287,7 @@ export const App: React.FC = () => {
             onTriggerBot={store.triggerBot}
             onOpenAgent={handleOpenTab}
           />
-        ) : (
+        ) : store.activeSection === "workspace" ? (
           <>
             <WorkspaceHeader
               rightSidebarOpen={rightSidebar.open}
@@ -300,26 +338,15 @@ export const App: React.FC = () => {
               </div>
             )}
 
-            {/* Main Session Viewport — keep-alive Browser/DSH tabs + Chat / Terminal */}
+            {/* Main Session Viewport — keep-alive Browser tabs + Chat / Terminal */}
             <main className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
               {store.mountedWebSessionIds.map((webId) => {
                 const ws = store.webSessions.find((w) => w.id === webId);
                 if (!ws) return null;
-                const proj = projects.find((p) => p.id === ws.projectId);
-                const projName =
-                  ws.projectId === MACHINE_DEFAULT_WORKSPACE_ID
-                    ? `${displayMachineName} · 默认工作区`
-                    : proj?.name || "工作区";
-                const projPath = proj?.path || "";
                 return (
                   <WebBrowserPane
                     key={`web:${ws.id}`}
                     session={ws}
-                    projectName={projName}
-                    projectPath={projPath}
-                    hostId={store.hostsState.activeHostId}
-                    hostName={displayMachineName}
-                    isRemoteHost={isRemoteHost}
                     visible={store.activeWebSessionId === ws.id}
                     onUpdateSession={(patch) => store.updateWebSession(ws.id, patch)}
                   />
@@ -334,11 +361,9 @@ export const App: React.FC = () => {
                         <div className="flex items-center gap-3">
                           <MuxlaneLogoIcon className="h-7 w-7 shrink-0" />
                           <h1 className="text-[20px] font-semibold tracking-tight text-ink-strong">
-                            {settings.projectWorkspacesEnabled && isMachineDefaultActive
-                              ? "默认工作区"
-                              : settings.projectWorkspacesEnabled && activeProject
-                                ? activeProject.name
-                                : "Muxlane"}
+                            {settings.projectWorkspacesEnabled && activeProject
+                              ? activeProject.name
+                              : "Muxlane"}
                           </h1>
                           {settings.projectWorkspacesEnabled && activeProject?.branch && (
                             <span className="border border-line-subtle bg-elevated px-1.5 py-0.5 font-mono text-[11px] text-ink-muted">
@@ -347,21 +372,20 @@ export const App: React.FC = () => {
                           )}
                         </div>
                         <p className="mt-3 text-[13.5px] leading-[1.55] text-ink-2">
-                          {settings.projectWorkspacesEnabled && isMachineDefaultActive
-                            ? `机器级默认工作区（${displayMachineName}）。点击下方「新建会话」可创建 DeepSeek Harness WebUI 或任意网页标签。`
-                            : settings.projectWorkspacesEnabled && activeProject
-                              ? "当前项目工作区暂无打开的标签页。可从左侧或下方打开已有会话，或新建对话 / 终端 / 网页会话。"
-                              : "选择左侧项目或新建对话 / 终端 / 网页会话开始工作，也支持通过 SSH 连接远程主机。"}
+                          {settings.projectWorkspacesEnabled && activeProject
+                            ? "当前项目工作区暂无打开的标签页。可从左侧或下方打开已有会话，或新建对话 / 终端 / 网页会话。"
+                            : "选择左侧项目或新建对话 / 终端 / 网页会话开始工作，也支持通过 SSH 连接远程主机。"}
                         </p>
 
                         {settings.projectWorkspacesEnabled &&
+                          activeProject &&
                           (activeProjectAgents.length > 0 ||
                             activeWorkspaceWebSessions.length > 0) && (
                             <div className="mt-4 border border-line-subtle bg-elevated/40 p-2">
                               <div className="mb-1.5 flex items-center gap-1.5 px-1 text-[11px] font-medium text-ink-muted">
                                 <ProjectFolderIcon className="h-3 w-3" />
                                 <span>
-                                  此工作区已有会话 (
+                                  此项目已有会话 (
                                   {activeProjectAgents.length + activeWorkspaceWebSessions.length})
                                 </span>
                               </div>
@@ -388,7 +412,7 @@ export const App: React.FC = () => {
                                   >
                                     <span className="truncate">{w.title}</span>
                                     <span className="shrink-0 font-mono text-[10px] text-ink-muted">
-                                      {w.kind === "dsh" ? "DSH" : "Web"}
+                                      Web
                                     </span>
                                   </button>
                                 ))}
@@ -397,22 +421,35 @@ export const App: React.FC = () => {
                           )}
 
                         <div className="mt-6 flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openNewSession(store.activeProjectId)}
-                            className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
-                          >
-                            <Plus className="h-4 w-4" />
-                            <span>新建会话</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void handleAddProject()}
-                            className="flex h-9 items-center gap-2 border border-line bg-canvas px-3.5 text-[13px] text-ink hover:bg-hover transition-colors cursor-pointer"
-                          >
-                            <FolderPlus className="h-4 w-4 text-ink-muted" />
-                            <span>添加项目</span>
-                          </button>
+                          {projects.length === 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => void handleAddProject()}
+                              className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
+                            >
+                              <FolderPlus className="h-4 w-4" />
+                              <span>添加项目</span>
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => openNewSession(activeProject?.id)}
+                                className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
+                              >
+                                <Plus className="h-4 w-4" />
+                                <span>新建会话</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleAddProject()}
+                                className="flex h-9 items-center gap-2 border border-line bg-canvas px-3.5 text-[13px] text-ink hover:bg-hover transition-colors cursor-pointer"
+                              >
+                                <FolderPlus className="h-4 w-4 text-ink-muted" />
+                                <span>添加项目</span>
+                              </button>
+                            </>
+                          )}
                           <button
                             type="button"
                             onClick={() => setRemotesOpen(true)}
@@ -478,7 +515,7 @@ export const App: React.FC = () => {
               )}
             </main>
           </>
-        )}
+        ) : null}
       </div>
 
       {/* Orca-style Collapsible & Resizable Right Sidebar */}
@@ -503,8 +540,6 @@ export const App: React.FC = () => {
         projects={projects}
         initialProjectId={newSessionProjectId}
         defaultSurface={settings.defaultViewMode}
-        machineName={displayMachineName}
-        isRemoteHost={isRemoteHost}
         presetsByProject={store.presetsByProject}
         onLoadPresets={store.loadPresets}
         onClose={() => setNewSessionOpen(false)}

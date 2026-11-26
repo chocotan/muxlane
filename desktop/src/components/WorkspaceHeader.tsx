@@ -49,12 +49,7 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
                   <span className="pointer-events-none absolute inset-x-0 -bottom-[1px] h-[1px] bg-tab-active" />
                 )}
                 <div className="flex min-w-0 items-center gap-1.5">
-                  <Globe
-                    className={`h-3 w-3 shrink-0 ${
-                      web.kind === "dsh" ? "text-working" : "text-ink-muted"
-                    }`}
-                    strokeWidth={1.85}
-                  />
+                  <Globe className="h-3 w-3 shrink-0 text-ink-muted" strokeWidth={1.85} />
                   <span className={`truncate ${active ? "font-medium" : ""}`}>{web.title}</span>
                 </div>
                 <button
