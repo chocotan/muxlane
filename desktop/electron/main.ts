@@ -57,6 +57,15 @@ function createWindow(): void {
     return { action: "deny" };
   });
 
+  mainWindow.webContents.on("did-attach-webview", (_event, webContents) => {
+    webContents.setWindowOpenHandler(({ url }) => {
+      if (url.startsWith("http://") || url.startsWith("https://")) {
+        void shell.openExternal(url);
+      }
+      return { action: "deny" };
+    });
+  });
+
   const devUrl = process.env.MUXLANE_DEV_URL;
   if (devUrl) {
     void mainWindow.loadURL(devUrl);

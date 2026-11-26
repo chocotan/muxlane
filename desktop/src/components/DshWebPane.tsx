@@ -16,6 +16,13 @@ interface WebviewElement extends HTMLElement {
   reload: () => void;
 }
 
+interface WebviewFailLoadEvent extends Event {
+  errorCode: number;
+  errorDescription: string;
+  validatedURL: string;
+  isMainFrame?: boolean;
+}
+
 interface DshWebPaneProps {
   projectId: string;
   projectName: string;
@@ -57,6 +64,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
   const [info, setInfo] = useState<DshInstanceInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [webviewError, setWebviewError] = useState<string | null>(null);
   const [editingUrl, setEditingUrl] = useState(false);
   const [urlInput, setUrlInput] = useState(() => readSavedCustomUrl(projectId));
 
@@ -64,6 +72,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
     async (customUrl?: string) => {
       setLoading(true);
       setError(null);
+      setWebviewError(null);
       try {
         const res = await window.muxlane.openDshWeb(projectId, projectPath, customUrl);
         setInfo(res);
@@ -81,12 +90,44 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
     void bootDsh(saved || undefined);
   }, [bootDsh, projectId]);
 
+  useEffect(() => {
+    const wv = webviewRef.current;
+    if (!wv || !info?.url) return;
+
+    const onFailLoad = (ev: Event) => {
+      const e = ev as WebviewFailLoadEvent;
+      // -3 is ERR_ABORTED (normal when dsh 303-redirects from /?token=... to ./)
+      if (e.errorCode === -3 || e.isMainFrame === false) return;
+      setWebviewError(
+        `页面加载失败 (${e.errorCode} ${e.errorDescription || "ERR"}): ${e.validatedURL || info.url}`,
+      );
+    };
+    const onFinishLoad = () => {
+      setWebviewError(null);
+    };
+    const onCrashed = () => {
+      setWebviewError("WebView 渲染进程异常退出，请点击刷新或重启服务。");
+    };
+
+    wv.addEventListener("did-fail-load", onFailLoad);
+    wv.addEventListener("did-finish-load", onFinishLoad);
+    wv.addEventListener("crashed", onCrashed);
+    wv.addEventListener("render-process-gone", onCrashed);
+    return () => {
+      wv.removeEventListener("did-fail-load", onFailLoad);
+      wv.removeEventListener("did-finish-load", onFinishLoad);
+      wv.removeEventListener("crashed", onCrashed);
+      wv.removeEventListener("render-process-gone", onCrashed);
+    };
+  }, [info?.url]);
+
   const handleRestart = async () => {
     writeSavedCustomUrl(projectId, "");
     setUrlInput("");
     setEditingUrl(false);
     setLoading(true);
     setError(null);
+    setWebviewError(null);
     try {
       const res = await window.muxlane.restartDshWeb(projectId, projectPath);
       setInfo(res);
@@ -106,10 +147,13 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
   };
 
   const displayUrl = info?.url ? info.url.replace(/([?&]token=)[^&]+/i, "$1***") : "";
+  const activeError = error || webviewError;
 
   return (
     <div
-      className={`flex h-full min-h-0 flex-1 flex-col bg-canvas ${visible ? "" : "hidden"}`}
+      className={`absolute inset-0 flex flex-col bg-canvas ${
+        visible ? "z-10 visible" : "z-0 invisible pointer-events-none"
+      }`}
     >
       {/* Compact 30px DSH WebUI utility bar (0px square corners) */}
       <div className="flex h-[30px] shrink-0 items-center justify-between gap-2 border-b border-line-subtle bg-sidebar/70 px-3 text-[11px] text-ink-muted select-none">
@@ -146,7 +190,10 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
           <button
             type="button"
             disabled={!info?.url}
-            onClick={() => webviewRef.current?.reload()}
+            onClick={() => {
+              setWebviewError(null);
+              webviewRef.current?.reload();
+            }}
             title="刷新 WebUI 页面"
             className="flex h-5 w-5 items-center justify-center border border-line-subtle bg-canvas text-ink-2 hover:bg-hover hover:text-ink disabled:opacity-40 cursor-pointer"
           >
@@ -225,14 +272,14 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
             </div>
             <div className="font-mono text-[11px] text-ink-muted">{projectPath}</div>
           </div>
-        ) : error ? (
+        ) : activeError ? (
           <div className="flex h-full items-center justify-center p-6">
             <div className="w-full max-w-lg border border-line-strong bg-elevated p-4 space-y-3">
               <div className="text-[13px] font-semibold text-danger">
-                无法启动 DeepSeek Harness WebUI
+                DeepSeek Harness WebUI 加载失败
               </div>
               <div className="border-l-2 border-danger bg-danger-soft px-3 py-2 font-mono text-[11.5px] text-danger whitespace-pre-wrap break-words select-text">
-                {error}
+                {activeError}
               </div>
               <div className="text-[11.5px] text-ink-muted">
                 你可以重试自动启动，或点击右上角「连接地址」直接接入已运行的 `dsh web` URL。
@@ -243,7 +290,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
                   onClick={() => void handleRestart()}
                   className="h-7 bg-primary-btn px-3 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover cursor-pointer"
                 >
-                  重试启动
+                  重启本地 DSH
                 </button>
                 <button
                   type="button"
@@ -257,6 +304,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
           </div>
         ) : info?.url ? (
           React.createElement("webview", {
+            key: info.url,
             ref: webviewRef,
             src: info.url,
             partition: `persist:dsh-${projectId}`,

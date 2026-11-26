@@ -422,7 +422,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       setDragPayload({ kind: "project", projectId: project.id });
                     }}
                     title={project.path}
-                    className={`group relative flex h-7 items-center px-1.5 transition-colors ${
+                    className={`group relative flex h-7 items-center px-2 transition-colors ${
                       isProjectRowHighlighted
                         ? "bg-active text-ink-strong"
                         : "hover:bg-hover"
@@ -435,21 +435,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         }`}
                       />
                     )}
-                    <button
-                      type="button"
-                      aria-label={isCollapsed ? `展开 ${project.name}` : `折叠 ${project.name}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setCollapsed((prev) => ({ ...prev, [project.id]: !prev[project.id] }));
-                      }}
-                      className="flex h-5 w-4 shrink-0 items-center justify-center text-ink-muted hover:text-ink-strong cursor-pointer"
-                    >
-                      {isCollapsed ? (
-                        <ChevronRight className="h-3 w-3" strokeWidth={1.9} />
-                      ) : (
-                        <ChevronDown className="h-3 w-3" strokeWidth={1.9} />
-                      )}
-                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -469,7 +454,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           }));
                         }
                       }}
-                      className="flex min-w-0 flex-1 items-center gap-1.5 pl-0.5 text-left cursor-pointer"
+                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left cursor-pointer"
                     >
                       <span
                         className={`inline-flex h-4 w-4 shrink-0 items-center justify-center ${
@@ -488,6 +473,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       {project.branch && (
                         <span className="truncate font-mono text-[10px] text-ink-muted">
                           {project.branch}
+                        </span>
+                      )}
+                      {isCollapsed && (
+                        <span className="ml-auto flex shrink-0 items-center gap-0.5 font-mono text-[10px] text-ink-muted group-hover:opacity-0">
+                          {projectAgents.length > 0 && <span>{projectAgents.length}</span>}
+                          <ChevronRight className="h-3 w-3" strokeWidth={1.8} />
                         </span>
                       )}
                     </button>

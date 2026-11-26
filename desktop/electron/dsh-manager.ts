@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,16 +14,108 @@ interface ManagedDshProcess {
   isCustomUrl: boolean;
 }
 
-const URL_LINE_RE = /https?:\/\/[^\s"'<>]+/i;
+const DSH_WEB_LINE_RE = /dsh\s+web:\s*(https?:\/\/[^\s"'<>]+)/i;
+const LOOPBACK_URL_RE = /https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+[^\s"'<>]*/i;
 
-function resolveDshCommand(): { command: string; prefixArgs: string[] } {
-  const envBin = process.env.DSH_BIN?.trim();
+let cachedLoginEnvPromise: Promise<NodeJS.ProcessEnv> | null = null;
+
+/**
+ * Resolve the user's interactive login shell environment (PATH, nvm node, http_proxy,
+ * API keys, etc.) so `dsh` spawned from a systemd-started Electron process has the
+ * same runtime environment as a normal terminal.
+ */
+function pickLoginShell(): string {
+  const zshPath = "/usr/bin/zsh";
+  const zshrc = path.join(os.homedir(), ".zshrc");
+  if (fs.existsSync(zshPath) && fs.existsSync(zshrc)) {
+    return zshPath;
+  }
+  return process.env.SHELL || "/bin/bash";
+}
+
+function loadLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
+  if (cachedLoginEnvPromise) return cachedLoginEnvPromise;
+  if (process.platform === "win32") {
+    cachedLoginEnvPromise = Promise.resolve({ ...process.env });
+    return cachedLoginEnvPromise;
+  }
+
+  const shell = pickLoginShell();
+  cachedLoginEnvPromise = new Promise<NodeJS.ProcessEnv>((resolve) => {
+    const mergeAndResolve = (raw: string) => {
+      const merged: NodeJS.ProcessEnv = { ...process.env };
+      for (const entry of raw.split("\0")) {
+        if (!entry) continue;
+        const eq = entry.indexOf("=");
+        if (eq <= 0) continue;
+        const key = entry.slice(0, eq);
+        const val = entry.slice(eq + 1);
+        // Never overwrite Electron/session critical vars if shell left them blank
+        if (key === "PWD" || key === "SHLVL" || key === "_") continue;
+        merged[key] = val;
+      }
+      resolve(merged);
+    };
+
+    // Try interactive login shell first (loads ~/.bashrc / ~/.zshrc where nvm, proxies, and API keys live).
+    execFile(
+      shell,
+      ["-ilc", "env -0"],
+      { timeout: 3000, maxBuffer: 4 * 1024 * 1024, env: process.env },
+      (err, stdout) => {
+        if (!err && stdout && stdout.includes("\0")) {
+          mergeAndResolve(stdout);
+          return;
+        }
+        // Fallback to non-interactive login shell.
+        execFile(
+          shell,
+          ["-lc", "env -0"],
+          { timeout: 2500, maxBuffer: 4 * 1024 * 1024, env: process.env },
+          (err2, stdout2) => {
+            if (!err2 && stdout2 && stdout2.includes("\0")) {
+              mergeAndResolve(stdout2);
+            } else {
+              resolve({ ...process.env });
+            }
+          },
+        );
+      },
+    );
+  });
+
+  return cachedLoginEnvPromise;
+}
+
+export function extractDshWebUrl(rawText: string): string | null {
+  const clean = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+  for (const line of clean.split(/\r?\n/)) {
+    const tagged = line.match(DSH_WEB_LINE_RE);
+    if (tagged?.[1]) return tagged[1];
+    const loopback = line.match(LOOPBACK_URL_RE);
+    if (loopback?.[0]) return loopback[0];
+  }
+  return null;
+}
+
+export function normalizeCustomDshUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[a-zA-Z0-9.-]+(?::\d+)?(?:\/.*)?$/.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
+  throw new Error("请输入有效的 http:// 或 https:// DeepSeek Harness WebUI 地址");
+}
+
+function resolveDshCommand(env: NodeJS.ProcessEnv): { command: string; prefixArgs: string[] } {
+  const envBin = env.DSH_BIN?.trim() || process.env.DSH_BIN?.trim();
   if (envBin && fs.existsSync(envBin)) {
     return { command: envBin, prefixArgs: [] };
   }
 
-  // Search PATH for `dsh`
-  const pathEnv = process.env.PATH || "";
+  // Search PATH (including login shell PATH: nvm, bun, ~/.local/bin, etc.) for `dsh`
+  const pathEnv = env.PATH || process.env.PATH || "";
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) continue;
     const candidate = path.join(dir, "dsh");
@@ -89,17 +181,14 @@ export class DshWebManager {
     projectPath: string,
     customUrl?: string,
   ): Promise<DshInstanceInfo> {
-    const trimmedCustom = customUrl?.trim();
-    if (trimmedCustom) {
-      if (!/^https?:\/\//i.test(trimmedCustom)) {
-        throw new Error("请输入有效的 http:// 或 https:// DeepSeek Harness WebUI 地址");
-      }
+    const normalizedCustom = customUrl ? normalizeCustomDshUrl(customUrl) : "";
+    if (normalizedCustom) {
       this.stop(projectId);
       const custom: ManagedDshProcess = {
         projectId,
         projectPath,
         proc: null,
-        url: trimmedCustom,
+        url: normalizedCustom,
         status: "ready",
         error: null,
         isCustomUrl: true,
@@ -155,16 +244,21 @@ export class DshWebManager {
     projectPath: string,
   ): Promise<DshInstanceInfo> {
     const cwd = fs.existsSync(projectPath) ? projectPath : os.homedir();
-    const { command, prefixArgs } = resolveDshCommand();
-    const args = [...prefixArgs, "--profile", "web", "--no-open", "--port", "0"];
+    const shellEnv = await loadLoginShellEnv();
+    const { command, prefixArgs } = resolveDshCommand(shellEnv);
+    const args = [...prefixArgs, "--profile", "web", "--no-open", "--host", "127.0.0.1", "--port", "0"];
+
+    const spawnEnv: NodeJS.ProcessEnv = {
+      ...shellEnv,
+      NO_COLOR: "1",
+    };
+    delete spawnEnv.FORCE_COLOR;
+    delete spawnEnv.ELECTRON_RUN_AS_NODE;
 
     const proc = spawn(command, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        NO_COLOR: "1",
-      },
+      env: spawnEnv,
     });
 
     const record: ManagedDshProcess = {
@@ -181,6 +275,7 @@ export class DshWebManager {
     const url = await new Promise<string>((resolve, reject) => {
       let settled = false;
       let logTail = "";
+      let lineBuf = "";
 
       const finish = (err?: Error, foundUrl?: string) => {
         if (settled) return;
@@ -193,14 +288,16 @@ export class DshWebManager {
       const onData = (chunk: Buffer) => {
         const text = chunk.toString("utf8");
         logTail = (logTail + text).slice(-4000);
-        // Strip ANSI escape codes if any
-        const clean = text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
-        for (const line of clean.split(/\r?\n/)) {
-          const match = line.match(URL_LINE_RE);
-          if (match) {
-            finish(undefined, match[0]);
-            return;
-          }
+        lineBuf += text;
+        const found = extractDshWebUrl(lineBuf);
+        if (found) {
+          finish(undefined, found);
+          return;
+        }
+        // Keep only the incomplete tail line so URLs split across chunks still match
+        const lastNl = lineBuf.lastIndexOf("\n");
+        if (lastNl >= 0) {
+          lineBuf = lineBuf.slice(lastNl + 1);
         }
       };
 
@@ -212,10 +309,10 @@ export class DshWebManager {
         }
         finish(
           new Error(
-            `启动 DeepSeek Harness WebUI 超时。输出：${logTail.trim().slice(-300) || "(无输出)"}`,
+            `启动 DeepSeek Harness WebUI 超时 (${command})。输出：${logTail.trim().slice(-400) || "(无输出)"}`,
           ),
         );
-      }, 25_000);
+      }, 30_000);
 
       proc.stdout?.on("data", onData);
       proc.stderr?.on("data", onData);
@@ -229,7 +326,7 @@ export class DshWebManager {
         finish(
           new Error(
             `DeepSeek Harness WebUI 进程已退出 (code ${code ?? "unknown"}): ${
-              logTail.trim().slice(-300) || "请确认已安装 @deepseek-ai/dsh"
+              logTail.trim().slice(-400) || "请确认已安装 @deepseek-ai/dsh"
             }`,
           ),
         );
