@@ -6,8 +6,8 @@ use anyhow::Context;
 use muxlane_core::chat::{
     now_ms, ApprovalOption, ApprovalReply, ApprovalSource, ChatAttachment, ChatDeltaOp,
     ChatModelInfo, ChatSessionMeta, ChatSlashCommand, MessageUsage, NoticeLevel, PendingApproval,
-    PlanEntry, PlanEntryStatus, SessionDriverMode, SessionStats, TextDeltaKind, TimelineEntry,
-    ToolCallKind, ToolCallState, ToolDiff,
+    PlanEntry, PlanEntryStatus, QueuedMessage, SessionDriverMode, SessionStats, StreamingBehavior,
+    TextDeltaKind, TimelineEntry, ToolCallKind, ToolCallState, ToolDiff,
 };
 use muxlane_core::model::AgentStatus;
 use serde_json::{json, Value};
@@ -38,8 +38,22 @@ pub fn spawn(
 
 #[derive(Debug)]
 struct PendingPrompt {
+    id: String,
     text: String,
     attachments: Vec<ChatAttachment>,
+}
+
+fn sync_acp_queue_meta(translator: &mut AcpTranslator, pending: &VecDeque<PendingPrompt>) {
+    translator.meta.queued_messages = pending
+        .iter()
+        .map(|p| QueuedMessage {
+            id: p.id.clone(),
+            text: p.text.clone(),
+            behavior: StreamingBehavior::FollowUp,
+            attachments_count: p.attachments.len(),
+        })
+        .collect();
+    translator.emit_meta();
 }
 
 async fn run_acp(
@@ -123,15 +137,21 @@ async fn run_acp(
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
                 Some(DriverCmd::SendPrompt { text, attachments, .. }) => {
+                    let prompt = PendingPrompt {
+                        id: format!("queued-{}", ulid::Ulid::new()),
+                        text,
+                        attachments,
+                    };
                     if !session_ready || translator.meta.is_streaming {
-                        pending_prompts.push_back(PendingPrompt { text, attachments });
+                        pending_prompts.push_back(prompt);
+                        sync_acp_queue_meta(&mut translator, &pending_prompts);
                     } else {
                         dispatch_acp_prompt(
                             &mut stdin,
                             &mut rpc_seq,
                             &mut inflight,
                             &mut translator,
-                            PendingPrompt { text, attachments },
+                            prompt,
                             supports_image,
                         ).await?;
                     }
@@ -146,6 +166,18 @@ async fn run_acp(
                         .await?;
                     }
                     pending_prompts.clear();
+                    sync_acp_queue_meta(&mut translator, &pending_prompts);
+                }
+                Some(DriverCmd::DeleteQueuedMessage { message_id }) => {
+                    match message_id {
+                        Some(target_id) => {
+                            pending_prompts.retain(|p| p.id != target_id);
+                        }
+                        None => {
+                            pending_prompts.clear();
+                        }
+                    }
+                    sync_acp_queue_meta(&mut translator, &pending_prompts);
                 }
                 Some(DriverCmd::RespondApproval { approval_id, reply }) => {
                     if let Some(rpc_req_id) = translator.take_permission_rpc_id(&approval_id) {
@@ -338,6 +370,7 @@ async fn run_acp(
                                         }
                                     }
                                     if let Some(next_prompt) = pending_prompts.pop_front() {
+                                        sync_acp_queue_meta(&mut translator, &pending_prompts);
                                         dispatch_acp_prompt(
                                             &mut stdin,
                                             &mut rpc_seq,
@@ -359,6 +392,7 @@ async fn run_acp(
                                         translator.finish_turn(None);
                                     }
                                     if let Some(next_prompt) = pending_prompts.pop_front() {
+                                        sync_acp_queue_meta(&mut translator, &pending_prompts);
                                         dispatch_acp_prompt(
                                             &mut stdin,
                                             &mut rpc_seq,

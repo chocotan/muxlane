@@ -15,6 +15,7 @@ import {
   ShieldAlert,
   Terminal as TerminalIcon,
   Wrench,
+  X,
   XCircle,
 } from "lucide-react";
 import type {
@@ -50,6 +51,7 @@ interface ChatPaneProps {
     behavior?: StreamingBehavior,
   ) => Promise<void>;
   onAbort: () => void;
+  onDeleteQueuedMessage?: (messageId?: string) => void;
   onApprove: (approvalId: string, reply: ApprovalReply) => void;
   onConfigure: (opts: {
     provider?: string;
@@ -585,6 +587,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   timeline,
   onSend,
   onAbort,
+  onDeleteQueuedMessage,
   onApprove,
   onConfigure,
 }) => {
@@ -927,22 +930,38 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
         </div>
       )}
 
-      {/* Orca-style Queued Follow-Up / Steer Strip */}
+      {/* Orca-style Queued Steer / Follow-Up Strip */}
       {meta.queued_messages && meta.queued_messages.length > 0 && (
         <div className="shrink-0 px-5 pt-2">
           <div className="mx-auto w-full max-w-[68rem] border border-line bg-elevated">
-            <div className="flex items-center justify-between border-b border-line-subtle bg-sidebar/60 px-3 py-1 text-[11px] text-ink-muted select-none">
-              <span>待发送队列 ({meta.queued_messages.length})</span>
-              <span className="font-mono text-[10.5px]">当前回合结束后按序发送</span>
+            <div className="flex items-center justify-between gap-2 border-b border-line-subtle bg-sidebar/60 px-3 py-1 text-[11px] text-ink-muted select-none">
+              <div className="flex items-center gap-2">
+                <span>待发送队列 ({meta.queued_messages.length})</span>
+                <span className="font-mono text-[10.5px]">
+                  {meta.queued_messages.some((m) => m.behavior === "steer")
+                    ? "将在下个工具边界插队注入"
+                    : "当前回合结束后按序发送"}
+                </span>
+              </div>
+              {onDeleteQueuedMessage && (
+                <button
+                  type="button"
+                  onClick={() => onDeleteQueuedMessage(undefined)}
+                  title="清空全部待发送消息"
+                  className="border border-line-subtle bg-canvas px-1.5 py-[1px] font-mono text-[10px] text-ink-muted hover:border-danger/40 hover:bg-danger-soft hover:text-danger transition-colors cursor-pointer"
+                >
+                  清空
+                </button>
+              )}
             </div>
             <div className="divide-y divide-line-subtle">
               {meta.queued_messages.map((item) => (
                 <div
                   key={item.id}
-                  className="flex items-start gap-2 px-3 py-1.5 text-[12.5px] leading-[1.4]"
+                  className="flex items-center gap-2 px-3 py-1.5 text-[12.5px] leading-[1.4]"
                 >
                   <span
-                    className={`mt-0.5 shrink-0 border px-1 py-[1px] font-mono text-[10px] ${
+                    className={`shrink-0 border px-1 py-[1px] font-mono text-[10px] ${
                       item.behavior === "steer"
                         ? "border-working/40 bg-working-soft text-working"
                         : "border-line bg-canvas text-ink-muted"
@@ -953,6 +972,17 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
                   <span className="min-w-0 flex-1 truncate text-ink select-text">
                     {item.text || `[${item.attachments_count ?? 1} 个附件]`}
                   </span>
+                  {onDeleteQueuedMessage && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteQueuedMessage(item.id)}
+                      title="删除此条排队消息"
+                      aria-label="删除此条排队消息"
+                      className="flex h-5 w-5 shrink-0 items-center justify-center text-ink-muted hover:bg-danger-soft hover:text-danger transition-colors cursor-pointer"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

@@ -2,10 +2,12 @@ import React, { useEffect, useState } from "react";
 import { FolderPlus, Plus, RefreshCw, Server, X } from "lucide-react";
 import { isChatOnlySession, useMuxlaneStore } from "../state/useMuxlaneStore";
 import { resolveTerminalFontCss, useSettings } from "../state/useSettings";
+import { useSidebarOrder } from "../state/useSidebarOrder";
 import { AppRail } from "./AppRail";
 import { BotsPanel } from "./BotsPanel";
 import { ChatPane } from "./ChatPane";
 import { CommandPalette } from "./CommandPalette";
+import { DshWebPane } from "./DshWebPane";
 import { NewSessionModal } from "./NewSessionModal";
 import { RemoteMachinesModal } from "./RemoteMachinesModal";
 import { RightSidebar, type RightSidebarTab } from "./RightSidebar";
@@ -50,6 +52,7 @@ export const App: React.FC = () => {
   const store = useMuxlaneStore({
     notificationsEnabled: settings.notificationsEnabled,
   });
+  const sidebarOrder = useSidebarOrder(store.hostsState.activeHostId);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(252);
@@ -62,6 +65,8 @@ export const App: React.FC = () => {
   const [remoteProjectOpen, setRemoteProjectOpen] = useState(false);
   const [remoteProjectPath, setRemoteProjectPath] = useState("");
   const [remoteProjectCreate, setRemoteProjectCreate] = useState(false);
+  const [openDshProjects, setOpenDshProjects] = useState<string[]>([]);
+  const [activeDshProjectId, setActiveDshProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -74,9 +79,11 @@ export const App: React.FC = () => {
   const projects = store.snapshot?.projects ?? [];
   const agents = store.snapshot?.agents ?? [];
   const activeAgent = agents.find((a) => a.id === store.activeAgentId);
-  const activeProject = activeAgent
-    ? projects.find((p) => p.id === activeAgent.project)
-    : undefined;
+  const activeProject = activeDshProjectId
+    ? projects.find((p) => p.id === activeDshProjectId)
+    : activeAgent
+      ? projects.find((p) => p.id === activeAgent.project)
+      : undefined;
   const activeTimeline = store.activeAgentId ? store.timelines[store.activeAgentId] : undefined;
   const activeIsChat = isChatOnlySession(activeAgent);
 
@@ -86,6 +93,23 @@ export const App: React.FC = () => {
   const displayMachineName =
     activeHost?.name || store.snapshot?.machine.name || "本机";
   const terminalFontCss = resolveTerminalFontCss(settings.terminalFontFamily);
+
+  const handleOpenAgent = (agentId: string) => {
+    setActiveDshProjectId(null);
+    store.openAgent(agentId);
+  };
+
+  const handleOpenDshForProject = (projectId: string) => {
+    setOpenDshProjects((prev) => (prev.includes(projectId) ? prev : [...prev, projectId]));
+    setActiveDshProjectId(projectId);
+    store.setActiveSection("workspace");
+  };
+
+  const handleCloseDshForProject = (projectId: string) => {
+    setOpenDshProjects((prev) => prev.filter((id) => id !== projectId));
+    setActiveDshProjectId((cur) => (cur === projectId ? null : cur));
+    void window.muxlane.stopDshWeb(projectId);
+  };
 
   const handleAddProject = async () => {
     if (isRemoteHost) {
@@ -115,7 +139,9 @@ export const App: React.FC = () => {
       void handleAddProject();
       return;
     }
-    setNewSessionProjectId(projectId ?? activeAgent?.project ?? projects[0]?.id ?? null);
+    setNewSessionProjectId(
+      projectId ?? activeDshProjectId ?? activeAgent?.project ?? projects[0]?.id ?? null,
+    );
     setNewSessionOpen(true);
   };
 
@@ -145,9 +171,14 @@ export const App: React.FC = () => {
       } else if (key === "n" && (!inTerminal || e.shiftKey)) {
         e.preventDefault();
         openNewSession();
-      } else if (key === "w" && (!inTerminal || e.shiftKey) && store.activeAgentId) {
-        e.preventDefault();
-        store.closeTab(store.activeAgentId);
+      } else if (key === "w" && (!inTerminal || e.shiftKey)) {
+        if (activeDshProjectId) {
+          e.preventDefault();
+          handleCloseDshForProject(activeDshProjectId);
+        } else if (store.activeAgentId) {
+          e.preventDefault();
+          store.closeTab(store.activeAgentId);
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -185,14 +216,27 @@ export const App: React.FC = () => {
           remoteHostsCount={remoteHostsCount}
           projects={projects}
           agents={agents}
+          projectOrder={sidebarOrder.projectOrder}
+          sessionOrder={sidebarOrder.sessionOrder}
+          onReorderProjects={sidebarOrder.reorderProjects}
+          onReorderSessions={sidebarOrder.reorderSessions}
           chatSummaries={store.chatSummaries}
           activeAgentId={store.activeAgentId}
+          openDshProjects={openDshProjects}
+          activeDshProjectId={activeDshProjectId}
           activeSection={store.activeSection}
           globalApprovals={store.globalApprovals}
           onOpenRemotes={() => setRemotesOpen(true)}
-          onSelectAgent={(id) => store.openAgent(id)}
+          onSelectAgent={handleOpenAgent}
+          onOpenDshForProject={handleOpenDshForProject}
+          onCloseDshForProject={handleCloseDshForProject}
           onAddProject={() => void handleAddProject()}
-          onDeleteProject={(pid) => void store.deleteProject(pid)}
+          onDeleteProject={(pid) => {
+            if (openDshProjects.includes(pid)) {
+              handleCloseDshForProject(pid);
+            }
+            void store.deleteProject(pid);
+          }}
           onNewSessionForProject={(pid) => openNewSession(pid)}
           onNewSession={() => openNewSession()}
           onRenameAgent={(id, title) => void store.renameAgent(id, title)}
@@ -210,7 +254,7 @@ export const App: React.FC = () => {
             onSaveBot={store.saveBot}
             onDeleteBot={store.deleteBot}
             onTriggerBot={store.triggerBot}
-            onOpenAgent={(id) => store.openAgent(id)}
+            onOpenAgent={handleOpenAgent}
           />
         ) : (
           <>
@@ -221,9 +265,19 @@ export const App: React.FC = () => {
               }
               openTabs={store.openTabs}
               activeAgentId={store.activeAgentId}
+              openDshProjects={openDshProjects}
+              activeDshProjectId={activeDshProjectId}
+              projects={projects}
               agents={agents}
-              onSelectTab={(id) => store.openAgent(id)}
+              activeProjectId={activeProject?.id ?? projects[0]?.id ?? null}
+              onSelectTab={handleOpenAgent}
               onCloseTab={store.closeTab}
+              onSelectDshTab={handleOpenDshForProject}
+              onCloseDshTab={handleCloseDshForProject}
+              onOpenDshForActiveProject={() => {
+                const targetPid = activeProject?.id ?? projects[0]?.id;
+                if (targetPid) handleOpenDshForProject(targetPid);
+              }}
               onNewTab={() => openNewSession()}
             />
 
@@ -262,110 +316,132 @@ export const App: React.FC = () => {
               </div>
             )}
 
-            {/* Main Session Viewport — pure fixed surface per session (Chat OR Terminal) */}
-            <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-              {!activeAgent ? (
-                <div className="flex h-full items-center justify-center bg-canvas px-6">
-                  <div className="w-full max-w-[420px]">
-                    <div className="flex items-center gap-3">
-                      <span className="flex h-7 w-7 items-center justify-center bg-primary-btn font-mono text-[13px] font-bold text-primary-btn-fg">
-                        M
-                      </span>
-                      <h1 className="text-[20px] font-semibold tracking-tight text-ink-strong">
-                        Muxlane
-                      </h1>
-                    </div>
-                    <p className="mt-3 text-[13.5px] leading-[1.55] text-ink-2">
-                      选择左侧项目或新建对话 / 终端会话开始工作，也支持通过 SSH 连接远程主机。
-                    </p>
+            {/* Main Session Viewport — keep-alive DSH WebUI tabs + Chat / Terminal */}
+            <main className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+              {openDshProjects.map((projectId) => {
+                const proj = projects.find((p) => p.id === projectId);
+                if (!proj) return null;
+                return (
+                  <DshWebPane
+                    key={`dsh:${proj.id}`}
+                    projectId={proj.id}
+                    projectName={proj.name}
+                    projectPath={proj.path}
+                    visible={activeDshProjectId === proj.id}
+                    onCloseTab={() => handleCloseDshForProject(proj.id)}
+                  />
+                );
+              })}
 
-                    <div className="mt-6 flex flex-wrap items-center gap-2">
-                      {projects.length === 0 ? (
-                        <button
-                          type="button"
-                          onClick={() => void handleAddProject()}
-                          className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
-                        >
-                          <FolderPlus className="h-4 w-4" />
-                          <span>添加项目</span>
-                        </button>
-                      ) : (
-                        <>
+              {!activeDshProjectId && (
+                <div className="relative h-full min-h-0 min-w-0 flex-1 overflow-hidden">
+                  {!activeAgent ? (
+                    <div className="flex h-full items-center justify-center bg-canvas px-6">
+                      <div className="w-full max-w-[420px]">
+                        <div className="flex items-center gap-3">
+                          <span className="flex h-7 w-7 items-center justify-center bg-primary-btn font-mono text-[13px] font-bold text-primary-btn-fg">
+                            M
+                          </span>
+                          <h1 className="text-[20px] font-semibold tracking-tight text-ink-strong">
+                            Muxlane
+                          </h1>
+                        </div>
+                        <p className="mt-3 text-[13.5px] leading-[1.55] text-ink-2">
+                          选择左侧项目或新建对话 / 终端会话开始工作，也支持通过 SSH 连接远程主机。
+                        </p>
+
+                        <div className="mt-6 flex flex-wrap items-center gap-2">
+                          {projects.length === 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => void handleAddProject()}
+                              className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
+                            >
+                              <FolderPlus className="h-4 w-4" />
+                              <span>添加项目</span>
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => openNewSession()}
+                                className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
+                              >
+                                <Plus className="h-4 w-4" />
+                                <span>新建会话</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleAddProject()}
+                                className="flex h-9 items-center gap-2 border border-line bg-canvas px-3.5 text-[13px] text-ink hover:bg-hover transition-colors cursor-pointer"
+                              >
+                                <FolderPlus className="h-4 w-4 text-ink-muted" />
+                                <span>添加项目</span>
+                              </button>
+                            </>
+                          )}
                           <button
                             type="button"
-                            onClick={() => openNewSession()}
-                            className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
-                          >
-                            <Plus className="h-4 w-4" />
-                            <span>新建会话</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void handleAddProject()}
+                            onClick={() => setRemotesOpen(true)}
                             className="flex h-9 items-center gap-2 border border-line bg-canvas px-3.5 text-[13px] text-ink hover:bg-hover transition-colors cursor-pointer"
                           >
-                            <FolderPlus className="h-4 w-4 text-ink-muted" />
-                            <span>添加项目</span>
+                            <Server className="h-4 w-4 text-ink-muted" />
+                            <span>远程机器</span>
                           </button>
-                        </>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => setRemotesOpen(true)}
-                        className="flex h-9 items-center gap-2 border border-line bg-canvas px-3.5 text-[13px] text-ink hover:bg-hover transition-colors cursor-pointer"
-                      >
-                        <Server className="h-4 w-4 text-ink-muted" />
-                        <span>远程机器</span>
-                      </button>
-                    </div>
+                        </div>
 
-                    <div className="mt-8 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-line-subtle pt-4 font-mono text-[11px] text-ink-muted">
-                      <div className="flex items-center justify-between">
-                        <span>新建会话</span>
-                        <span className="text-ink-2">Ctrl+N</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span>命令面板</span>
-                        <span className="text-ink-2">Ctrl+K</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span>切换右侧栏</span>
-                        <span className="text-ink-2">Ctrl+]</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span>设置</span>
-                        <span className="text-ink-2">Ctrl+,</span>
+                        <div className="mt-8 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-line-subtle pt-4 font-mono text-[11px] text-ink-muted">
+                          <div className="flex items-center justify-between">
+                            <span>新建会话</span>
+                            <span className="text-ink-2">Ctrl+N</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>命令面板</span>
+                            <span className="text-ink-2">Ctrl+K</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>切换右侧栏</span>
+                            <span className="text-ink-2">Ctrl+]</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>设置</span>
+                            <span className="text-ink-2">Ctrl+,</span>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  ) : activeIsChat ? (
+                    <ChatPane
+                      key={activeAgent.id}
+                      agentId={activeAgent.id}
+                      agentTitle={activeAgent.title}
+                      theme={settings.theme}
+                      timeline={activeTimeline}
+                      onSend={(text, atts, behavior) =>
+                        store.sendChatPrompt(activeAgent.id, text, atts, behavior)
+                      }
+                      onAbort={() => void store.abortChat(activeAgent.id)}
+                      onDeleteQueuedMessage={(messageId) =>
+                        void store.deleteQueuedMessage(activeAgent.id, messageId)
+                      }
+                      onApprove={(apId, reply) =>
+                        void store.approveChat(activeAgent.id, apId, reply)
+                      }
+                      onConfigure={(opts) => void store.configureChat(activeAgent.id, opts)}
+                    />
+                  ) : (
+                    <TerminalPane
+                      key={activeAgent.id}
+                      agentId={activeAgent.id}
+                      connected={store.status.connected}
+                      theme={settings.theme}
+                      fontSize={settings.terminalFontSize}
+                      fontFamily={terminalFontCss}
+                      visible
+                      registerTermListener={store.registerTermListener}
+                    />
+                  )}
                 </div>
-              ) : activeIsChat ? (
-                <ChatPane
-                  key={activeAgent.id}
-                  agentId={activeAgent.id}
-                  agentTitle={activeAgent.title}
-                  theme={settings.theme}
-                  timeline={activeTimeline}
-                  onSend={(text, atts, behavior) =>
-                    store.sendChatPrompt(activeAgent.id, text, atts, behavior)
-                  }
-                  onAbort={() => void store.abortChat(activeAgent.id)}
-                  onApprove={(apId, reply) =>
-                    void store.approveChat(activeAgent.id, apId, reply)
-                  }
-                  onConfigure={(opts) => void store.configureChat(activeAgent.id, opts)}
-                />
-              ) : (
-                <TerminalPane
-                  key={activeAgent.id}
-                  agentId={activeAgent.id}
-                  connected={store.status.connected}
-                  theme={settings.theme}
-                  fontSize={settings.terminalFontSize}
-                  fontFamily={terminalFontCss}
-                  visible
-                  registerTermListener={store.registerTermListener}
-                />
               )}
             </main>
           </>

@@ -818,13 +818,19 @@ function closeSharedControlMaster(destination: string): void {
   }
 }
 
+interface ActiveTunnel {
+  hostId: string;
+  destination: string;
+  proc: ChildProcess;
+  localSock: string;
+}
+
 export class HostManager {
   private activeHostId: string;
   private remotes: HostEntry[];
   private passwords: Record<string, string>;
-  private tunnelProc: ChildProcess | null = null;
-  private tunnelLocalSocket: string | null = null;
-  private tunnelDestination: string | null = null;
+  /** Persistent per-host SSH tunnel pool (matching Rust `static TUNNELS`): switching hosts reuses live tunnels instantly. */
+  private tunnels = new Map<string, ActiveTunnel>();
   private tunnelStatus: string | null = null;
   private tunnelPhase: "idle" | "connecting" | "error" = "idle";
 
@@ -844,10 +850,15 @@ export class HostManager {
       activeHostId: this.activeHostId,
       hosts: [
         buildLocalHost(),
-        ...this.remotes.map((h) => ({
-          ...h,
-          hasPassword: h.authKind === "password" ? Boolean(this.passwords[h.id]) : undefined,
-        })),
+        ...this.remotes.map((h) => {
+          const t = this.tunnels.get(h.id);
+          const ready = Boolean(t && t.proc.exitCode === null && fs.existsSync(t.localSock));
+          return {
+            ...h,
+            hasPassword: h.authKind === "password" ? Boolean(this.passwords[h.id]) : undefined,
+            tunnelReady: h.kind === "ssh" ? ready : undefined,
+          };
+        }),
       ],
       tunnelStatus: this.tunnelStatus,
       tunnelPhase: this.tunnelPhase,
@@ -911,6 +922,7 @@ export class HostManager {
       return await this.selectHost(entry.id);
     } catch (err) {
       // Roll back the failed newly-added host so user can fix typos/password directly without duplicates
+      this.teardownHostTunnel(entry.id);
       this.remotes = prevRemotes;
       this.passwords = prevPasswords;
       this.activeHostId = prevActiveId;
@@ -927,6 +939,7 @@ export class HostManager {
     if (hostId === LOCAL_HOST_ID) {
       return this.getState();
     }
+    this.teardownHostTunnel(hostId);
     const removed = this.remotes.find((h) => h.id === hostId);
     if (removed && removed.kind === "ssh") {
       const { destination } = resolveSshTarget(removed);
@@ -962,32 +975,28 @@ export class HostManager {
   }
 
   dispose(): void {
-    this.teardownTunnel();
-  }
-
-  private teardownTunnel(): void {
-    if (this.tunnelProc) {
-      try {
-        this.tunnelProc.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-      this.tunnelProc = null;
-    }
-    if (this.tunnelLocalSocket) {
-      try {
-        fs.unlinkSync(this.tunnelLocalSocket);
-      } catch {
-        // ignore
-      }
-      this.tunnelLocalSocket = null;
-    }
-    if (this.tunnelDestination) {
-      closeSharedControlMaster(this.tunnelDestination);
-      this.tunnelDestination = null;
+    for (const hostId of Array.from(this.tunnels.keys())) {
+      this.teardownHostTunnel(hostId);
     }
     this.tunnelStatus = null;
     this.tunnelPhase = "idle";
+  }
+
+  private teardownHostTunnel(hostId: string): void {
+    const existing = this.tunnels.get(hostId);
+    if (!existing) return;
+    this.tunnels.delete(hostId);
+    try {
+      existing.proc.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+    try {
+      fs.unlinkSync(existing.localSock);
+    } catch {
+      // ignore
+    }
+    closeSharedControlMaster(existing.destination);
   }
 
   private setProgress(status: string): void {
@@ -997,8 +1006,6 @@ export class HostManager {
   }
 
   private async activateHost(hostId: string): Promise<void> {
-    this.teardownTunnel();
-
     if (hostId === LOCAL_HOST_ID) {
       this.tunnelStatus = null;
       this.tunnelPhase = "idle";
@@ -1010,6 +1017,8 @@ export class HostManager {
     const host = this.remotes.find((h) => h.id === hostId);
     if (!host) {
       this.activeHostId = LOCAL_HOST_ID;
+      this.tunnelStatus = null;
+      this.tunnelPhase = "idle";
       this.onHostsChanged(this.getState());
       this.onTargetResolved(resolveMuxlaneSocketPath(), true);
       return;
@@ -1023,10 +1032,29 @@ export class HostManager {
       return;
     }
 
+    // Fast path: reuse existing live SSH tunnel for this host without re-authenticating or re-probing!
+    const cached = this.tunnels.get(host.id);
+    if (cached && cached.proc.exitCode === null && fs.existsSync(cached.localSock)) {
+      const healthy = await testUnixSocketConnect(cached.localSock);
+      if (this.activeHostId !== host.id) return;
+      if (healthy) {
+        this.tunnelStatus = null;
+        this.tunnelPhase = "idle";
+        this.onHostsChanged(this.getState());
+        this.onTargetResolved(cached.localSock, false);
+        return;
+      }
+      this.teardownHostTunnel(host.id);
+    } else if (cached) {
+      this.teardownHostTunnel(host.id);
+    }
+
     const password = this.passwords[host.id];
     const { destination, explicitSocket } = resolveSshTarget(host);
-    this.tunnelDestination = destination;
     this.setProgress(`正在探测远端主机 (${destination})…`);
+
+    let createdProc: ChildProcess | null = null;
+    let createdLocalSock: string | null = null;
 
     try {
       let remoteSock: string;
@@ -1092,13 +1120,27 @@ export class HostManager {
         destination,
       ];
       const { proc } = spawnSshProcess(host, password, tunnelArgs, ["ignore", "ignore", "pipe"]);
-      this.tunnelProc = proc;
-      this.tunnelLocalSocket = localSock;
+      createdProc = proc;
+      createdLocalSock = localSock;
+
+      const entry: ActiveTunnel = { hostId: host.id, destination, proc, localSock };
+      this.tunnels.set(host.id, entry);
+      proc.once("exit", () => {
+        if (this.tunnels.get(host.id) === entry) {
+          this.tunnels.delete(host.id);
+          try {
+            fs.unlinkSync(localSock);
+          } catch {
+            // ignore
+          }
+          this.onHostsChanged(this.getState());
+        }
+      });
 
       await waitForHealthySocket(localSock, proc);
 
       // Guard against concurrent host switches while awaiting tunnel readiness
-      if (this.activeHostId !== host.id || this.tunnelProc !== proc) {
+      if (this.activeHostId !== host.id || this.tunnels.get(host.id) !== entry) {
         return;
       }
 
@@ -1107,7 +1149,21 @@ export class HostManager {
       this.onHostsChanged(this.getState());
       this.onTargetResolved(localSock, false);
     } catch (err) {
-      this.teardownTunnel();
+      if (createdProc) {
+        try {
+          createdProc.kill("SIGTERM");
+        } catch {
+          // ignore
+        }
+      }
+      if (createdLocalSock) {
+        try {
+          fs.unlinkSync(createdLocalSock);
+        } catch {
+          // ignore
+        }
+      }
+      this.tunnels.delete(host.id);
       this.tunnelStatus = (err as Error).message;
       this.tunnelPhase = "error";
       this.onHostsChanged(this.getState());

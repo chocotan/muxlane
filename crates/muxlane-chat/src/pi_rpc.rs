@@ -150,7 +150,7 @@ async fn run_pi_rpc(
                     let is_control_slash = attachments.is_empty()
                         && trimmed.starts_with('/')
                         && !trimmed.starts_with("/skill:");
-                    let behavior = streaming_behavior.unwrap_or(StreamingBehavior::FollowUp);
+                    let behavior = streaming_behavior.unwrap_or(StreamingBehavior::Steer);
                     if !is_control_slash {
                         if translator.meta.is_streaming {
                             translator.enqueue_outgoing_prompt(&text, &attachments, behavior);
@@ -164,21 +164,9 @@ async fn run_pi_rpc(
                     payload.insert("id".into(), Value::String(id));
                     payload.insert("type".into(), Value::String("prompt".into()));
                     payload.insert("message".into(), Value::String(text));
-                    if !attachments.is_empty() {
-                        let images: Vec<Value> = attachments
-                            .iter()
-                            .filter_map(|att| {
-                                let data = att.data_b64.as_ref()?;
-                                Some(json!({
-                                    "type": "image",
-                                    "data": data,
-                                    "mimeType": att.mime_type,
-                                }))
-                            })
-                            .collect();
-                        if !images.is_empty() {
-                            payload.insert("images".into(), Value::Array(images));
-                        }
+                    let images = attachments_to_pi_images(&attachments);
+                    if !images.is_empty() {
+                        payload.insert("images".into(), Value::Array(images));
                     }
                     if translator.meta.is_streaming {
                         let behavior_str = match behavior {
@@ -196,6 +184,32 @@ async fn run_pi_rpc(
                     let id = format!("cmd-{req_seq}");
                     req_seq += 1;
                     send_json_line(&mut stdin, json!({"id": id, "type": "abort"})).await?;
+                }
+                Some(DriverCmd::DeleteQueuedMessage { message_id }) => {
+                    let remaining = translator.remove_queued_message(message_id.as_deref());
+                    let clear_id = format!("cmd-{req_seq}");
+                    req_seq += 1;
+                    send_json_line(&mut stdin, json!({"id": clear_id, "type": "clear_queue"}))
+                        .await?;
+                    if translator.meta.is_streaming {
+                        for item in remaining {
+                            let requeue_id = format!("cmd-{req_seq}");
+                            req_seq += 1;
+                            let cmd_type = match item.behavior {
+                                StreamingBehavior::Steer => "steer",
+                                StreamingBehavior::FollowUp => "follow_up",
+                            };
+                            let mut payload = serde_json::Map::new();
+                            payload.insert("id".into(), Value::String(requeue_id));
+                            payload.insert("type".into(), Value::String(cmd_type.into()));
+                            payload.insert("message".into(), Value::String(item.text));
+                            let images = attachments_to_pi_images(&item.attachments);
+                            if !images.is_empty() {
+                                payload.insert("images".into(), Value::Array(images));
+                            }
+                            send_json_line(&mut stdin, Value::Object(payload)).await?;
+                        }
+                    }
                 }
                 Some(DriverCmd::RespondApproval { approval_id, reply }) => {
                     translator.resolve_approval(&approval_id);
@@ -327,6 +341,28 @@ async fn send_json_line(
     Ok(())
 }
 
+fn attachments_to_pi_images(attachments: &[ChatAttachment]) -> Vec<Value> {
+    attachments
+        .iter()
+        .filter_map(|att| {
+            let data = att.data_b64.as_ref()?;
+            Some(json!({
+                "type": "image",
+                "data": data,
+                "mimeType": att.mime_type,
+            }))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredQueuedPrompt {
+    pub id: String,
+    pub text: String,
+    pub attachments: Vec<ChatAttachment>,
+    pub behavior: StreamingBehavior,
+}
+
 pub(crate) struct PiRpcTranslator {
     agent: String,
     pub meta: ChatSessionMeta,
@@ -347,7 +383,7 @@ pub(crate) struct PiRpcTranslator {
     last_error: Option<String>,
     blocked_pending: bool,
     pending_user_echos: VecDeque<String>,
-    queued_attachments: VecDeque<(String, Vec<ChatAttachment>)>,
+    stored_queue: Vec<StoredQueuedPrompt>,
     has_derived_title: bool,
     has_explicit_title: bool,
 }
@@ -384,7 +420,7 @@ impl PiRpcTranslator {
             last_error: None,
             blocked_pending: false,
             pending_user_echos: VecDeque::new(),
-            queued_attachments: VecDeque::new(),
+            stored_queue: Vec::new(),
             has_derived_title: false,
             has_explicit_title: false,
         }
@@ -430,17 +466,42 @@ impl PiRpcTranslator {
         if trimmed.is_empty() && attachments.is_empty() {
             return;
         }
-        self.meta.queued_messages.push(QueuedMessage {
-            id: format!("queued-{}", ulid::Ulid::new()),
+        let id = format!("queued-{}", ulid::Ulid::new());
+        self.stored_queue.push(StoredQueuedPrompt {
+            id: id.clone(),
             text: text.to_string(),
+            attachments: attachments.to_vec(),
             behavior,
-            attachments_count: attachments.len(),
         });
-        if !attachments.is_empty() {
-            self.queued_attachments
-                .push_back((trimmed, attachments.to_vec()));
-        }
+        self.sync_queued_meta();
         self.emit_meta();
+    }
+
+    pub fn remove_queued_message(&mut self, message_id: Option<&str>) -> Vec<StoredQueuedPrompt> {
+        match message_id {
+            Some(target_id) => {
+                self.stored_queue.retain(|item| item.id != target_id);
+            }
+            None => {
+                self.stored_queue.clear();
+            }
+        }
+        self.sync_queued_meta();
+        self.emit_meta();
+        self.stored_queue.clone()
+    }
+
+    fn sync_queued_meta(&mut self) {
+        self.meta.queued_messages = self
+            .stored_queue
+            .iter()
+            .map(|item| QueuedMessage {
+                id: item.id.clone(),
+                text: item.text.clone(),
+                behavior: item.behavior,
+                attachments_count: item.attachments.len(),
+            })
+            .collect();
     }
 
     pub fn resolve_approval(&mut self, approval_id: &str) {
@@ -588,7 +649,7 @@ impl PiRpcTranslator {
     fn finish_run(&mut self, aborted: bool) {
         self.meta.is_streaming = false;
         self.meta.queued_messages.clear();
-        self.queued_attachments.clear();
+        self.stored_queue.clear();
         let turn_id = self.active_turn_id.take();
         self.active_msg_id = None;
         self.active_msg_started_at = None;
@@ -892,28 +953,21 @@ impl PiRpcTranslator {
                 return;
             }
             let mut dequeued_attachments = Vec::new();
-            if !self.meta.queued_messages.is_empty() {
+            if !self.stored_queue.is_empty() {
                 if let Some(pos) = self
-                    .meta
-                    .queued_messages
+                    .stored_queue
                     .iter()
                     .position(|q| q.text.trim() == trimmed)
                 {
-                    self.meta.queued_messages.remove(pos);
+                    let removed = self.stored_queue.remove(pos);
+                    dequeued_attachments = removed.attachments;
                 } else if !trimmed.is_empty() {
-                    self.meta.queued_messages.remove(0);
+                    let removed = self.stored_queue.remove(0);
+                    dequeued_attachments = removed.attachments;
                 }
+                self.sync_queued_meta();
             }
             self.emit_meta();
-            if let Some(pos) = self
-                .queued_attachments
-                .iter()
-                .position(|(t, _)| t == trimmed)
-            {
-                if let Some((_, atts)) = self.queued_attachments.remove(pos) {
-                    dequeued_attachments = atts;
-                }
-            }
             if !trimmed.is_empty() || !dequeued_attachments.is_empty() {
                 let _ = self
                     .events
@@ -2478,5 +2532,27 @@ mod tests {
         assert_eq!(state.meta.background_jobs[0].id, "bg-1");
         assert_eq!(state.meta.background_jobs[0].status, "completed");
         assert_eq!(state.meta.background_jobs[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn pi_rpc_removes_single_and_all_queued_steer_messages() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut tr = PiRpcTranslator::new("pie-q", ChatSessionMeta::default(), tx);
+        tr.enqueue_outgoing_prompt("First steer", &[], StreamingBehavior::Steer);
+        tr.enqueue_outgoing_prompt("Second steer", &[], StreamingBehavior::Steer);
+        tr.enqueue_outgoing_prompt("Third steer", &[], StreamingBehavior::Steer);
+        assert_eq!(tr.meta.queued_messages.len(), 3);
+        assert_eq!(tr.meta.queued_messages[0].behavior, StreamingBehavior::Steer);
+
+        let second_id = tr.meta.queued_messages[1].id.clone();
+        let remaining = tr.remove_queued_message(Some(&second_id));
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].text, "First steer");
+        assert_eq!(remaining[1].text, "Third steer");
+        assert_eq!(tr.meta.queued_messages.len(), 2);
+
+        let cleared = tr.remove_queued_message(None);
+        assert!(cleared.is_empty());
+        assert!(tr.meta.queued_messages.is_empty());
     }
 }

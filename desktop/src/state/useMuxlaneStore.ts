@@ -557,6 +557,20 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     [pushToast],
   );
 
+  const deleteQueuedMessage = useCallback(
+    async (agentId: string, messageId?: string) => {
+      try {
+        await window.muxlane.rpc(Methods.CHAT_QUEUE_DELETE, {
+          agent: agentId,
+          message_id: messageId ?? null,
+        });
+      } catch (err) {
+        pushToast(`删除排队消息失败: ${(err as Error).message}`, "error");
+      }
+    },
+    [pushToast],
+  );
+
   const approveChat = useCallback(
     async (agentId: string, approvalId: string, reply: ApprovalReply) => {
       try {
@@ -722,6 +736,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     deleteAgent,
     sendChatPrompt,
     abortChat,
+    deleteQueuedMessage,
     approveChat,
     configureChat,
     saveBot,

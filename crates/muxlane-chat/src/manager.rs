@@ -1577,6 +1577,21 @@ impl ChatManager {
         Ok(())
     }
 
+    pub async fn delete_queued_message(
+        &self,
+        agent: &AgentId,
+        message_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        let driver = {
+            let map = self.sessions.lock().await;
+            map.get(agent).and_then(|e| e.driver.clone())
+        };
+        if let Some(driver) = driver {
+            driver.send(DriverCmd::DeleteQueuedMessage { message_id })?;
+        }
+        Ok(())
+    }
+
     pub async fn approve(
         &self,
         agent: &AgentId,

@@ -249,14 +249,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     setAttachments((prev) => [...prev, ...next]);
   };
 
+  const defaultStreamingBehavior: StreamingBehavior =
+    meta.driver === "pi_rpc" ? "steer" : "follow_up";
+
   const dispatchText = useCallback(
-    async (text: string, atts: ChatAttachment[], steer = false) => {
+    async (text: string, atts: ChatAttachment[], behaviorOverride?: StreamingBehavior) => {
       setSending(true);
       try {
         const behavior: StreamingBehavior | undefined = meta.is_streaming
-          ? steer
-            ? "steer"
-            : "follow_up"
+          ? (behaviorOverride ?? defaultStreamingBehavior)
           : undefined;
         await onSend(text, atts, behavior);
       } finally {
@@ -264,7 +265,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         textareaRef.current?.focus();
       }
     },
-    [meta.is_streaming, onSend],
+    [defaultStreamingBehavior, meta.is_streaming, onSend],
   );
 
   const handleChooseSlashItem = useCallback(
@@ -278,7 +279,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         setCaret(0);
         setAttachments([]);
         setDismissedTriggerKey(null);
-        void dispatchText(item.token, [], false);
+        void dispatchText(item.token, []);
         return;
       }
       const el = textareaRef.current;
@@ -290,7 +291,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     [caret, dispatchText, draft, onDraftChange, runLocalAction, setDraftAndCaret],
   );
 
-  const handleSubmit = async (steer = false) => {
+  const handleSubmit = async (behaviorOverride?: StreamingBehavior) => {
     if (!canSubmit) return;
     const trimmed = draft.trim();
     if (trimmed === "/clear") {
@@ -316,7 +317,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     setCaret(0);
     setAttachments([]);
     setDismissedTriggerKey(null);
-    await dispatchText(toSend, atts, steer);
+    await dispatchText(toSend, atts, behaviorOverride);
   };
 
   const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -408,8 +409,13 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      const steer = e.ctrlKey || e.metaKey;
-      void handleSubmit(steer);
+      const override: StreamingBehavior | undefined =
+        e.ctrlKey || e.metaKey
+          ? defaultStreamingBehavior === "steer"
+            ? "follow_up"
+            : "steer"
+          : undefined;
+      void handleSubmit(override);
     }
   };
 
@@ -744,8 +750,14 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                 <button
                   type="button"
                   disabled={!canSubmit}
-                  onClick={() => void handleSubmit(false)}
-                  title={meta.is_streaming ? "排队发送 (Enter)" : "发送 (Enter)"}
+                  onClick={() => void handleSubmit()}
+                  title={
+                    meta.is_streaming
+                      ? defaultStreamingBehavior === "steer"
+                        ? "插队引导发送 (Enter)"
+                        : "排队发送 (Enter)"
+                      : "发送 (Enter)"
+                  }
                   className="flex h-7 w-7 shrink-0 items-center justify-center bg-primary-btn text-primary-btn-fg hover:bg-primary-btn-hover disabled:bg-hover disabled:text-ink-faint disabled:cursor-not-allowed transition-colors cursor-pointer"
                 >
                   <ArrowUp className="h-3.5 w-3.5" strokeWidth={2.2} />

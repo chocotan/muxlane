@@ -968,6 +968,27 @@ impl MuxlaneServer {
         }
     }
 
+    async fn handle_chat_queue_delete(&self, req: Request) -> anyhow::Result<Response> {
+        let params = match serde_json::from_value::<muxlane_core::protocol::ChatQueueDeleteParams>(
+            req.params,
+        ) {
+            Ok(params) => params,
+            Err(error) => return Ok(Response::err(req.id, "bad_params", error.to_string())),
+        };
+        match self
+            .chat
+            .delete_queued_message(&params.agent, params.message_id)
+            .await
+        {
+            Ok(()) => Ok(Response::ok(req.id, serde_json::json!({"ok": true}))),
+            Err(error) => Ok(Response::err(
+                req.id,
+                "chat_queue_delete_failed",
+                error.to_string(),
+            )),
+        }
+    }
+
     async fn handle_chat_approve(&self, req: Request) -> anyhow::Result<Response> {
         let params =
             match serde_json::from_value::<muxlane_core::protocol::ChatApproveParams>(req.params) {
@@ -1352,6 +1373,9 @@ impl MuxlaneServer {
                             methods::CHAT_UNSUBSCRIBE => self.handle_chat_unsubscribe(req, &mut connection_chat_subs).await?,
                             methods::CHAT_SEND => self.handle_chat_send(req).await?,
                             methods::CHAT_ABORT => self.handle_chat_abort(req).await?,
+                            methods::CHAT_QUEUE_DELETE => {
+                                self.handle_chat_queue_delete(req).await?
+                            }
                             methods::CHAT_APPROVE => self.handle_chat_approve(req).await?,
                             methods::CHAT_CONFIGURE => self.handle_chat_configure(req).await?,
                             methods::CHAT_SWITCH_MODE => self.handle_chat_switch_mode(req).await?,

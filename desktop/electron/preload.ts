@@ -55,6 +55,18 @@ const api: MuxlaneDesktopBridge = {
   getGitFileDiff(cwd: string, filePath: string, status: string) {
     return ipcRenderer.invoke("muxlane:git-file-diff", cwd, filePath, status);
   },
+  openDshWeb(projectId: string, projectPath: string, customUrl?: string) {
+    return ipcRenderer.invoke("muxlane:dsh-open", projectId, projectPath, customUrl);
+  },
+  restartDshWeb(projectId: string, projectPath: string) {
+    return ipcRenderer.invoke("muxlane:dsh-restart", projectId, projectPath);
+  },
+  stopDshWeb(projectId: string) {
+    return ipcRenderer.invoke("muxlane:dsh-stop", projectId);
+  },
+  listDshWeb() {
+    return ipcRenderer.invoke("muxlane:dsh-list");
+  },
   onEvent(handler: (msg: RpcEventMessage) => void): () => void {
     const listener = (_ev: Electron.IpcRendererEvent, msg: RpcEventMessage) => handler(msg);
     ipcRenderer.on("muxlane:event", listener);

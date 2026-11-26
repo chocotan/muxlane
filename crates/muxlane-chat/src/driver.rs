@@ -29,6 +29,9 @@ pub enum DriverCmd {
         streaming_behavior: Option<StreamingBehavior>,
     },
     Abort,
+    DeleteQueuedMessage {
+        message_id: Option<String>,
+    },
     RespondApproval {
         approval_id: String,
         reply: ApprovalReply,

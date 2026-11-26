@@ -248,6 +248,7 @@ pub mod methods {
     pub const CHAT_UNSUBSCRIBE: &str = "chat.unsubscribe";
     pub const CHAT_SEND: &str = "chat.send";
     pub const CHAT_ABORT: &str = "chat.abort";
+    pub const CHAT_QUEUE_DELETE: &str = "chat.queue.delete";
     pub const CHAT_APPROVE: &str = "chat.approve";
     pub const CHAT_CONFIGURE: &str = "chat.configure";
     pub const CHAT_SWITCH_MODE: &str = "chat.switch_mode";
@@ -697,6 +698,13 @@ pub struct ChatSendParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatAbortParams {
     pub agent: AgentId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatQueueDeleteParams {
+    pub agent: AgentId,
+    #[serde(default)]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

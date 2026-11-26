@@ -5,6 +5,7 @@ import {
   ChevronRight,
   FolderGit2,
   FolderPlus,
+  Globe,
   Pencil,
   Plus,
   Search,
@@ -20,6 +21,7 @@ import type {
   Project,
 } from "../shared/protocol";
 import { agentTypeLabel } from "../shared/timeline";
+import { applyOrder, type DropPosition } from "../state/useSidebarOrder";
 
 interface SidebarProps {
   width: number;
@@ -29,12 +31,31 @@ interface SidebarProps {
   remoteHostsCount: number;
   projects: Project[];
   agents: AgentInstance[];
+  projectOrder: string[];
+  sessionOrder: Record<string, string[]>;
+  onReorderProjects: (
+    visibleProjectIds: string[],
+    draggedId: string,
+    targetId: string,
+    position: DropPosition,
+  ) => void;
+  onReorderSessions: (
+    projectId: string,
+    visibleSessionIds: string[],
+    draggedId: string,
+    targetId: string,
+    position: DropPosition,
+  ) => void;
   chatSummaries: Record<string, ChatSessionSummary>;
   activeAgentId: string | null;
+  openDshProjects: string[];
+  activeDshProjectId: string | null;
   activeSection: "workspace" | "bots";
   globalApprovals: PendingApproval[];
   onOpenRemotes: () => void;
   onSelectAgent: (agentId: string) => void;
+  onOpenDshForProject: (projectId: string) => void;
+  onCloseDshForProject: (projectId: string) => void;
   onAddProject: () => void;
   onDeleteProject: (projectId: string) => void;
   onNewSessionForProject: (projectId: string) => void;
@@ -42,6 +63,14 @@ interface SidebarProps {
   onRenameAgent: (agentId: string, nextTitle: string) => void;
   onDeleteAgent: (agentId: string) => void;
 }
+
+type DragPayload =
+  | { kind: "project"; projectId: string }
+  | { kind: "session"; projectId: string; agentId: string };
+
+type DropIndicator =
+  | { kind: "project"; targetId: string; position: DropPosition }
+  | { kind: "session"; projectId: string; targetId: string; position: DropPosition };
 
 function statusSquareClass(status: AgentStatus, streaming: boolean): string {
   if (status === "blocked") return "bg-question";
@@ -86,12 +115,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
   remoteHostsCount,
   projects,
   agents,
+  projectOrder,
+  sessionOrder,
+  onReorderProjects,
+  onReorderSessions,
   chatSummaries,
   activeAgentId,
+  openDshProjects,
+  activeDshProjectId,
   activeSection,
   globalApprovals,
   onOpenRemotes,
   onSelectAgent,
+  onOpenDshForProject,
+  onCloseDshForProject,
   onAddProject,
   onDeleteProject,
   onNewSessionForProject,
@@ -103,23 +140,36 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [filterQuery, setFilterQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
-  const [dragging, setDragging] = useState(false);
+  const [draggingResize, setDraggingResize] = useState(false);
+  const [dragPayload, setDragPayload] = useState<DragPayload | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<DropIndicator | null>(null);
 
   const normalizedQuery = filterQuery.trim().toLowerCase();
+  const canDragReorder = !normalizedQuery && !editingId;
+
+  const orderedProjects = useMemo(
+    () => applyOrder(projects, projectOrder, (p) => p.id),
+    [projectOrder, projects],
+  );
 
   const filteredProjects = useMemo(() => {
+    const groups = orderedProjects.map((project) => {
+      const projectAgents = applyOrder(
+        agents.filter((a) => a.project === project.id),
+        sessionOrder[project.id],
+        (a) => a.id,
+      );
+      return { project, agents: projectAgents };
+    });
+
     if (!normalizedQuery) {
-      return projects.map((project) => ({
-        project,
-        agents: agents.filter((a) => a.project === project.id),
-      }));
+      return groups;
     }
-    return projects
-      .map((project) => {
+    return groups
+      .map(({ project, agents: projectAgents }) => {
         const projectMatch =
           project.name.toLowerCase().includes(normalizedQuery) ||
           (project.branch?.toLowerCase().includes(normalizedQuery) ?? false);
-        const projectAgents = agents.filter((a) => a.project === project.id);
         const matchingAgents = projectMatch
           ? projectAgents
           : projectAgents.filter(
@@ -130,7 +180,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         return { project, agents: matchingAgents, projectMatch };
       })
       .filter((g) => g.projectMatch || g.agents.length > 0);
-  }, [agents, normalizedQuery, projects]);
+  }, [agents, normalizedQuery, orderedProjects, sessionOrder]);
 
   const startRename = (agent: AgentInstance) => {
     setEditingId(agent.id);
@@ -144,24 +194,39 @@ export const Sidebar: React.FC<SidebarProps> = ({
     setEditingId(null);
   };
 
-  const handleDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
+  const handleResizeDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = width;
-    setDragging(true);
+    setDraggingResize(true);
 
     const onMove = (ev: PointerEvent) => {
       const next = Math.min(380, Math.max(216, startWidth + (ev.clientX - startX)));
       onResize(next);
     };
     const onUp = () => {
-      setDragging(false);
+      setDraggingResize(false);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
+
+  const clearDragState = () => {
+    setDragPayload(null);
+    setDropIndicator(null);
+  };
+
+  const computeDropPos = (e: React.DragEvent<HTMLElement>): DropPosition => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  };
+
+  const visibleProjectIds = useMemo(
+    () => orderedProjects.map((p) => p.id),
+    [orderedProjects],
+  );
 
   return (
     <aside
@@ -260,8 +325,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
 
-      {/* Projects & Sessions Tree */}
-      <div tabIndex={-1} className="mux-scroll-quiet flex-1 overflow-y-auto py-2 focus:outline-none">
+      {/* Projects & Sessions Tree (supports drag-and-drop reordering for both projects and sessions) */}
+      <div
+        tabIndex={-1}
+        onDragEnd={clearDragState}
+        className="mux-scroll-quiet flex-1 overflow-y-auto py-2 focus:outline-none"
+      >
         {projects.length === 0 ? (
           <div className="mx-3 mt-6 border border-dashed border-line p-4 text-center">
             <p className="text-[12px] text-ink-2">还没有项目工作区</p>
@@ -281,10 +350,67 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="space-y-2">
             {filteredProjects.map(({ project, agents: projectAgents }) => {
               const isCollapsed = !normalizedQuery && collapsed[project.id] === true;
+              const isDraggingThisProject =
+                dragPayload?.kind === "project" && dragPayload.projectId === project.id;
+              const projectDropBefore =
+                dropIndicator?.kind === "project" &&
+                dropIndicator.targetId === project.id &&
+                dropIndicator.position === "before";
+              const projectDropAfter =
+                dropIndicator?.kind === "project" &&
+                dropIndicator.targetId === project.id &&
+                dropIndicator.position === "after";
+              const hasOpenDsh = openDshProjects.includes(project.id);
+              const isDshActive =
+                activeSection === "workspace" && activeDshProjectId === project.id;
+              const visibleSessionIds = projectAgents.map((a) => a.id);
+
               return (
-                <div key={project.id} className="px-1.5">
-                  {/* Project Group Row — DeepSeek Harness style single 16px leading slot (Folder at rest, Chevron on hover) */}
-                  <div className="group relative flex h-7 items-center px-2 hover:bg-hover transition-colors">
+                <div
+                  key={project.id}
+                  onDragOver={(e) => {
+                    if (!canDragReorder || dragPayload?.kind !== "project") return;
+                    if (dragPayload.projectId === project.id) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    const pos = computeDropPos(e);
+                    setDropIndicator((prev) =>
+                      prev?.kind === "project" &&
+                      prev.targetId === project.id &&
+                      prev.position === pos
+                        ? prev
+                        : { kind: "project", targetId: project.id, position: pos },
+                    );
+                  }}
+                  onDrop={(e) => {
+                    if (!canDragReorder || dragPayload?.kind !== "project") return;
+                    e.preventDefault();
+                    const pos = computeDropPos(e);
+                    if (dragPayload.projectId !== project.id) {
+                      onReorderProjects(visibleProjectIds, dragPayload.projectId, project.id, pos);
+                    }
+                    clearDragState();
+                  }}
+                  className={`relative px-1.5 ${isDraggingThisProject ? "opacity-45" : ""}`}
+                >
+                  {projectDropBefore && (
+                    <div className="pointer-events-none absolute inset-x-2 -top-1 z-10 h-[2px] bg-ink-strong" />
+                  )}
+                  {projectDropAfter && (
+                    <div className="pointer-events-none absolute inset-x-2 -bottom-1 z-10 h-[2px] bg-ink-strong" />
+                  )}
+
+                  {/* Project Group Row — draggable to reorder projects */}
+                  <div
+                    draggable={canDragReorder}
+                    onDragStart={(e) => {
+                      if (!canDragReorder) return;
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", `project:${project.id}`);
+                      setDragPayload({ kind: "project", projectId: project.id });
+                    }}
+                    className="group relative flex h-7 items-center px-2 hover:bg-hover transition-colors"
+                  >
                     <button
                       type="button"
                       onClick={() =>
@@ -314,6 +440,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <div className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-hover pl-1.5 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity">
                       <button
                         type="button"
+                        title="在标签页中打开 DeepSeek Harness WebUI"
+                        onClick={() => onOpenDshForProject(project.id)}
+                        className="flex h-5 w-5 items-center justify-center text-working hover:bg-active cursor-pointer"
+                      >
+                        <Globe className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
                         title="在此项目新建会话"
                         onClick={() => onNewSessionForProject(project.id)}
                         className="flex h-5 w-5 items-center justify-center text-ink-muted hover:bg-active hover:text-ink-strong cursor-pointer"
@@ -331,10 +465,57 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                   </div>
 
-                  {/* Session Rows — exact same px-2 + 16px leading slot + gap-1.5 as Project Row */}
+                  {/* Session Rows + Open DSH WebUI Row */}
                   {!isCollapsed && (
                     <div className="mt-0.5 space-y-[1px]">
-                      {projectAgents.length === 0 ? (
+                      {hasOpenDsh && (
+                        <div
+                          onClick={() => onOpenDshForProject(project.id)}
+                          className={`group relative flex h-7 items-center justify-between gap-2 px-2 transition-colors cursor-pointer ${
+                            isDshActive
+                              ? "bg-active text-ink-strong"
+                              : "text-ink-2 hover:bg-hover hover:text-ink"
+                          }`}
+                        >
+                          {isDshActive && (
+                            <span className="absolute left-0 top-1 bottom-1 w-[2px] bg-working" />
+                          )}
+                          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                            <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
+                              <Globe className="h-3 w-3 text-working" strokeWidth={1.85} />
+                            </span>
+                            <span
+                              className={`truncate text-[12.5px] ${
+                                isDshActive ? "font-medium text-ink-strong" : ""
+                              }`}
+                            >
+                              DeepSeek Harness
+                            </span>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <span className="font-mono text-[10px] text-working">Web</span>
+                          </div>
+                          <div
+                            className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
+                              isDshActive ? "bg-active" : "bg-hover"
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              title="关闭 DSH WebUI"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onCloseDshForProject(project.id);
+                              }}
+                              className="flex h-5 w-5 items-center justify-center text-ink-muted hover:text-danger cursor-pointer"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {projectAgents.length === 0 && !hasOpenDsh ? (
                         <button
                           type="button"
                           onClick={() => onNewSessionForProject(project.id)}
@@ -348,7 +529,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       ) : (
                         projectAgents.map((agent) => {
                           const isActive =
-                            activeSection === "workspace" && activeAgentId === agent.id;
+                            activeSection === "workspace" &&
+                            !activeDshProjectId &&
+                            activeAgentId === agent.id;
                           const summary = chatSummaries[agent.id];
                           const streaming = summary?.meta.is_streaming === true;
                           const unread =
@@ -356,17 +539,97 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             (agent.status === "done" ||
                               agent.status === "failed" ||
                               agent.status === "blocked");
+                          const isDraggingThisSession =
+                            dragPayload?.kind === "session" && dragPayload.agentId === agent.id;
+                          const sessionDropBefore =
+                            dropIndicator?.kind === "session" &&
+                            dropIndicator.projectId === project.id &&
+                            dropIndicator.targetId === agent.id &&
+                            dropIndicator.position === "before";
+                          const sessionDropAfter =
+                            dropIndicator?.kind === "session" &&
+                            dropIndicator.projectId === project.id &&
+                            dropIndicator.targetId === agent.id &&
+                            dropIndicator.position === "after";
 
                           return (
                             <div
                               key={agent.id}
+                              draggable={canDragReorder && editingId !== agent.id}
+                              onDragStart={(e) => {
+                                if (!canDragReorder || editingId === agent.id) return;
+                                e.stopPropagation();
+                                e.dataTransfer.effectAllowed = "move";
+                                e.dataTransfer.setData("text/plain", `session:${agent.id}`);
+                                setDragPayload({
+                                  kind: "session",
+                                  projectId: project.id,
+                                  agentId: agent.id,
+                                });
+                              }}
+                              onDragOver={(e) => {
+                                if (
+                                  !canDragReorder ||
+                                  dragPayload?.kind !== "session" ||
+                                  dragPayload.projectId !== project.id ||
+                                  dragPayload.agentId === agent.id
+                                ) {
+                                  return;
+                                }
+                                e.preventDefault();
+                                e.stopPropagation();
+                                e.dataTransfer.dropEffect = "move";
+                                const pos = computeDropPos(e);
+                                setDropIndicator((prev) =>
+                                  prev?.kind === "session" &&
+                                  prev.targetId === agent.id &&
+                                  prev.position === pos
+                                    ? prev
+                                    : {
+                                        kind: "session",
+                                        projectId: project.id,
+                                        targetId: agent.id,
+                                        position: pos,
+                                      },
+                                );
+                              }}
+                              onDrop={(e) => {
+                                if (
+                                  !canDragReorder ||
+                                  dragPayload?.kind !== "session" ||
+                                  dragPayload.projectId !== project.id
+                                ) {
+                                  return;
+                                }
+                                e.preventDefault();
+                                e.stopPropagation();
+                                const pos = computeDropPos(e);
+                                if (dragPayload.agentId !== agent.id) {
+                                  onReorderSessions(
+                                    project.id,
+                                    visibleSessionIds,
+                                    dragPayload.agentId,
+                                    agent.id,
+                                    pos,
+                                  );
+                                }
+                                clearDragState();
+                              }}
                               onClick={() => onSelectAgent(agent.id)}
                               className={`group relative flex h-7 items-center justify-between gap-2 px-2 transition-colors cursor-pointer ${
+                                isDraggingThisSession ? "opacity-45" : ""
+                              } ${
                                 isActive
                                   ? "bg-active text-ink-strong"
                                   : "text-ink-2 hover:bg-hover hover:text-ink"
                               }`}
                             >
+                              {sessionDropBefore && (
+                                <span className="pointer-events-none absolute inset-x-1 top-0 z-10 h-[2px] bg-ink-strong" />
+                              )}
+                              {sessionDropAfter && (
+                                <span className="pointer-events-none absolute inset-x-1 bottom-0 z-10 h-[2px] bg-ink-strong" />
+                              )}
                               {isActive && (
                                 <span className="absolute left-0 top-1 bottom-1 w-[2px] bg-ink-strong" />
                               )}
@@ -404,7 +667,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 )}
                               </div>
 
-                              {/* Resting tag — keeps constant layout; hover actions overlay smoothly on top */}
                               {editingId !== agent.id && (
                                 <>
                                   <div className="flex shrink-0 items-center gap-1.5">
@@ -464,10 +726,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Thin Seam Resize Handle with Invisible Wide Grab Target */}
       <div
-        onPointerDown={handleDragStart}
+        onPointerDown={handleResizeDragStart}
         title="拖拽调整侧边栏宽度"
         className={`absolute top-0 bottom-0 -right-[3px] z-20 w-[6px] cursor-col-resize transition-colors ${
-          dragging ? "bg-ink-muted/40" : "hover:bg-ink-muted/25"
+          draggingResize ? "bg-ink-muted/40" : "hover:bg-ink-muted/25"
         }`}
       />
     </aside>

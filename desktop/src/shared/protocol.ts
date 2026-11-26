@@ -496,6 +496,7 @@ export const Methods = {
   CHAT_UNSUBSCRIBE: "chat.unsubscribe",
   CHAT_SEND: "chat.send",
   CHAT_ABORT: "chat.abort",
+  CHAT_QUEUE_DELETE: "chat.queue.delete",
   CHAT_APPROVE: "chat.approve",
   CHAT_CONFIGURE: "chat.configure",
   CHAT_SWITCH_MODE: "chat.switch_mode",
@@ -551,6 +552,16 @@ export interface HostEntry {
   identityFile?: string;
   remoteSocketPath?: string;
   hasPassword?: boolean;
+  tunnelReady?: boolean;
+}
+
+export interface DshInstanceInfo {
+  projectId: string;
+  projectPath: string;
+  url: string;
+  status: "starting" | "ready" | "error";
+  error?: string | null;
+  isCustomUrl?: boolean;
 }
 
 export interface AddHostInput {
@@ -610,6 +621,10 @@ export interface MuxlaneDesktopBridge {
   saveRelayConfig(cfg: RelayConfig): Promise<RelayConfig>;
   getGitChanges(cwd: string): Promise<WorkspaceGitChanges>;
   getGitFileDiff(cwd: string, filePath: string, status: string): Promise<string>;
+  openDshWeb(projectId: string, projectPath: string, customUrl?: string): Promise<DshInstanceInfo>;
+  restartDshWeb(projectId: string, projectPath: string): Promise<DshInstanceInfo>;
+  stopDshWeb(projectId: string): Promise<void>;
+  listDshWeb(): Promise<DshInstanceInfo[]>;
   onEvent(handler: (msg: RpcEventMessage) => void): () => void;
   onStatus(handler: (status: DaemonConnectionStatus) => void): () => void;
   onHostsChanged(handler: (state: HostsState) => void): () => void;

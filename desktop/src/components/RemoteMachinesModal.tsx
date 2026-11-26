@@ -271,6 +271,11 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
                           <span className="shrink-0 border border-line-subtle bg-elevated px-1 font-mono text-[10px] text-ink-muted uppercase">
                             {hostAuthBadge(host)}
                           </span>
+                          {!isActive && host.tunnelReady && (
+                            <span className="shrink-0 border border-success/40 bg-success/10 px-1 font-mono text-[10px] text-success">
+                              隧道就绪
+                            </span>
+                          )}
                         </div>
                         <div className="truncate font-mono text-[11px] text-ink-muted">
                           {hostTargetDisplay(host)}

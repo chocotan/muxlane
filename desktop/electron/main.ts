@@ -8,12 +8,14 @@ import type {
   WorkspaceGitChanges,
   WorkspaceGitFile,
 } from "../src/shared/protocol";
+import { DshWebManager } from "./dsh-manager";
 import { HostManager, readRelayConfig, writeRelayConfig } from "./host-manager";
 import { MuxlaneSocketClient, resolveMuxlaneSocketPath } from "./muxlane-socket";
 
 let mainWindow: BrowserWindow | null = null;
 let rpcClient: MuxlaneSocketClient | null = null;
 let hostManager: HostManager | null = null;
+const dshManager = new DshWebManager();
 
 function createWindow(): void {
   if (process.platform !== "darwin") {
@@ -32,6 +34,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      webviewTag: true,
     },
   });
   if (process.platform !== "darwin") {
@@ -192,6 +195,25 @@ function setupIpc(): void {
       return readWorkspaceGitFileDiff(cwd, filePath, status);
     },
   );
+
+  ipcMain.handle(
+    "muxlane:dsh-open",
+    async (_ev, projectId: string, projectPath: string, customUrl?: string) => {
+      return dshManager.open(projectId, projectPath, customUrl);
+    },
+  );
+
+  ipcMain.handle("muxlane:dsh-restart", async (_ev, projectId: string, projectPath: string) => {
+    return dshManager.restart(projectId, projectPath);
+  });
+
+  ipcMain.handle("muxlane:dsh-stop", (_ev, projectId: string) => {
+    dshManager.stop(projectId);
+  });
+
+  ipcMain.handle("muxlane:dsh-list", () => {
+    return dshManager.list();
+  });
 }
 
 app.whenReady().then(() => {
@@ -209,6 +231,7 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   rpcClient?.dispose();
   hostManager?.dispose();
+  dshManager.dispose();
   if (process.platform !== "darwin") {
     app.quit();
   }

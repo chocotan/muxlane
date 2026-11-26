@@ -1,15 +1,22 @@
 import React from "react";
-import { PanelRight, PanelRightClose, Plus, X } from "lucide-react";
-import type { AgentInstance } from "../shared/protocol";
+import { Globe, PanelRight, PanelRightClose, Plus, X } from "lucide-react";
+import type { AgentInstance, Project } from "../shared/protocol";
 
 interface WorkspaceHeaderProps {
   rightSidebarOpen: boolean;
   onToggleRightSidebar: () => void;
   openTabs: string[];
   activeAgentId: string | null;
+  openDshProjects: string[];
+  activeDshProjectId: string | null;
+  projects: Project[];
   agents: AgentInstance[];
+  activeProjectId: string | null;
   onSelectTab: (agentId: string) => void;
   onCloseTab: (agentId: string) => void;
+  onSelectDshTab: (projectId: string) => void;
+  onCloseDshTab: (projectId: string) => void;
+  onOpenDshForActiveProject: () => void;
   onNewTab: () => void;
 }
 
@@ -18,19 +25,26 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
   onToggleRightSidebar,
   openTabs,
   activeAgentId,
+  openDshProjects,
+  activeDshProjectId,
+  projects,
   agents,
+  activeProjectId,
   onSelectTab,
   onCloseTab,
+  onSelectDshTab,
+  onCloseDshTab,
+  onOpenDshForActiveProject,
   onNewTab,
 }) => {
   return (
     <header className="flex h-9 shrink-0 items-stretch justify-between border-b border-line-subtle bg-tab-bar select-none">
-      {/* Left: Orca-style continuous tab strip */}
+      {/* Left: Orca-style continuous tab strip (Agent tabs + Project DSH WebUI tabs) */}
       <div className="mux-tab-strip flex min-w-0 flex-1 items-stretch overflow-x-auto">
         {openTabs.map((tabId) => {
           const agent = agents.find((a) => a.id === tabId);
           if (!agent) return null;
-          const active = tabId === activeAgentId;
+          const active = !activeDshProjectId && tabId === activeAgentId;
           return (
             <div
               key={tabId}
@@ -41,7 +55,6 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
                   : "bg-tab-bar text-ink-muted hover:bg-hover/60 hover:text-ink"
               }`}
             >
-              {/* Seamless merge over header bottom hairline for active tab */}
               {active && (
                 <span className="pointer-events-none absolute inset-x-0 -bottom-[1px] h-[1px] bg-tab-active" />
               )}
@@ -80,6 +93,48 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
           );
         })}
 
+        {/* Open DeepSeek Harness WebUI Tabs */}
+        {openDshProjects.map((projectId) => {
+          const project = projects.find((p) => p.id === projectId);
+          if (!project) return null;
+          const active = activeDshProjectId === projectId;
+          return (
+            <div
+              key={`dsh:${projectId}`}
+              onClick={() => onSelectDshTab(projectId)}
+              title={`DeepSeek Harness WebUI · ${project.name}`}
+              className={`group relative flex max-w-[210px] min-w-[120px] shrink-0 items-center justify-between gap-2 border-r border-line-subtle px-3 text-[12px] transition-colors cursor-pointer ${
+                active
+                  ? "bg-tab-active text-ink-strong"
+                  : "bg-tab-bar text-ink-muted hover:bg-hover/60 hover:text-ink"
+              }`}
+            >
+              {active && (
+                <span className="pointer-events-none absolute inset-x-0 -bottom-[1px] h-[1px] bg-tab-active" />
+              )}
+              <div className="flex min-w-0 items-center gap-1.5">
+                <Globe className="h-3 w-3 shrink-0 text-working" strokeWidth={1.85} />
+                <span className={`truncate ${active ? "font-medium" : ""}`}>
+                  DSH · {project.name}
+                </span>
+              </div>
+              <button
+                type="button"
+                aria-label={`关闭 DSH ${project.name}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCloseDshTab(projectId);
+                }}
+                className={`flex h-4 w-4 shrink-0 items-center justify-center text-ink-muted hover:bg-active hover:text-ink-strong transition-opacity cursor-pointer ${
+                  active ? "opacity-55 hover:opacity-100" : "opacity-0 group-hover:opacity-100"
+                }`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          );
+        })}
+
         <button
           type="button"
           onClick={onNewTab}
@@ -88,6 +143,18 @@ export const WorkspaceHeader: React.FC<WorkspaceHeaderProps> = ({
         >
           <Plus className="h-3.5 w-3.5" strokeWidth={1.85} />
         </button>
+
+        {activeProjectId && (
+          <button
+            type="button"
+            onClick={onOpenDshForActiveProject}
+            title="在当前项目标签页中打开 DeepSeek Harness WebUI"
+            className="flex shrink-0 items-center gap-1 border-l border-line-subtle px-2.5 text-[11px] font-mono text-ink-muted hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
+          >
+            <Globe className="h-3 w-3 text-working" strokeWidth={1.8} />
+            <span>DSH</span>
+          </button>
+        )}
       </div>
 
       {/* Right: Orca Right Sidebar Toggle */}
