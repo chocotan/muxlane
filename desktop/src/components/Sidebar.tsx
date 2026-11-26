@@ -3,7 +3,6 @@ import {
   BellRing,
   ChevronDown,
   ChevronRight,
-  FolderGit2,
   FolderPlus,
   Globe,
   Pencil,
@@ -22,6 +21,7 @@ import type {
 } from "../shared/protocol";
 import { agentTypeLabel } from "../shared/timeline";
 import { applyOrder, type DropPosition } from "../state/useSidebarOrder";
+import { ProjectFolderIcon } from "./MuxlaneIcons";
 
 interface SidebarProps {
   width: number;
@@ -47,12 +47,15 @@ interface SidebarProps {
     position: DropPosition,
   ) => void;
   chatSummaries: Record<string, ChatSessionSummary>;
+  activeProjectId: string | null;
+  projectWorkspacesEnabled: boolean;
   activeAgentId: string | null;
   openDshProjects: string[];
   activeDshProjectId: string | null;
   activeSection: "workspace" | "bots";
   globalApprovals: PendingApproval[];
   onOpenRemotes: () => void;
+  onSelectProject: (projectId: string) => void;
   onSelectAgent: (agentId: string) => void;
   onOpenDshForProject: (projectId: string) => void;
   onCloseDshForProject: (projectId: string) => void;
@@ -120,12 +123,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onReorderProjects,
   onReorderSessions,
   chatSummaries,
+  activeProjectId,
+  projectWorkspacesEnabled,
   activeAgentId,
   openDshProjects,
   activeDshProjectId,
   activeSection,
   globalApprovals,
   onOpenRemotes,
+  onSelectProject,
   onSelectAgent,
   onOpenDshForProject,
   onCloseDshForProject,
@@ -363,6 +369,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
               const hasOpenDsh = openDshProjects.includes(project.id);
               const isDshActive =
                 activeSection === "workspace" && activeDshProjectId === project.id;
+              const isCurrentProject =
+                activeSection === "workspace" &&
+                projectWorkspacesEnabled &&
+                activeProjectId === project.id;
+              const isProjectRowHighlighted =
+                isCurrentProject && !activeAgentId && !activeDshProjectId;
               const visibleSessionIds = projectAgents.map((a) => a.id);
 
               return (
@@ -400,7 +412,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <div className="pointer-events-none absolute inset-x-2 -bottom-1 z-10 h-[2px] bg-ink-strong" />
                   )}
 
-                  {/* Project Group Row — draggable to reorder projects */}
+                  {/* Project Group Row — click selects project workspace (click again collapses), draggable to reorder */}
                   <div
                     draggable={canDragReorder}
                     onDragStart={(e) => {
@@ -409,26 +421,68 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       e.dataTransfer.setData("text/plain", `project:${project.id}`);
                       setDragPayload({ kind: "project", projectId: project.id });
                     }}
-                    className="group relative flex h-7 items-center px-2 hover:bg-hover transition-colors"
+                    title={project.path}
+                    className={`group relative flex h-7 items-center px-1.5 transition-colors ${
+                      isProjectRowHighlighted
+                        ? "bg-active text-ink-strong"
+                        : "hover:bg-hover"
+                    }`}
                   >
+                    {isCurrentProject && (
+                      <span
+                        className={`pointer-events-none absolute left-0 top-1 bottom-1 w-[2px] ${
+                          isProjectRowHighlighted ? "bg-ink-strong" : "bg-ink-muted/60"
+                        }`}
+                      />
+                    )}
                     <button
                       type="button"
-                      onClick={() =>
-                        setCollapsed((prev) => ({ ...prev, [project.id]: !prev[project.id] }))
-                      }
-                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left cursor-pointer"
+                      aria-label={isCollapsed ? `展开 ${project.name}` : `折叠 ${project.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCollapsed((prev) => ({ ...prev, [project.id]: !prev[project.id] }));
+                      }}
+                      className="flex h-5 w-4 shrink-0 items-center justify-center text-ink-muted hover:text-ink-strong cursor-pointer"
                     >
-                      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-ink-muted group-hover:hidden">
-                        <FolderGit2 className="h-3.5 w-3.5" strokeWidth={1.7} />
+                      {isCollapsed ? (
+                        <ChevronRight className="h-3 w-3" strokeWidth={1.9} />
+                      ) : (
+                        <ChevronDown className="h-3 w-3" strokeWidth={1.9} />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (projectWorkspacesEnabled) {
+                          if (activeProjectId === project.id) {
+                            setCollapsed((prev) => ({
+                              ...prev,
+                              [project.id]: !prev[project.id],
+                            }));
+                          } else {
+                            onSelectProject(project.id);
+                          }
+                        } else {
+                          setCollapsed((prev) => ({
+                            ...prev,
+                            [project.id]: !prev[project.id],
+                          }));
+                        }
+                      }}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 pl-0.5 text-left cursor-pointer"
+                    >
+                      <span
+                        className={`inline-flex h-4 w-4 shrink-0 items-center justify-center ${
+                          isCurrentProject ? "text-ink-strong" : "text-ink-muted"
+                        }`}
+                      >
+                        <ProjectFolderIcon className="h-[14px] w-[14px]" />
                       </span>
-                      <span className="hidden h-4 w-4 shrink-0 items-center justify-center text-ink-muted group-hover:inline-flex">
-                        {isCollapsed ? (
-                          <ChevronRight className="h-3.5 w-3.5" strokeWidth={1.9} />
-                        ) : (
-                          <ChevronDown className="h-3.5 w-3.5" strokeWidth={1.9} />
-                        )}
-                      </span>
-                      <span className="truncate text-[12px] font-medium text-ink">
+                      <span
+                        className={`truncate text-[12px] font-medium ${
+                          isCurrentProject ? "text-ink-strong" : "text-ink"
+                        }`}
+                      >
                         {project.name}
                       </span>
                       {project.branch && (
@@ -437,7 +491,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         </span>
                       )}
                     </button>
-                    <div className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-hover pl-1.5 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity">
+                    <div
+                      className={`pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 pl-1.5 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 transition-opacity ${
+                        isProjectRowHighlighted ? "bg-active" : "bg-hover"
+                      }`}
+                    >
                       <button
                         type="button"
                         title="在标签页中打开 DeepSeek Harness WebUI"

@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import type { DaemonConnectionStatus } from "../shared/protocol";
 import { isDarkTheme, type AppTheme } from "../state/useTheme";
+import { MuxlaneLogoIcon } from "./MuxlaneIcons";
 
 interface AppRailProps {
   activeSection: "workspace" | "bots";
@@ -62,9 +63,7 @@ export const AppRail: React.FC<AppRailProps> = ({
           title="Muxlane"
           className="flex h-9 w-full items-center justify-center border-b border-line-subtle"
         >
-          <span className="flex h-5 w-5 items-center justify-center bg-primary-btn font-mono text-[11px] font-bold tracking-tighter text-primary-btn-fg">
-            M
-          </span>
+          <MuxlaneLogoIcon className="h-[22px] w-[22px]" />
         </div>
 
         <div className="mt-2 flex w-full flex-col items-center gap-1">

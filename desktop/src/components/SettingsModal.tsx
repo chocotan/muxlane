@@ -408,8 +408,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {tab === "general" && (
               <div className="divide-y divide-line-subtle">
-                {/* Desktop Notifications */}
+                {/* Project-scoped workspace tabs (matches Rust project_workspaces) */}
                 <div className="flex items-center justify-between gap-4 pb-4">
+                  <div>
+                    <div className="text-[13px] font-medium text-ink-strong">按项目隔离标签页</div>
+                    <div className="mt-0.5 text-[11.5px] text-ink-muted">
+                      每个项目独立保存右侧打开的会话与 DSH 标签；关闭后所有项目共享同一组标签栏
+                    </div>
+                  </div>
+                  <SquareToggle
+                    checked={settings.projectWorkspacesEnabled}
+                    onChange={(next) => onUpdateSettings({ projectWorkspacesEnabled: next })}
+                    label="按项目隔离标签页"
+                  />
+                </div>
+
+                {/* Desktop Notifications */}
+                <div className="flex items-center justify-between gap-4 py-4">
                   <div>
                     <div className="text-[13px] font-medium text-ink-strong">系统桌面通知</div>
                     <div className="mt-0.5 text-[11.5px] text-ink-muted">

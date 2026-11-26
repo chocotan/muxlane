@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from "electron";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -17,10 +17,18 @@ let rpcClient: MuxlaneSocketClient | null = null;
 let hostManager: HostManager | null = null;
 const dshManager = new DshWebManager();
 
+function resolveAppIcon() {
+  const iconPath = path.join(__dirname, "..", "assets", "muxlane-icon.png");
+  const img = nativeImage.createFromPath(iconPath);
+  return img.isEmpty() ? undefined : img;
+}
+
 function createWindow(): void {
+  app.setName("Muxlane");
   if (process.platform !== "darwin") {
     Menu.setApplicationMenu(null);
   }
+  const appIcon = resolveAppIcon();
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -28,6 +36,7 @@ function createWindow(): void {
     minHeight: 600,
     backgroundColor: "#0c0c0d",
     title: "Muxlane",
+    icon: appIcon,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),

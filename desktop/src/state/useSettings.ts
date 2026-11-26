@@ -21,6 +21,7 @@ export interface DesktopSettings {
   terminalFontFamily: TerminalFontFamily;
   defaultViewMode: SessionViewMode;
   notificationsEnabled: boolean;
+  projectWorkspacesEnabled: boolean;
 }
 
 const STORAGE_KEY = "muxlane.desktop.settings.v2";
@@ -34,6 +35,7 @@ const DEFAULT_SETTINGS: DesktopSettings = {
   terminalFontFamily: "JetBrains Mono",
   defaultViewMode: "chat",
   notificationsEnabled: true,
+  projectWorkspacesEnabled: true,
 };
 
 export const FONT_FAMILY_OPTIONS: Array<{ value: TerminalFontFamily; css: string }> = [
@@ -96,6 +98,10 @@ function loadSettings(): DesktopSettings {
           typeof parsed.notificationsEnabled === "boolean"
             ? parsed.notificationsEnabled
             : DEFAULT_SETTINGS.notificationsEnabled,
+        projectWorkspacesEnabled:
+          typeof parsed.projectWorkspacesEnabled === "boolean"
+            ? parsed.projectWorkspacesEnabled
+            : DEFAULT_SETTINGS.projectWorkspacesEnabled,
       };
     }
     // Migrate v1 settings: preserve theme/font/scale, adopt new 'chat' default view mode.
@@ -122,6 +128,7 @@ function loadSettings(): DesktopSettings {
           typeof parsed.notificationsEnabled === "boolean"
             ? parsed.notificationsEnabled
             : DEFAULT_SETTINGS.notificationsEnabled,
+        projectWorkspacesEnabled: DEFAULT_SETTINGS.projectWorkspacesEnabled,
       };
     }
     const legacyTheme = window.localStorage.getItem(LEGACY_THEME_KEY);

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { FolderPlus, Plus, RefreshCw, Server, X } from "lucide-react";
+import { FolderPlus, Globe, Plus, RefreshCw, Server, X } from "lucide-react";
 import { isChatOnlySession, useMuxlaneStore } from "../state/useMuxlaneStore";
 import { resolveTerminalFontCss, useSettings } from "../state/useSettings";
 import { useSidebarOrder } from "../state/useSidebarOrder";
@@ -8,6 +8,7 @@ import { BotsPanel } from "./BotsPanel";
 import { ChatPane } from "./ChatPane";
 import { CommandPalette } from "./CommandPalette";
 import { DshWebPane } from "./DshWebPane";
+import { MuxlaneLogoIcon, ProjectFolderIcon } from "./MuxlaneIcons";
 import { NewSessionModal } from "./NewSessionModal";
 import { RemoteMachinesModal } from "./RemoteMachinesModal";
 import { RightSidebar, type RightSidebarTab } from "./RightSidebar";
@@ -51,6 +52,7 @@ export const App: React.FC = () => {
   const { settings, updateSettings, toggleTheme, resetSettings } = useSettings();
   const store = useMuxlaneStore({
     notificationsEnabled: settings.notificationsEnabled,
+    projectWorkspacesEnabled: settings.projectWorkspacesEnabled,
   });
   const sidebarOrder = useSidebarOrder(store.hostsState.activeHostId);
 
@@ -65,8 +67,6 @@ export const App: React.FC = () => {
   const [remoteProjectOpen, setRemoteProjectOpen] = useState(false);
   const [remoteProjectPath, setRemoteProjectPath] = useState("");
   const [remoteProjectCreate, setRemoteProjectCreate] = useState(false);
-  const [openDshProjects, setOpenDshProjects] = useState<string[]>([]);
-  const [activeDshProjectId, setActiveDshProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -79,11 +79,14 @@ export const App: React.FC = () => {
   const projects = store.snapshot?.projects ?? [];
   const agents = store.snapshot?.agents ?? [];
   const activeAgent = agents.find((a) => a.id === store.activeAgentId);
-  const activeProject = activeDshProjectId
-    ? projects.find((p) => p.id === activeDshProjectId)
+  const activeProject = store.activeProjectId
+    ? projects.find((p) => p.id === store.activeProjectId)
     : activeAgent
       ? projects.find((p) => p.id === activeAgent.project)
       : undefined;
+  const activeProjectAgents = activeProject
+    ? agents.filter((a) => a.project === activeProject.id)
+    : [];
   const activeTimeline = store.activeAgentId ? store.timelines[store.activeAgentId] : undefined;
   const activeIsChat = isChatOnlySession(activeAgent);
 
@@ -95,20 +98,7 @@ export const App: React.FC = () => {
   const terminalFontCss = resolveTerminalFontCss(settings.terminalFontFamily);
 
   const handleOpenAgent = (agentId: string) => {
-    setActiveDshProjectId(null);
     store.openAgent(agentId);
-  };
-
-  const handleOpenDshForProject = (projectId: string) => {
-    setOpenDshProjects((prev) => (prev.includes(projectId) ? prev : [...prev, projectId]));
-    setActiveDshProjectId(projectId);
-    store.setActiveSection("workspace");
-  };
-
-  const handleCloseDshForProject = (projectId: string) => {
-    setOpenDshProjects((prev) => prev.filter((id) => id !== projectId));
-    setActiveDshProjectId((cur) => (cur === projectId ? null : cur));
-    void window.muxlane.stopDshWeb(projectId);
   };
 
   const handleAddProject = async () => {
@@ -120,7 +110,8 @@ export const App: React.FC = () => {
     }
     const dir = await window.muxlane.pickDirectory();
     if (dir) {
-      await store.addProject(dir, false);
+      const proj = await store.addProject(dir, false);
+      if (proj) store.selectProject(proj.id);
     }
   };
 
@@ -129,6 +120,7 @@ export const App: React.FC = () => {
     if (!remoteProjectPath.trim()) return;
     const proj = await store.addProject(remoteProjectPath.trim(), remoteProjectCreate);
     if (proj) {
+      store.selectProject(proj.id);
       setRemoteProjectOpen(false);
       setRemoteProjectPath("");
     }
@@ -140,7 +132,12 @@ export const App: React.FC = () => {
       return;
     }
     setNewSessionProjectId(
-      projectId ?? activeDshProjectId ?? activeAgent?.project ?? projects[0]?.id ?? null,
+      projectId ??
+        store.activeDshProjectId ??
+        store.activeProjectId ??
+        activeAgent?.project ??
+        projects[0]?.id ??
+        null,
     );
     setNewSessionOpen(true);
   };
@@ -172,9 +169,9 @@ export const App: React.FC = () => {
         e.preventDefault();
         openNewSession();
       } else if (key === "w" && (!inTerminal || e.shiftKey)) {
-        if (activeDshProjectId) {
+        if (store.activeDshProjectId) {
           e.preventDefault();
-          handleCloseDshForProject(activeDshProjectId);
+          store.closeDshForProject(store.activeDshProjectId);
         } else if (store.activeAgentId) {
           e.preventDefault();
           store.closeTab(store.activeAgentId);
@@ -221,19 +218,22 @@ export const App: React.FC = () => {
           onReorderProjects={sidebarOrder.reorderProjects}
           onReorderSessions={sidebarOrder.reorderSessions}
           chatSummaries={store.chatSummaries}
+          activeProjectId={store.activeProjectId}
+          projectWorkspacesEnabled={settings.projectWorkspacesEnabled}
           activeAgentId={store.activeAgentId}
-          openDshProjects={openDshProjects}
-          activeDshProjectId={activeDshProjectId}
+          openDshProjects={store.openDshProjects}
+          activeDshProjectId={store.activeDshProjectId}
           activeSection={store.activeSection}
           globalApprovals={store.globalApprovals}
           onOpenRemotes={() => setRemotesOpen(true)}
+          onSelectProject={store.selectProject}
           onSelectAgent={handleOpenAgent}
-          onOpenDshForProject={handleOpenDshForProject}
-          onCloseDshForProject={handleCloseDshForProject}
+          onOpenDshForProject={store.openDshForProject}
+          onCloseDshForProject={store.closeDshForProject}
           onAddProject={() => void handleAddProject()}
           onDeleteProject={(pid) => {
-            if (openDshProjects.includes(pid)) {
-              handleCloseDshForProject(pid);
+            if (store.openDshProjects.includes(pid)) {
+              store.closeDshForProject(pid);
             }
             void store.deleteProject(pid);
           }}
@@ -265,18 +265,18 @@ export const App: React.FC = () => {
               }
               openTabs={store.openTabs}
               activeAgentId={store.activeAgentId}
-              openDshProjects={openDshProjects}
-              activeDshProjectId={activeDshProjectId}
+              openDshProjects={store.visibleDshProjects}
+              activeDshProjectId={store.activeDshProjectId}
               projects={projects}
               agents={agents}
               activeProjectId={activeProject?.id ?? projects[0]?.id ?? null}
               onSelectTab={handleOpenAgent}
               onCloseTab={store.closeTab}
-              onSelectDshTab={handleOpenDshForProject}
-              onCloseDshTab={handleCloseDshForProject}
+              onSelectDshTab={store.openDshForProject}
+              onCloseDshTab={store.closeDshForProject}
               onOpenDshForActiveProject={() => {
                 const targetPid = activeProject?.id ?? projects[0]?.id;
-                if (targetPid) handleOpenDshForProject(targetPid);
+                if (targetPid) store.openDshForProject(targetPid);
               }}
               onNewTab={() => openNewSession()}
             />
@@ -318,7 +318,7 @@ export const App: React.FC = () => {
 
             {/* Main Session Viewport — keep-alive DSH WebUI tabs + Chat / Terminal */}
             <main className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-              {openDshProjects.map((projectId) => {
+              {store.openDshProjects.map((projectId) => {
                 const proj = projects.find((p) => p.id === projectId);
                 if (!proj) return null;
                 return (
@@ -327,28 +327,61 @@ export const App: React.FC = () => {
                     projectId={proj.id}
                     projectName={proj.name}
                     projectPath={proj.path}
-                    visible={activeDshProjectId === proj.id}
-                    onCloseTab={() => handleCloseDshForProject(proj.id)}
+                    visible={store.activeDshProjectId === proj.id}
+                    onCloseTab={() => store.closeDshForProject(proj.id)}
                   />
                 );
               })}
 
-              {!activeDshProjectId && (
+              {!store.activeDshProjectId && (
                 <div className="relative h-full min-h-0 min-w-0 flex-1 overflow-hidden">
                   {!activeAgent ? (
                     <div className="flex h-full items-center justify-center bg-canvas px-6">
-                      <div className="w-full max-w-[420px]">
+                      <div className="w-full max-w-[440px]">
                         <div className="flex items-center gap-3">
-                          <span className="flex h-7 w-7 items-center justify-center bg-primary-btn font-mono text-[13px] font-bold text-primary-btn-fg">
-                            M
-                          </span>
+                          <MuxlaneLogoIcon className="h-7 w-7 shrink-0" />
                           <h1 className="text-[20px] font-semibold tracking-tight text-ink-strong">
-                            Muxlane
+                            {settings.projectWorkspacesEnabled && activeProject
+                              ? activeProject.name
+                              : "Muxlane"}
                           </h1>
+                          {settings.projectWorkspacesEnabled && activeProject?.branch && (
+                            <span className="border border-line-subtle bg-elevated px-1.5 py-0.5 font-mono text-[11px] text-ink-muted">
+                              {activeProject.branch}
+                            </span>
+                          )}
                         </div>
                         <p className="mt-3 text-[13.5px] leading-[1.55] text-ink-2">
-                          选择左侧项目或新建对话 / 终端会话开始工作，也支持通过 SSH 连接远程主机。
+                          {settings.projectWorkspacesEnabled && activeProject
+                            ? "当前项目工作区暂无打开的标签页。可从左侧或下方打开已有会话，或新建会话 / DSH WebUI。"
+                            : "选择左侧项目或新建对话 / 终端会话开始工作，也支持通过 SSH 连接远程主机。"}
                         </p>
+
+                        {settings.projectWorkspacesEnabled &&
+                          activeProject &&
+                          activeProjectAgents.length > 0 && (
+                            <div className="mt-4 border border-line-subtle bg-elevated/40 p-2">
+                              <div className="mb-1.5 flex items-center gap-1.5 px-1 text-[11px] font-medium text-ink-muted">
+                                <ProjectFolderIcon className="h-3 w-3" />
+                                <span>此项目已有会话 ({activeProjectAgents.length})</span>
+                              </div>
+                              <div className="space-y-0.5">
+                                {activeProjectAgents.slice(0, 6).map((a) => (
+                                  <button
+                                    key={a.id}
+                                    type="button"
+                                    onClick={() => handleOpenAgent(a.id)}
+                                    className="flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-[12px] text-ink hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
+                                  >
+                                    <span className="truncate">{a.title}</span>
+                                    <span className="shrink-0 font-mono text-[10px] text-ink-muted">
+                                      {a.agent_type}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
 
                         <div className="mt-6 flex flex-wrap items-center gap-2">
                           {projects.length === 0 ? (
@@ -364,12 +397,22 @@ export const App: React.FC = () => {
                             <>
                               <button
                                 type="button"
-                                onClick={() => openNewSession()}
+                                onClick={() => openNewSession(activeProject?.id)}
                                 className="flex h-9 items-center gap-2 bg-primary-btn px-4 text-[13px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
                               >
                                 <Plus className="h-4 w-4" />
                                 <span>新建会话</span>
                               </button>
+                              {activeProject && (
+                                <button
+                                  type="button"
+                                  onClick={() => store.openDshForProject(activeProject.id)}
+                                  className="flex h-9 items-center gap-2 border border-line bg-canvas px-3.5 text-[13px] text-ink hover:bg-hover transition-colors cursor-pointer"
+                                >
+                                  <Globe className="h-4 w-4 text-working" />
+                                  <span>打开 DSH WebUI</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => void handleAddProject()}

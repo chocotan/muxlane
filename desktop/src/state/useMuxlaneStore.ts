@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Events,
   Methods,
@@ -31,6 +31,19 @@ import {
   timelineFromHistory,
   type ChatTimelineState,
 } from "../shared/timeline";
+import {
+  closeAgentTabInWorkspace,
+  closeDshInWorkspace,
+  getVisibleWorkspaceView,
+  loadHostWorkspaceTabs,
+  openAgentInWorkspace,
+  openDshInWorkspace,
+  reconcileWorkspaceTabsWithSnapshot,
+  saveHostWorkspaceTabs,
+  selectProjectWorkspace,
+  toggleProjectWorkspacesMode,
+  type HostWorkspaceTabsState,
+} from "./workspaceTabs";
 
 export interface ToastItem {
   id: string;
@@ -66,6 +79,7 @@ export function encodeStringToBase64(str: string): string {
 
 export interface MuxlaneStoreOptions {
   notificationsEnabled?: boolean;
+  projectWorkspacesEnabled?: boolean;
 }
 
 export function isChatOnlySession(agent: AgentInstance | undefined): boolean {
@@ -75,6 +89,9 @@ export function isChatOnlySession(agent: AgentInstance | undefined): boolean {
 export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
   const notificationsEnabledRef = useRef(options.notificationsEnabled ?? true);
   notificationsEnabledRef.current = options.notificationsEnabled ?? true;
+  const projectWorkspacesEnabled = options.projectWorkspacesEnabled ?? true;
+  const projectWorkspacesEnabledRef = useRef(projectWorkspacesEnabled);
+  projectWorkspacesEnabledRef.current = projectWorkspacesEnabled;
 
   const [status, setStatus] = useState<DaemonConnectionStatus>({
     connected: false,
@@ -90,8 +107,10 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [chatSummaries, setChatSummaries] = useState<Record<string, ChatSessionSummary>>({});
   const [timelines, setTimelines] = useState<Record<string, ChatTimelineState>>({});
-  const [openTabs, setOpenTabs] = useState<string[]>([]);
-  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
+  const [workspaceTabs, setWorkspaceTabs] = useState<HostWorkspaceTabsState>(() =>
+    loadHostWorkspaceTabs("local"),
+  );
+  const [openDshProjects, setOpenDshProjects] = useState<string[]>([]);
   const [activeSection, setActiveSection] = useState<"workspace" | "bots">("workspace");
   const [globalApprovals, setGlobalApprovals] = useState<PendingApproval[]>([]);
   const [bots, setBots] = useState<BotDefinition[]>([]);
@@ -103,11 +122,68 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
   const chatSubsRef = useRef<Map<string, string>>(new Map());
   const pendingChatSubsRef = useRef<Set<string>>(new Set());
   const termListenersRef = useRef<Map<string, Set<TermListener>>>(new Map());
+  const activeHostIdRef = useRef<string>(hostsState.activeHostId);
   const activeAgentRef = useRef<string | null>(null);
   const snapshotRef = useRef<Snapshot | null>(null);
+  const openDshProjectsRef = useRef<string[]>([]);
+  const prevProjectWorkspacesRef = useRef<boolean>(projectWorkspacesEnabled);
 
+  const visibleView = useMemo(
+    () =>
+      getVisibleWorkspaceView(
+        workspaceTabs,
+        projectWorkspacesEnabled,
+        openDshProjects,
+        snapshot?.agents ?? [],
+      ),
+    [openDshProjects, projectWorkspacesEnabled, snapshot?.agents, workspaceTabs],
+  );
+
+  const activeProjectId = visibleView.activeProjectId;
+  const openTabs = visibleView.openTabs;
+  const activeAgentId = visibleView.activeAgentId;
+  const visibleDshProjects = visibleView.visibleDshProjects;
+  const activeDshProjectId = visibleView.activeDshProjectId;
+
+  activeHostIdRef.current = hostsState.activeHostId;
   activeAgentRef.current = activeAgentId;
   snapshotRef.current = snapshot;
+  openDshProjectsRef.current = openDshProjects;
+
+  const updateWorkspaceTabs = useCallback(
+    (updater: (prev: HostWorkspaceTabsState) => HostWorkspaceTabsState) => {
+      setWorkspaceTabs((prev) => {
+        const next = updater(prev);
+        saveHostWorkspaceTabs(activeHostIdRef.current, next);
+        return next;
+      });
+    },
+    [],
+  );
+
+  // Switch loaded per-host workspace tabs whenever activeHostId changes
+  const lastLoadedHostRef = useRef<string>(hostsState.activeHostId);
+  useEffect(() => {
+    if (lastLoadedHostRef.current !== hostsState.activeHostId) {
+      lastLoadedHostRef.current = hostsState.activeHostId;
+      setWorkspaceTabs(loadHostWorkspaceTabs(hostsState.activeHostId));
+      setOpenDshProjects([]);
+    }
+  }, [hostsState.activeHostId]);
+
+  // Project/merge tabs cleanly when toggling project-scoped workspaces setting
+  useEffect(() => {
+    if (prevProjectWorkspacesRef.current !== projectWorkspacesEnabled) {
+      prevProjectWorkspacesRef.current = projectWorkspacesEnabled;
+      updateWorkspaceTabs((prev) =>
+        toggleProjectWorkspacesMode(
+          prev,
+          projectWorkspacesEnabled,
+          snapshotRef.current?.agents ?? [],
+        ),
+      );
+    }
+  }, [projectWorkspacesEnabled, updateWorkspaceTabs]);
 
   const pushToast = useCallback((message: string, level: ToastItem["level"] = "info") => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -149,22 +225,20 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
       setBots(botList.bots ?? []);
       setBotRuns(runsRes.runs ?? []);
 
-      const validIds = new Set(snap.agents.map((a) => a.id));
-      setOpenTabs((prev) => {
-        const filtered = prev.filter((id) => validIds.has(id));
-        if (filtered.length === 0 && snap.agents.length > 0 && !activeAgentRef.current) {
-          return [snap.agents[0].id];
-        }
-        return filtered;
-      });
-      setActiveAgentId((prev) => {
-        if (prev && validIds.has(prev)) return prev;
-        return snap.agents[0]?.id ?? null;
-      });
+      const validProjectIds = new Set(snap.projects.map((p) => p.id));
+      setOpenDshProjects((prev) => prev.filter((pid) => validProjectIds.has(pid)));
+      updateWorkspaceTabs((prev) =>
+        reconcileWorkspaceTabsWithSnapshot(
+          prev,
+          snap.projects,
+          snap.agents,
+          projectWorkspacesEnabledRef.current,
+        ),
+      );
     } catch (err) {
       pushToast(`刷新状态失败: ${(err as Error).message}`, "error");
     }
-  }, [pushToast]);
+  }, [pushToast, updateWorkspaceTabs]);
 
   const ensureChatSubscribed = useCallback(async (agentId: string) => {
     if (chatSubsRef.current.has(agentId) || pendingChatSubsRef.current.has(agentId)) return;
@@ -368,12 +442,26 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     };
   }, [ensureChatSubscribed, refreshState]);
 
+  const selectProject = useCallback(
+    (projectId: string) => {
+      setActiveSection("workspace");
+      updateWorkspaceTabs((prev) => selectProjectWorkspace(prev, projectId));
+    },
+    [updateWorkspaceTabs],
+  );
+
   const openAgent = useCallback(
     (agentId: string) => {
       setActiveSection("workspace");
-      setActiveAgentId(agentId);
-      setOpenTabs((prev) => (prev.includes(agentId) ? prev : [...prev, agentId]));
       const agent = snapshotRef.current?.agents.find((a) => a.id === agentId);
+      updateWorkspaceTabs((prev) =>
+        openAgentInWorkspace(
+          prev,
+          agentId,
+          agent?.project ?? null,
+          projectWorkspacesEnabledRef.current,
+        ),
+      );
       if (isChatOnlySession(agent)) {
         void ensureChatSubscribed(agentId);
       }
@@ -381,23 +469,44 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
         void window.muxlane.rpc(Methods.AGENT_MARK_SEEN, { agent: agentId }).catch(() => {});
       }
     },
-    [ensureChatSubscribed],
+    [ensureChatSubscribed, updateWorkspaceTabs],
   );
 
   const closeTab = useCallback(
     (agentId: string) => {
       void unsubscribeChat(agentId);
-      setOpenTabs((prev) => {
-        const idx = prev.indexOf(agentId);
-        const next = prev.filter((id) => id !== agentId);
-        if (activeAgentRef.current === agentId) {
-          const nextActive = next[idx] ?? next[next.length - 1] ?? null;
-          setActiveAgentId(nextActive);
-        }
-        return next;
-      });
+      const agent = snapshotRef.current?.agents.find((a) => a.id === agentId);
+      updateWorkspaceTabs((prev) =>
+        closeAgentTabInWorkspace(
+          prev,
+          agentId,
+          agent?.project ?? null,
+          projectWorkspacesEnabledRef.current,
+          openDshProjectsRef.current,
+        ),
+      );
     },
-    [unsubscribeChat],
+    [unsubscribeChat, updateWorkspaceTabs],
+  );
+
+  const openDshForProject = useCallback(
+    (projectId: string) => {
+      setActiveSection("workspace");
+      setOpenDshProjects((prev) => (prev.includes(projectId) ? prev : [...prev, projectId]));
+      updateWorkspaceTabs((prev) =>
+        openDshInWorkspace(prev, projectId, projectWorkspacesEnabledRef.current),
+      );
+    },
+    [updateWorkspaceTabs],
+  );
+
+  const closeDshForProject = useCallback(
+    (projectId: string) => {
+      setOpenDshProjects((prev) => prev.filter((id) => id !== projectId));
+      updateWorkspaceTabs((prev) => closeDshInWorkspace(prev, projectId));
+      void window.muxlane.stopDshWeb(projectId);
+    },
+    [updateWorkspaceTabs],
   );
 
   const registerTermListener = useCallback((agentId: string, fn: TermListener) => {
@@ -655,8 +764,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     setSnapshot(null);
     setChatSummaries({});
     setTimelines({});
-    setOpenTabs([]);
-    setActiveAgentId(null);
+    setOpenDshProjects([]);
     setGlobalApprovals([]);
     setBots([]);
     setBotRuns([]);
@@ -713,8 +821,12 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     snapshot,
     chatSummaries,
     timelines,
+    activeProjectId,
     openTabs,
     activeAgentId,
+    openDshProjects,
+    visibleDshProjects,
+    activeDshProjectId,
     activeSection,
     setActiveSection,
     globalApprovals,
@@ -725,8 +837,11 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
     dismissToast,
     pushToast,
     refreshState,
+    selectProject,
     openAgent,
     closeTab,
+    openDshForProject,
+    closeDshForProject,
     registerTermListener,
     loadPresets,
     addProject,
