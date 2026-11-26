@@ -2,15 +2,18 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
+  Check,
   ChevronDown,
+  Copy,
   ExternalLink,
   Globe,
+  KeyRound,
   Loader2,
   RefreshCw,
   RotateCw,
   Server,
 } from "lucide-react";
-import { normalizeWebUrl } from "../state/webSessions";
+import { extractDshToken, normalizeWebUrl, preserveDshToken } from "../state/webSessions";
 
 interface WebviewElement extends HTMLElement {
   src: string;
@@ -64,10 +67,6 @@ function writeHostCustomDshUrl(hostId: string, url: string): void {
   }
 }
 
-function maskToken(url: string): string {
-  return url.replace(/([?&]token=)[^&]+/i, "$1***");
-}
-
 export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
   hostId,
   hostName,
@@ -80,7 +79,7 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
   const webviewRef = useRef<WebviewElement | null>(null);
   const [resolvedUrl, setResolvedUrl] = useState<string>("");
   const [addressInput, setAddressInput] = useState<string>(() => readHostCustomDshUrl(hostId));
-  const [addressFocused, setAddressFocused] = useState(false);
+  const [copiedKind, setCopiedKind] = useState<"url" | "token" | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [webviewError, setWebviewError] = useState<string | null>(null);
@@ -131,7 +130,7 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
 
     const onNavigate = (ev: Event) => {
       const e = ev as WebviewNavigateEvent;
-      if (e.url) setAddressInput(e.url);
+      if (e.url) setAddressInput(preserveDshToken(e.url, resolvedUrl));
       syncNav();
     };
 
@@ -198,7 +197,30 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
   };
 
   const activeError = error || webviewError;
-  const shownAddress = addressFocused ? addressInput : maskToken(addressInput);
+  const dshToken = extractDshToken(resolvedUrl) || extractDshToken(addressInput);
+  const copyValue = async (text: string, kind: "url" | "token") => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKind(kind);
+      window.setTimeout(() => {
+        setCopiedKind((prev) => (prev === kind ? null : prev));
+      }, 1500);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
+  const externalOpenUrl = (() => {
+    if (!resolvedUrl) return addressInput;
+    if (!addressInput) return resolvedUrl;
+    try {
+      return new URL(addressInput).origin === new URL(resolvedUrl).origin
+        ? resolvedUrl
+        : addressInput;
+    } catch {
+      return resolvedUrl;
+    }
+  })();
 
   return (
     <div
@@ -268,16 +290,15 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
           </button>
         </div>
 
-        {/* Editable URL bar (auto-detected or paste custom running dsh web URL) */}
+        {/* Editable URL bar (always displays full URL including ?token=...) */}
         <form
           onSubmit={(e) => void handleAddressSubmit(e)}
           className="flex min-w-0 flex-1 items-center"
         >
           <input
-            value={shownAddress}
-            onFocus={() => setAddressFocused(true)}
-            onBlur={() => setAddressFocused(false)}
+            value={addressInput}
             onChange={(e) => setAddressInput(e.target.value)}
+            title={addressInput || resolvedUrl}
             placeholder={`留空回车自动检测/启动 ${hostName} 的 dsh web；或粘贴已有地址…`}
             className="h-6 min-w-0 flex-1 border border-line-subtle bg-canvas px-2 font-mono text-[11px] text-ink placeholder:text-ink-muted focus:border-line-strong focus:text-ink-strong focus:outline-none select-text"
           />
@@ -285,6 +306,38 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
 
         {/* Actions */}
         <div className="flex shrink-0 items-center gap-1">
+          {resolvedUrl && (
+            <button
+              type="button"
+              onClick={() => void copyValue(resolvedUrl, "url")}
+              title={`复制完整地址（含 token）：${resolvedUrl}`}
+              className="flex h-6 items-center gap-1 border border-line-subtle bg-canvas px-2 text-[11px] text-ink-2 hover:bg-hover hover:text-ink cursor-pointer"
+            >
+              {copiedKind === "url" ? (
+                <Check className="h-3 w-3 text-success" />
+              ) : (
+                <Copy className="h-3 w-3" />
+              )}
+              <span>{copiedKind === "url" ? "已复制" : "复制地址"}</span>
+            </button>
+          )}
+
+          {dshToken && (
+            <button
+              type="button"
+              onClick={() => void copyValue(dshToken, "token")}
+              title={`复制 Token：${dshToken}`}
+              className="flex h-6 items-center gap-1 border border-line-subtle bg-canvas px-2 text-[11px] text-ink-2 hover:bg-hover hover:text-ink cursor-pointer"
+            >
+              {copiedKind === "token" ? (
+                <Check className="h-3 w-3 text-success" />
+              ) : (
+                <KeyRound className="h-3 w-3" />
+              )}
+              <span>{copiedKind === "token" ? "已复制" : "复制 Token"}</span>
+            </button>
+          )}
+
           <button
             type="button"
             disabled={loading}
@@ -299,8 +352,8 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
           {resolvedUrl && (
             <button
               type="button"
-              onClick={() => void window.muxlane.openExternal(addressInput || resolvedUrl)}
-              title="在系统浏览器中打开"
+              onClick={() => void window.muxlane.openExternal(externalOpenUrl)}
+              title="在系统浏览器中打开（含 token）"
               className="flex h-6 w-6 items-center justify-center border border-line-subtle bg-canvas text-ink-2 hover:bg-hover hover:text-ink cursor-pointer"
             >
               <ExternalLink className="h-3 w-3" />

@@ -49,6 +49,36 @@ export function deriveTitleFromUrl(url: string): string {
   }
 }
 
+export function extractDshToken(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const token = parsed.searchParams.get("token")?.trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Keep the DSH `?token=...` query parameter visible after `dsh web` performs its
+ * post-login 303 redirect to `./`, without leaking the token to unrelated origins.
+ */
+export function preserveDshToken(navigatedUrl: string, resolvedUrl: string): string {
+  if (!navigatedUrl || !resolvedUrl) return navigatedUrl || resolvedUrl;
+  try {
+    const nav = new URL(navigatedUrl);
+    const base = new URL(resolvedUrl);
+    const token = base.searchParams.get("token");
+    if (token && nav.origin === base.origin && !nav.searchParams.has("token")) {
+      nav.searchParams.set("token", token);
+      return nav.toString();
+    }
+    return navigatedUrl;
+  } catch {
+    return navigatedUrl;
+  }
+}
+
 export function loadWebSessions(hostId: string): WebSession[] {
   try {
     const raw = window.localStorage.getItem(STORAGE_PREFIX + hostId);

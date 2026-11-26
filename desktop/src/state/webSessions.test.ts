@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { deriveTitleFromUrl, isWebSessionId, normalizeWebUrl } from "./webSessions";
+import {
+  deriveTitleFromUrl,
+  extractDshToken,
+  isWebSessionId,
+  normalizeWebUrl,
+  preserveDshToken,
+} from "./webSessions";
 
 describe("webSessions helpers", () => {
   it("normalizes local, IP, port, and domain URLs cleanly", () => {
@@ -19,5 +25,18 @@ describe("webSessions helpers", () => {
     expect(isWebSessionId("web_abc_123")).toBe(true);
     expect(isWebSessionId("shell_abc")).toBe(false);
     expect(isWebSessionId(null)).toBe(false);
+  });
+
+  it("extracts and preserves DSH token across same-origin redirects only", () => {
+    const base = "http://127.0.0.1:45443/?token=secret_tok_123";
+    expect(extractDshToken(base)).toBe("secret_tok_123");
+    expect(extractDshToken("http://127.0.0.1:45443/")).toBeNull();
+    expect(preserveDshToken("http://127.0.0.1:45443/", base)).toBe(
+      "http://127.0.0.1:45443/?token=secret_tok_123",
+    );
+    expect(preserveDshToken("http://127.0.0.1:45443/threads/9", base)).toBe(
+      "http://127.0.0.1:45443/threads/9?token=secret_tok_123",
+    );
+    expect(preserveDshToken("https://example.com/", base)).toBe("https://example.com/");
   });
 });
