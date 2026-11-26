@@ -31,22 +31,22 @@ interface DshWebPaneProps {
   onCloseTab: () => void;
 }
 
-const CUSTOM_URL_KEY_PREFIX = "muxlane.dsh.customUrl.v1:";
+const SHARED_CUSTOM_URL_KEY = "muxlane.dsh.customUrl.v1:shared";
 
-function readSavedCustomUrl(projectId: string): string {
+function readSavedCustomUrl(): string {
   try {
-    return window.localStorage.getItem(CUSTOM_URL_KEY_PREFIX + projectId) || "";
+    return window.localStorage.getItem(SHARED_CUSTOM_URL_KEY) || "";
   } catch {
     return "";
   }
 }
 
-function writeSavedCustomUrl(projectId: string, url: string): void {
+function writeSavedCustomUrl(url: string): void {
   try {
     if (url.trim()) {
-      window.localStorage.setItem(CUSTOM_URL_KEY_PREFIX + projectId, url.trim());
+      window.localStorage.setItem(SHARED_CUSTOM_URL_KEY, url.trim());
     } else {
-      window.localStorage.removeItem(CUSTOM_URL_KEY_PREFIX + projectId);
+      window.localStorage.removeItem(SHARED_CUSTOM_URL_KEY);
     }
   } catch {
     // ignore
@@ -66,7 +66,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [webviewError, setWebviewError] = useState<string | null>(null);
   const [editingUrl, setEditingUrl] = useState(false);
-  const [urlInput, setUrlInput] = useState(() => readSavedCustomUrl(projectId));
+  const [urlInput, setUrlInput] = useState(() => readSavedCustomUrl());
 
   const bootDsh = useCallback(
     async (customUrl?: string) => {
@@ -86,7 +86,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
   );
 
   useEffect(() => {
-    const saved = readSavedCustomUrl(projectId);
+    const saved = readSavedCustomUrl();
     void bootDsh(saved || undefined);
   }, [bootDsh, projectId]);
 
@@ -122,7 +122,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
   }, [info?.url]);
 
   const handleRestart = async () => {
-    writeSavedCustomUrl(projectId, "");
+    writeSavedCustomUrl("");
     setUrlInput("");
     setEditingUrl(false);
     setLoading(true);
@@ -141,7 +141,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
   const handleApplyCustomUrl = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = urlInput.trim();
-    writeSavedCustomUrl(projectId, trimmed);
+    writeSavedCustomUrl(trimmed);
     setEditingUrl(false);
     await bootDsh(trimmed || undefined);
   };
@@ -307,7 +307,7 @@ export const DshWebPane: React.FC<DshWebPaneProps> = ({
             key: info.url,
             ref: webviewRef,
             src: info.url,
-            partition: `persist:dsh-${projectId}`,
+            partition: "persist:dsh-shared",
             allowpopups: "true",
             style: { width: "100%", height: "100%", display: "inline-flex", border: "none" },
           })

@@ -355,7 +355,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
         ) : (
           <div className="space-y-2">
             {filteredProjects.map(({ project, agents: projectAgents }) => {
-              const isCollapsed = !normalizedQuery && collapsed[project.id] === true;
+              const hasOpenDsh = openDshProjects.includes(project.id);
+              const defaultCollapsed = projectAgents.length === 0 && !hasOpenDsh;
+              const isCollapsed =
+                !normalizedQuery && (collapsed[project.id] ?? defaultCollapsed);
               const isDraggingThisProject =
                 dragPayload?.kind === "project" && dragPayload.projectId === project.id;
               const projectDropBefore =
@@ -366,7 +369,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 dropIndicator?.kind === "project" &&
                 dropIndicator.targetId === project.id &&
                 dropIndicator.position === "after";
-              const hasOpenDsh = openDshProjects.includes(project.id);
               const isDshActive =
                 activeSection === "workspace" && activeDshProjectId === project.id;
               const isCurrentProject =
@@ -438,20 +440,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <button
                       type="button"
                       onClick={() => {
+                        const toggleCollapse = () =>
+                          setCollapsed((prev) => ({
+                            ...prev,
+                            [project.id]: !(prev[project.id] ?? defaultCollapsed),
+                          }));
                         if (projectWorkspacesEnabled) {
                           if (activeProjectId === project.id) {
-                            setCollapsed((prev) => ({
-                              ...prev,
-                              [project.id]: !prev[project.id],
-                            }));
+                            if (projectAgents.length > 0 || hasOpenDsh) {
+                              toggleCollapse();
+                            }
                           } else {
                             onSelectProject(project.id);
                           }
-                        } else {
-                          setCollapsed((prev) => ({
-                            ...prev,
-                            [project.id]: !prev[project.id],
-                          }));
+                        } else if (projectAgents.length > 0 || hasOpenDsh) {
+                          toggleCollapse();
                         }
                       }}
                       className="flex min-w-0 flex-1 items-center gap-1.5 text-left cursor-pointer"
@@ -475,9 +478,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           {project.branch}
                         </span>
                       )}
-                      {isCollapsed && (
+                      {isCollapsed && projectAgents.length > 0 && (
                         <span className="ml-auto flex shrink-0 items-center gap-0.5 font-mono text-[10px] text-ink-muted group-hover:opacity-0">
-                          {projectAgents.length > 0 && <span>{projectAgents.length}</span>}
+                          <span>{projectAgents.length}</span>
                           <ChevronRight className="h-3 w-3" strokeWidth={1.8} />
                         </span>
                       )}

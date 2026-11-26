@@ -1,29 +1,69 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import type { DshInstanceInfo } from "../src/shared/protocol";
 
-interface ManagedDshProcess {
-  projectId: string;
-  projectPath: string;
+interface SharedDshProcess {
   proc: ChildProcess | null;
   url: string;
-  status: "starting" | "ready" | "error";
-  error: string | null;
+  cwd: string;
   isCustomUrl: boolean;
+}
+
+interface PersistedDshState {
+  url: string;
+  isCustomUrl?: boolean;
 }
 
 const DSH_WEB_LINE_RE = /dsh\s+web:\s*(https?:\/\/[^\s"'<>]+)/i;
 const LOOPBACK_URL_RE = /https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+[^\s"'<>]*/i;
+const DEFAULT_LOCAL_CANDIDATES = ["http://127.0.0.1:3080/"];
 
 let cachedLoginEnvPromise: Promise<NodeJS.ProcessEnv> | null = null;
 
-/**
- * Resolve the user's interactive login shell environment (PATH, nvm node, http_proxy,
- * API keys, etc.) so `dsh` spawned from a systemd-started Electron process has the
- * same runtime environment as a normal terminal.
- */
+function muxlaneDataDir(): string {
+  const custom = process.env.MUXLANE_DATA_DIR?.trim();
+  if (custom) return custom;
+  const xdg = process.env.XDG_DATA_HOME?.trim();
+  if (xdg) return path.join(xdg, "muxlane");
+  return path.join(os.homedir(), ".local", "share", "muxlane");
+}
+
+function persistedDshFile(): string {
+  return path.join(muxlaneDataDir(), "dsh-web.json");
+}
+
+function readPersistedDsh(): PersistedDshState | null {
+  try {
+    const raw = fs.readFileSync(persistedDshFile(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<PersistedDshState>;
+    if (typeof parsed.url === "string" && /^https?:\/\//i.test(parsed.url)) {
+      return { url: parsed.url, isCustomUrl: parsed.isCustomUrl === true };
+    }
+  } catch {
+    // ignore missing/corrupt cache
+  }
+  return null;
+}
+
+function writePersistedDsh(state: PersistedDshState | null): void {
+  try {
+    const file = persistedDshFile();
+    if (!state) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+      return;
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(state, null, 2), { mode: 0o600 });
+    fs.chmodSync(file, 0o600);
+  } catch {
+    // ignore persistence errors
+  }
+}
+
 function pickLoginShell(): string {
   const zshPath = "/usr/bin/zsh";
   const zshrc = path.join(os.homedir(), ".zshrc");
@@ -50,14 +90,12 @@ function loadLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
         if (eq <= 0) continue;
         const key = entry.slice(0, eq);
         const val = entry.slice(eq + 1);
-        // Never overwrite Electron/session critical vars if shell left them blank
         if (key === "PWD" || key === "SHLVL" || key === "_") continue;
         merged[key] = val;
       }
       resolve(merged);
     };
 
-    // Try interactive login shell first (loads ~/.bashrc / ~/.zshrc where nvm, proxies, and API keys live).
     execFile(
       shell,
       ["-ilc", "env -0"],
@@ -67,7 +105,6 @@ function loadLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
           mergeAndResolve(stdout);
           return;
         }
-        // Fallback to non-interactive login shell.
         execFile(
           shell,
           ["-lc", "env -0"],
@@ -85,6 +122,50 @@ function loadLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
   });
 
   return cachedLoginEnvPromise;
+}
+
+/**
+ * Probe whether a DSH WebUI URL is currently alive AND accepts auth
+ * (200 OK for open/authenticated endpoints, 303 See Other for valid `?token=...` exchange).
+ * Returns false on connection refused, timeout, or 401 Unauthorized.
+ */
+export function probeDshUrl(url: string, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+
+    try {
+      const parsed = new URL(url);
+      const client = parsed.protocol === "https:" ? https : http;
+      const req = client.request(
+        parsed,
+        {
+          method: "GET",
+          timeout: timeoutMs,
+          rejectUnauthorized: false,
+        },
+        (res) => {
+          const code = res.statusCode ?? 0;
+          res.resume();
+          // 200 OK or 303/302 redirect (valid token bootstrap) means ready & usable.
+          // 401 means a different process with an unknown secret token is listening.
+          done(code === 200 || code === 302 || code === 303);
+        },
+      );
+      req.on("timeout", () => {
+        req.destroy();
+        done(false);
+      });
+      req.on("error", () => done(false));
+      req.end();
+    } catch {
+      done(false);
+    }
+  });
 }
 
 export function extractDshWebUrl(rawText: string): string | null {
@@ -114,7 +195,6 @@ function resolveDshCommand(env: NodeJS.ProcessEnv): { command: string; prefixArg
     return { command: envBin, prefixArgs: [] };
   }
 
-  // Search PATH (including login shell PATH: nvm, bun, ~/.local/bin, etc.) for `dsh`
   const pathEnv = env.PATH || process.env.PATH || "";
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) continue;
@@ -128,7 +208,6 @@ function resolveDshCommand(env: NodeJS.ProcessEnv): { command: string; prefixArg
     }
   }
 
-  // Search ~/.npm/_npx/*/node_modules/.bin/dsh (newest first, e.g. already cached npx install)
   const npxRoot = path.join(os.homedir(), ".npm", "_npx");
   try {
     if (fs.existsSync(npxRoot)) {
@@ -153,27 +232,37 @@ function resolveDshCommand(env: NodeJS.ProcessEnv): { command: string; prefixArg
     // ignore
   }
 
-  // Fallback to npx
-  return { command: "npx", prefixArgs: ["-y", "@deepseek-ai/dsh"] };
+  const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
+  return { command: npxCmd, prefixArgs: ["-y", "@deepseek-ai/dsh"] };
 }
 
-function toInfo(inst: ManagedDshProcess): DshInstanceInfo {
-  return {
-    projectId: inst.projectId,
-    projectPath: inst.projectPath,
-    url: inst.url,
-    status: inst.status,
-    error: inst.error,
-    isCustomUrl: inst.isCustomUrl,
-  };
+export function buildDshWebArgs(prefixArgs: readonly string[], minimal = false): string[] {
+  return minimal
+    ? [...prefixArgs, "web"]
+    : [...prefixArgs, "web", "--host", "127.0.0.1", "--port", "0"];
 }
 
+/**
+ * Machine-level singleton manager for DeepSeek Harness (`dsh web`).
+ * Detects if a usable `dsh web` server is already running on the machine and reuses it;
+ * otherwise starts ONE shared `dsh web` process and shares it across all project tabs.
+ */
 export class DshWebManager {
-  private instances = new Map<string, ManagedDshProcess>();
-  private inflight = new Map<string, Promise<DshInstanceInfo>>();
+  private shared: SharedDshProcess | null = null;
+  private inflight: Promise<SharedDshProcess> | null = null;
 
   list(): DshInstanceInfo[] {
-    return Array.from(this.instances.values()).map(toInfo);
+    if (!this.shared) return [];
+    return [
+      {
+        projectId: "shared",
+        projectPath: this.shared.cwd,
+        url: this.shared.url,
+        status: "ready",
+        error: null,
+        isCustomUrl: this.shared.isCustomUrl,
+      },
+    ];
   }
 
   async open(
@@ -183,74 +272,155 @@ export class DshWebManager {
   ): Promise<DshInstanceInfo> {
     const normalizedCustom = customUrl ? normalizeCustomDshUrl(customUrl) : "";
     if (normalizedCustom) {
-      this.stop(projectId);
-      const custom: ManagedDshProcess = {
-        projectId,
-        projectPath,
+      this.killManagedProcess();
+      this.shared = {
         proc: null,
         url: normalizedCustom,
-        status: "ready",
-        error: null,
+        cwd: projectPath,
         isCustomUrl: true,
       };
-      this.instances.set(projectId, custom);
-      return toInfo(custom);
+      writePersistedDsh({ url: normalizedCustom, isCustomUrl: true });
+      return this.toProjectInfo(projectId, projectPath, this.shared);
     }
 
-    const existing = this.instances.get(projectId);
-    if (existing && existing.status === "ready") {
-      if (existing.isCustomUrl || (existing.proc && existing.proc.exitCode === null)) {
-        return toInfo(existing);
-      }
-      this.instances.delete(projectId);
-    }
-
-    const pending = this.inflight.get(projectId);
-    if (pending) return pending;
-
-    const promise = this.spawnForProject(projectId, projectPath).finally(() => {
-      this.inflight.delete(projectId);
-    });
-    this.inflight.set(projectId, promise);
-    return promise;
+    const inst = await this.ensureRunning(projectPath);
+    return this.toProjectInfo(projectId, projectPath, inst);
   }
 
   async restart(projectId: string, projectPath: string): Promise<DshInstanceInfo> {
-    this.stop(projectId);
-    return this.open(projectId, projectPath);
+    this.killManagedProcess();
+    this.shared = null;
+    writePersistedDsh(null);
+    const inst = await this.startNewShared(projectPath);
+    return this.toProjectInfo(projectId, projectPath, inst);
   }
 
-  stop(projectId: string): void {
-    const existing = this.instances.get(projectId);
-    if (!existing) return;
-    this.instances.delete(projectId);
-    if (existing.proc) {
-      try {
-        existing.proc.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-    }
+  /**
+   * Closing a project's DSH tab keeps the machine-level `dsh web` running for instant reuse.
+   */
+  stop(_projectId: string): void {
+    // Keep shared machine-level dsh web warm; call restart() or dispose() to stop it.
   }
 
   dispose(): void {
-    for (const projectId of Array.from(this.instances.keys())) {
-      this.stop(projectId);
+    this.killManagedProcess();
+    this.shared = null;
+  }
+
+  private toProjectInfo(
+    projectId: string,
+    projectPath: string,
+    inst: SharedDshProcess,
+  ): DshInstanceInfo {
+    return {
+      projectId,
+      projectPath,
+      url: inst.url,
+      status: "ready",
+      error: null,
+      isCustomUrl: inst.isCustomUrl,
+    };
+  }
+
+  private killManagedProcess(): void {
+    const proc = this.shared?.proc;
+    if (!proc) return;
+    this.shared = null;
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      // ignore
     }
   }
 
-  private async spawnForProject(
-    projectId: string,
-    projectPath: string,
-  ): Promise<DshInstanceInfo> {
-    const cwd = fs.existsSync(projectPath) ? projectPath : os.homedir();
-    const shellEnv = await loadLoginShellEnv();
-    const { command, prefixArgs } = resolveDshCommand(shellEnv);
-    const args = [...prefixArgs, "--profile", "web", "--no-open", "--host", "127.0.0.1", "--port", "0"];
+  private async ensureRunning(projectPath: string): Promise<SharedDshProcess> {
+    // 1. Reuse in-memory shared instance if still alive and reachable
+    if (this.shared) {
+      const procAlive = !this.shared.proc || this.shared.proc.exitCode === null;
+      if (procAlive && (await probeDshUrl(this.shared.url))) {
+        return this.shared;
+      }
+      this.killManagedProcess();
+      this.shared = null;
+    }
 
+    if (this.inflight) return this.inflight;
+
+    const promise = this.detectOrStart(projectPath).finally(() => {
+      this.inflight = null;
+    });
+    this.inflight = promise;
+    return promise;
+  }
+
+  private async detectOrStart(projectPath: string): Promise<SharedDshProcess> {
+    const shellEnv = await loadLoginShellEnv();
+
+    // 2. Detect already-running dsh web on this machine:
+    //    (a) persisted URL from previous Muxlane run or user-configured custom URL
+    //    (b) DSH_WEB_URL environment variable
+    //    (c) default local http://127.0.0.1:3080/ (if auth-free)
+    const candidates: Array<{ url: string; isCustomUrl: boolean }> = [];
+    const saved = readPersistedDsh();
+    if (saved) {
+      candidates.push({ url: saved.url, isCustomUrl: saved.isCustomUrl === true });
+    }
+    const envUrl = shellEnv.DSH_WEB_URL?.trim() || process.env.DSH_WEB_URL?.trim();
+    if (envUrl && /^https?:\/\//i.test(envUrl)) {
+      candidates.push({ url: envUrl, isCustomUrl: false });
+    }
+    for (const defUrl of DEFAULT_LOCAL_CANDIDATES) {
+      candidates.push({ url: defUrl, isCustomUrl: false });
+    }
+
+    for (const cand of candidates) {
+      if (await probeDshUrl(cand.url)) {
+        const reused: SharedDshProcess = {
+          proc: null,
+          url: cand.url,
+          cwd: projectPath,
+          isCustomUrl: cand.isCustomUrl,
+        };
+        this.shared = reused;
+        return reused;
+      }
+    }
+
+    // 3. No usable running dsh detected -> start one shared local dsh web instance
+    return this.startNewShared(projectPath, shellEnv);
+  }
+
+  private async startNewShared(
+    projectPath: string,
+    preloadedEnv?: NodeJS.ProcessEnv,
+  ): Promise<SharedDshProcess> {
+    const cwd = fs.existsSync(projectPath) ? projectPath : os.homedir();
+    const shellEnv = preloadedEnv ?? (await loadLoginShellEnv());
+    const { command, prefixArgs } = resolveDshCommand(shellEnv);
+
+    try {
+      return await this.spawnOnce(cwd, command, buildDshWebArgs(prefixArgs, false), shellEnv);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/unknown option/i.test(msg)) {
+        return await this.spawnOnce(cwd, command, buildDshWebArgs(prefixArgs, true), shellEnv);
+      }
+      throw err;
+    }
+  }
+
+  private async spawnOnce(
+    cwd: string,
+    command: string,
+    args: string[],
+    shellEnv: NodeJS.ProcessEnv,
+  ): Promise<SharedDshProcess> {
     const spawnEnv: NodeJS.ProcessEnv = {
       ...shellEnv,
       NO_COLOR: "1",
+      // Suppress dsh's automatic external browser launch without passing `--no-open`
+      SSH_CONNECTION: shellEnv.SSH_CONNECTION || "127.0.0.1 1 127.0.0.1 22",
+      BROWSER: "none",
     };
     delete spawnEnv.FORCE_COLOR;
     delete spawnEnv.ELECTRON_RUN_AS_NODE;
@@ -260,17 +430,6 @@ export class DshWebManager {
       stdio: ["ignore", "pipe", "pipe"],
       env: spawnEnv,
     });
-
-    const record: ManagedDshProcess = {
-      projectId,
-      projectPath: cwd,
-      proc,
-      url: "",
-      status: "starting",
-      error: null,
-      isCustomUrl: false,
-    };
-    this.instances.set(projectId, record);
 
     const url = await new Promise<string>((resolve, reject) => {
       let settled = false;
@@ -294,7 +453,6 @@ export class DshWebManager {
           finish(undefined, found);
           return;
         }
-        // Keep only the incomplete tail line so URLs split across chunks still match
         const lastNl = lineBuf.lastIndexOf("\n");
         if (lastNl >= 0) {
           lineBuf = lineBuf.slice(lastNl + 1);
@@ -320,8 +478,8 @@ export class DshWebManager {
         finish(new Error(`无法启动 dsh (${command}): ${err.message}`));
       });
       proc.once("exit", (code) => {
-        if (this.instances.get(projectId) === record && record.status === "ready") {
-          this.instances.delete(projectId);
+        if (this.shared?.proc === proc) {
+          this.shared = null;
         }
         finish(
           new Error(
@@ -331,16 +489,16 @@ export class DshWebManager {
           ),
         );
       });
-    }).catch((err: Error) => {
-      record.status = "error";
-      record.error = err.message;
-      this.instances.delete(projectId);
-      throw err;
     });
 
-    record.url = url;
-    record.status = "ready";
-    record.error = null;
-    return toInfo(record);
+    const record: SharedDshProcess = {
+      proc,
+      url,
+      cwd,
+      isCustomUrl: false,
+    };
+    this.shared = record;
+    writePersistedDsh({ url, isCustomUrl: false });
+    return record;
   }
 }
