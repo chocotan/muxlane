@@ -538,7 +538,7 @@ export function presetChatDriver(agentType: AgentType): ChatDriverKind | null {
 }
 
 export type HostKind = "local" | "ssh" | "socket";
-export type SshAuthKind = "ssh_config" | "public_key";
+export type SshAuthKind = "ssh_config" | "public_key" | "password";
 
 export interface HostEntry {
   id: string;
@@ -550,6 +550,7 @@ export interface HostEntry {
   port?: number;
   identityFile?: string;
   remoteSocketPath?: string;
+  hasPassword?: boolean;
 }
 
 export interface AddHostInput {
@@ -558,6 +559,7 @@ export interface AddHostInput {
   target: string;
   authKind?: SshAuthKind;
   username?: string;
+  password?: string;
   port?: number;
   identityFile?: string;
   remoteSocketPath?: string;
@@ -567,6 +569,7 @@ export interface HostsState {
   activeHostId: string;
   hosts: HostEntry[];
   tunnelStatus?: string | null;
+  tunnelPhase?: "idle" | "connecting" | "error";
 }
 
 export interface RelayConfig {

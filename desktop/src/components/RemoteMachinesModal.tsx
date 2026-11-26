@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import {
   Check,
+  Eye,
+  EyeOff,
   FolderOpen,
   Laptop,
   Loader2,
@@ -12,6 +14,7 @@ import {
 import type {
   AddHostInput,
   DaemonConnectionStatus,
+  HostEntry,
   HostsState,
   SshAuthKind,
 } from "../shared/protocol";
@@ -24,6 +27,30 @@ interface RemoteMachinesModalProps {
   onSelectHost: (hostId: string) => Promise<unknown>;
   onAddHost: (input: AddHostInput) => Promise<unknown>;
   onRemoveHost: (hostId: string) => Promise<unknown>;
+}
+
+function hostAuthBadge(host: HostEntry): string {
+  if (host.kind === "local") return "local";
+  if (host.kind === "socket") return "socket";
+  switch (host.authKind) {
+    case "password":
+      return "ssh 密码";
+    case "public_key":
+      return "ssh 私钥";
+    default:
+      return "ssh config";
+  }
+}
+
+function hostTargetDisplay(host: HostEntry): string {
+  if (host.kind === "ssh" && host.username && !host.target.includes("@")) {
+    const portSuffix = host.port ? `:${host.port}` : "";
+    return `${host.username}@${host.target}${portSuffix}`;
+  }
+  if (host.kind === "ssh" && host.port) {
+    return `${host.target}:${host.port}`;
+  }
+  return host.target;
 }
 
 export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
@@ -41,6 +68,8 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
   const [target, setTarget] = useState("");
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [port, setPort] = useState("");
   const [identityFile, setIdentityFile] = useState("");
   const [remoteSocketPath, setRemoteSocketPath] = useState("");
@@ -64,6 +93,8 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
     setTarget("");
     setName("");
     setUsername("");
+    setPassword("");
+    setShowPassword(false);
     setPort("");
     setIdentityFile("");
     setRemoteSocketPath("");
@@ -95,9 +126,23 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
     }
   };
 
+  const effectiveUsername =
+    username.trim() || (target.includes("@") ? target.trim().split("@", 1)[0]?.trim() || "" : "");
+
+  const canSubmit =
+    !submitting &&
+    Boolean(target.trim()) &&
+    (kind !== "ssh" ||
+      authKind !== "password" ||
+      (Boolean(effectiveUsername) && password.length > 0));
+
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!target.trim() || submitting) return;
+    if (!canSubmit) return;
+    if (kind === "ssh" && authKind === "password" && (!effectiveUsername || !password)) {
+      setError("用户名密码连接需要填写用户名和密码");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -107,7 +152,8 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
         target: target.trim(),
         name: name.trim() || undefined,
         authKind: kind === "ssh" ? authKind : undefined,
-        username: kind === "ssh" && username.trim() ? username.trim() : undefined,
+        username: kind === "ssh" && effectiveUsername ? effectiveUsername : undefined,
+        password: kind === "ssh" && authKind === "password" ? password : undefined,
         port: kind === "ssh" && parsedPort && !Number.isNaN(parsedPort) ? parsedPort : undefined,
         identityFile:
           kind === "ssh" && authKind === "public_key" && identityFile.trim()
@@ -131,6 +177,11 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
     if (file) setIdentityFile(file);
   };
 
+  const isConnectingStatus =
+    hostsState.tunnelPhase === "connecting" && Boolean(hostsState.tunnelStatus);
+  const displayError =
+    error || (hostsState.tunnelPhase !== "connecting" ? hostsState.tunnelStatus : null);
+
   return (
     <div
       onClick={onClose}
@@ -138,7 +189,7 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="mux-popover-shadow flex max-h-[85vh] w-full max-w-[560px] flex-col border border-line-strong bg-elevated"
+        className="mux-popover-shadow flex max-h-[85vh] w-full max-w-[580px] flex-col border border-line-strong bg-elevated"
       >
         <div className="flex h-11 shrink-0 items-center justify-between border-b border-line-subtle px-4">
           <div className="flex items-center gap-2">
@@ -156,9 +207,16 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4 space-y-4">
-          {(error || hostsState.tunnelStatus) && (
-            <div className="border-l-2 border-danger bg-danger-soft px-3 py-2 text-[12px] text-danger select-text">
-              {error || hostsState.tunnelStatus}
+          {isConnectingStatus && (
+            <div className="flex items-center gap-2 border-l-2 border-working bg-working-soft px-3 py-2 text-[12px] text-working select-text">
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+              <span className="min-w-0 flex-1 break-all">{hostsState.tunnelStatus}</span>
+            </div>
+          )}
+
+          {displayError && (
+            <div className="border-l-2 border-danger bg-danger-soft px-3 py-2 text-[12px] text-danger select-text break-words">
+              {displayError}
             </div>
           )}
 
@@ -210,12 +268,12 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
                           <span className="truncate text-[13px] font-medium text-ink-strong">
                             {host.name}
                           </span>
-                          <span className="shrink-0 font-mono text-[10px] text-ink-muted uppercase">
-                            {isLocal ? "local" : host.kind}
+                          <span className="shrink-0 border border-line-subtle bg-elevated px-1 font-mono text-[10px] text-ink-muted uppercase">
+                            {hostAuthBadge(host)}
                           </span>
                         </div>
                         <div className="truncate font-mono text-[11px] text-ink-muted">
-                          {host.target}
+                          {hostTargetDisplay(host)}
                         </div>
                       </div>
                     </button>
@@ -305,7 +363,7 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
               <div>
                 <label className="mb-1 block text-[11.5px] text-ink-muted">
                   {kind === "ssh"
-                    ? "SSH Host 或 ~/.ssh/config 别名"
+                    ? "主机地址 / IP 或 ~/.ssh/config 别名"
                     : "本地 / 转发 Unix Socket 路径"}
                 </label>
                 <input
@@ -314,7 +372,7 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
                   onChange={(e) => setTarget(e.target.value)}
                   placeholder={
                     kind === "ssh"
-                      ? "例如：dev-box 或 ubuntu@192.168.1.20"
+                      ? "例如：192.168.1.20、ubuntu@192.168.1.20 或 dev-box"
                       : "例如：/tmp/remote-muxlane.sock"
                   }
                   className="h-8 w-full border border-line bg-elevated px-2.5 font-mono text-[12.5px] text-ink-strong placeholder:text-ink-muted focus:border-line-strong focus:outline-none select-text"
@@ -346,7 +404,7 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
 
               {kind === "ssh" && (
                 <>
-                  <div className="grid grid-cols-2 border border-line bg-base p-[2px]">
+                  <div className="grid grid-cols-3 border border-line bg-base p-[2px]">
                     <button
                       type="button"
                       onClick={() => setAuthKind("ssh_config")}
@@ -356,7 +414,7 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
                           : "text-ink-muted hover:text-ink"
                       }`}
                     >
-                      SSH Config / Agent
+                      SSH Config
                     </button>
                     <button
                       type="button"
@@ -367,9 +425,68 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
                           : "text-ink-muted hover:text-ink"
                       }`}
                     >
-                      指定私钥文件
+                      私钥文件
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAuthKind("password")}
+                      className={`h-7 text-[12px] transition-colors cursor-pointer ${
+                        authKind === "password"
+                          ? "bg-active font-medium text-ink-strong"
+                          : "text-ink-muted hover:text-ink"
+                      }`}
+                    >
+                      用户名密码
                     </button>
                   </div>
+
+                  {authKind === "password" && (
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="mb-1 block text-[11.5px] text-ink-muted">
+                          用户名 {target.includes("@") ? "（已从地址读取）" : "*"}
+                        </label>
+                        <input
+                          required={!target.includes("@")}
+                          value={username}
+                          onChange={(e) => setUsername(e.target.value)}
+                          placeholder={
+                            target.includes("@")
+                              ? target.trim().split("@", 1)[0]
+                              : "例如：root 或 ubuntu"
+                          }
+                          className="h-8 w-full border border-line bg-elevated px-2.5 font-mono text-[12px] text-ink-strong placeholder:text-ink-muted focus:border-line-strong focus:outline-none select-text"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-[11.5px] text-ink-muted">密码 *</label>
+                        <div className="flex gap-1">
+                          <input
+                            required
+                            type={showPassword ? "text" : "password"}
+                            autoComplete="off"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            placeholder="SSH 登录密码"
+                            className="h-8 min-w-0 flex-1 border border-line bg-elevated px-2.5 font-mono text-[12px] text-ink-strong placeholder:text-ink-muted focus:border-line-strong focus:outline-none select-text"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword((v) => !v)}
+                            title={showPassword ? "隐藏密码" : "显示密码"}
+                            aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                            className="flex h-8 w-8 shrink-0 items-center justify-center border border-line bg-elevated text-ink-muted hover:bg-hover hover:text-ink-strong cursor-pointer"
+                          >
+                            {showPassword ? (
+                              <EyeOff className="h-3.5 w-3.5" />
+                            ) : (
+                              <Eye className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {authKind === "public_key" && (
                     <div className="grid grid-cols-2 gap-2.5">
@@ -380,7 +497,7 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
                         <input
                           value={username}
                           onChange={(e) => setUsername(e.target.value)}
-                          placeholder="如 target 已含 user@ 可留空"
+                          placeholder="如地址已含 user@ 可留空"
                           className="h-8 w-full border border-line bg-elevated px-2.5 font-mono text-[12px] text-ink-strong placeholder:text-ink-muted focus:border-line-strong focus:outline-none select-text"
                         />
                       </div>
@@ -408,7 +525,7 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
 
                   <div>
                     <label className="mb-1 block text-[11.5px] text-ink-muted">
-                      远端 Socket 路径（留空则自动探测）
+                      远端 Socket 路径（留空则自动探测并按需部署/启动 muxlane）
                     </label>
                     <input
                       value={remoteSocketPath}
@@ -417,6 +534,12 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
                       className="h-8 w-full border border-line bg-elevated px-2.5 font-mono text-[12px] text-ink-strong placeholder:text-ink-muted focus:border-line-strong focus:outline-none select-text"
                     />
                   </div>
+
+                  {authKind === "password" && (
+                    <div className="text-[11px] leading-[1.45] text-ink-muted">
+                      密码以 0600 权限保存在本机密钥文件并通过一次性 SSH_ASKPASS 传递，不会写入命令行参数或普通配置文件。
+                    </div>
+                  )}
                 </>
               )}
 
@@ -430,7 +553,7 @@ export const RemoteMachinesModal: React.FC<RemoteMachinesModalProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={!target.trim() || submitting}
+                  disabled={!canSubmit}
                   className="flex h-8 min-w-[104px] items-center justify-center gap-1.5 bg-primary-btn px-3.5 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover disabled:opacity-45 transition-colors cursor-pointer"
                 >
                   {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}

@@ -85,6 +85,7 @@ function setupRpcAndHosts(): void {
         mainWindow.webContents.send("muxlane:hosts-changed", hostsState);
       }
     },
+    repoRoot,
   );
 
   void hostManager.start().catch(() => {
