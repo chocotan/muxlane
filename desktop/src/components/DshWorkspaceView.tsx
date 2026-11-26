@@ -79,6 +79,7 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
   const webviewRef = useRef<WebviewElement | null>(null);
   const [resolvedUrl, setResolvedUrl] = useState<string>("");
   const [addressInput, setAddressInput] = useState<string>(() => readHostCustomDshUrl(hostId));
+  const [reusedExisting, setReusedExisting] = useState(false);
   const [copiedKind, setCopiedKind] = useState<"url" | "token" | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +100,7 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
         );
         setResolvedUrl(res.url);
         setAddressInput(res.url);
+        setReusedExisting(Boolean(res.reusedExisting));
       } catch (err) {
         setError((err as Error).message || `无法启动 ${hostName} 的 DeepSeek Harness WebUI`);
       } finally {
@@ -176,6 +178,7 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
       const res = await window.muxlane.restartDshWeb(`host:${hostId}`, defaultProjectPath);
       setResolvedUrl(res.url);
       setAddressInput(res.url);
+      setReusedExisting(Boolean(res.reusedExisting));
     } catch (err) {
       setError((err as Error).message || `重启 ${hostName} 的 DeepSeek Harness WebUI 失败`);
     } finally {
@@ -306,6 +309,15 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
 
         {/* Actions */}
         <div className="flex shrink-0 items-center gap-1">
+          {reusedExisting && !dshToken && resolvedUrl && (
+            <span
+              title={`已自动复用 ${hostName} 上正在运行的 DSH WebUI 实例（避免多实例会话占用冲突）`}
+              className="flex h-6 items-center border border-line-subtle bg-canvas px-2 text-[11px] text-success"
+            >
+              已复用已有实例
+            </span>
+          )}
+
           {resolvedUrl && (
             <button
               type="button"

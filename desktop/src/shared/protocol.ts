@@ -562,6 +562,7 @@ export interface DshInstanceInfo {
   status: "starting" | "ready" | "error";
   error?: string | null;
   isCustomUrl?: boolean;
+  reusedExisting?: boolean;
 }
 
 export interface AddHostInput {

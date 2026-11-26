@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -15,6 +16,18 @@ import {
   type HostConnectionContext,
 } from "./host-manager";
 
+export interface DshAuthCookie {
+  url: string;
+  name: string;
+  value: string;
+  header: string;
+  expiresAt: number;
+}
+
+export interface DshWebManagerOptions {
+  setAuthCookie?: (partition: string, cookie: DshAuthCookie) => Promise<void>;
+}
+
 interface SharedHostDsh {
   hostId: string;
   proc: ChildProcess | null; // local dsh process OR remote SSH port-forward process
@@ -22,6 +35,8 @@ interface SharedHostDsh {
   url: string;
   cwd: string;
   isCustomUrl: boolean;
+  reusedExisting?: boolean;
+  authCookieHeader?: string;
 }
 
 interface PersistedDshMap {
@@ -158,11 +173,143 @@ function loadLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
   return cachedLoginEnvPromise;
 }
 
+function encodeBase64Url(value: Buffer): string {
+  return value.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function decodeBase64Url(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value) || value.length % 4 === 1) return null;
+  const pad = "=".repeat((4 - (value.length % 4)) % 4);
+  const decoded = Buffer.from(value.replace(/-/g, "+").replace(/_/g, "/") + pad, "base64");
+  return encodeBase64Url(decoded) === value ? decoded : null;
+}
+
+/**
+ * Extract the 32-byte base64url `client-connection/browser-session` signing secret
+ * from `~/.dsh/.credentials.yaml` without reading unrelated API keys.
+ */
+export function extractDshBrowserSessionSecret(yamlText: string): string | null {
+  const blockMatch = yamlText.match(
+    /client-connection\/browser-session\s*:\s*\r?\n([\s\S]*?)(?:\r?\n\S|\r?\n  \S|$)/,
+  );
+  if (!blockMatch) return null;
+  const secretMatch = blockMatch[1].match(/^\s+secret\s*:\s*["']?([A-Za-z0-9_-]{20,})["']?\s*$/m);
+  return secretMatch?.[1] ?? null;
+}
+
+/**
+ * Mint an authority-bound `dsh-auth-*` signed session cookie identical to `dsh web`'s
+ * `BrowserAuth`, allowing Muxlane's webview to attach cleanly to an already-running
+ * `dsh web` instance without launching a conflicting second process.
+ */
+export function mintDshSessionCookie(
+  targetUrl: string,
+  secretBase64Url: string,
+  nowMs = Date.now(),
+): DshAuthCookie | null {
+  const secretBytes = decodeBase64Url(secretBase64Url.trim());
+  if (!secretBytes || secretBytes.byteLength !== 32) return null;
+  try {
+    const parsed = new URL(targetUrl);
+    const secure = parsed.protocol === "https:";
+    const authority = secure ? parsed.origin : parsed.host;
+    if (!authority) return null;
+    const name =
+      "dsh-auth-" + encodeBase64Url(crypto.createHash("sha256").update(authority).digest());
+    const expiresAt = nowMs + 7 * 24 * 60 * 60 * 1000;
+    const payload = { version: 1, authority, issuedAt: nowMs, expiresAt };
+    const body = encodeBase64Url(Buffer.from(JSON.stringify(payload), "utf8"));
+    const sig = encodeBase64Url(crypto.createHmac("sha256", secretBytes).update(body).digest());
+    const value = `v1.${body}.${sig}`;
+    return {
+      url: `${parsed.protocol}//${parsed.host}/`,
+      name,
+      value,
+      header: `${name}=${value}`,
+      expiresAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Normalize a listening TCP socket address from `ss` or `lsof` (e.g. `100.64.10.138:3080`,
+ * `0.0.0.0:3080`, `*:3080`, `[::]:3080`, `[::ffff:100.64.10.138]:3080`) into a connectable HTTP URL.
+ */
+export function parseListenAddressToUrl(listenAddr: string): string | null {
+  const trimmed = listenAddr.trim();
+  if (!trimmed) return null;
+  const lastColon = trimmed.lastIndexOf(":");
+  if (lastColon <= 0 || lastColon === trimmed.length - 1) return null;
+  let host = trimmed.slice(0, lastColon).trim();
+  const port = Number(trimmed.slice(lastColon + 1).trim());
+  if (!Number.isFinite(port) || port <= 0 || port > 65535) return null;
+
+  if (host.startsWith("[") && host.endsWith("]")) {
+    host = host.slice(1, -1);
+  }
+  if (/^::ffff:/i.test(host)) {
+    host = host.slice("::ffff:".length);
+  }
+  if (host === "0.0.0.0" || host === "*" || host === "::" || host === "") {
+    host = "127.0.0.1";
+  }
+  const formattedHost = host.includes(":") ? `[${host}]` : host;
+  return `http://${formattedHost}:${port}/`;
+}
+
+function readLocalDshBrowserSessionSecret(env: NodeJS.ProcessEnv): string | null {
+  const dshHome = env.DSH_HOME?.trim() || process.env.DSH_HOME?.trim() || path.join(os.homedir(), ".dsh");
+  const credFile = path.join(dshHome, ".credentials.yaml");
+  try {
+    if (!fs.existsSync(credFile)) return null;
+    return extractDshBrowserSessionSecret(fs.readFileSync(credFile, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function findRunningLocalDshListenAddresses(): Promise<string[]> {
+  if (process.platform === "win32") return Promise.resolve([]);
+  const script = [
+    `PIDS=$(ps -eo pid=,args= | awk '($0 ~ /(^|[[:space:]\\/])dsh([[:space:]]|$)/ && $0 ~ /[[:space:]]web([[:space:]]|$)/) && $0 !~ /awk|grep/ {print $1}')`,
+    'for P in $PIDS; do',
+    '  ADDR=""',
+    '  if command -v ss >/dev/null 2>&1; then',
+    '    ADDR=$(ss -H -tlnp 2>/dev/null | awk -v pat="pid=${P}," -v pat2="pid=${P})" \'index($0, pat) || index($0, pat2) {print $4; exit}\')',
+    '  fi',
+    '  if [ -z "$ADDR" ] && command -v lsof >/dev/null 2>&1; then',
+    '    ADDR=$(lsof -nP -iTCP -sTCP:LISTEN -a -p "$P" 2>/dev/null | awk \'NR>1 {for(i=1;i<=NF;i++) if ($i=="(LISTEN)") {print $(i-1); exit}}\')',
+    '  fi',
+    '  if [ -n "$ADDR" ]; then printf "%s\\n" "$ADDR"; fi',
+    'done',
+  ].join("\n");
+
+  return new Promise((resolve) => {
+    execFile("sh", ["-c", script], { timeout: 3000, maxBuffer: 256 * 1024 }, (err, stdout) => {
+      if (err || !stdout) {
+        resolve([]);
+        return;
+      }
+      const addrs = stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      resolve(addrs);
+    });
+  });
+}
+
 /**
  * Probe whether a DSH WebUI URL is currently alive AND accepts auth
  * (200 OK for open/authenticated endpoints, 303/302 for valid `?token=...` exchange).
  */
-export function probeDshUrl(url: string, timeoutMs = 1500): Promise<boolean> {
+export function probeDshUrl(
+  url: string,
+  timeoutMs = 1500,
+  cookieHeader?: string,
+): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     const done = (ok: boolean) => {
@@ -174,12 +321,17 @@ export function probeDshUrl(url: string, timeoutMs = 1500): Promise<boolean> {
     try {
       const parsed = new URL(url);
       const client = parsed.protocol === "https:" ? https : http;
+      const headers: Record<string, string> = {};
+      if (cookieHeader) {
+        headers.Cookie = cookieHeader;
+      }
       const req = client.request(
         parsed,
         {
           method: "GET",
           timeout: timeoutMs,
           rejectUnauthorized: false,
+          headers,
         },
         (res) => {
           const code = res.statusCode ?? 0;
@@ -361,6 +513,25 @@ export function buildRemoteDshScript(
     `  ESC="$(printf '\\033')"`,
     `  tr -d "\\r" < "$LOG_FILE" | sed -E "s/\${ESC}\\[[0-9;]*[a-zA-Z]//g" | grep -Eo "https?://(127\\.0\\.0\\.1|localhost|\\[::1\\]):[0-9]+[^[:space:]\\"<>']*" | head -n 1`,
     '}',
+    'read_dsh_secret() {',
+    '  CRED="${DSH_HOME:-$HOME/.dsh}/.credentials.yaml"',
+    '  [ -f "$CRED" ] || return 0',
+    `  awk '/client-connection\\/browser-session:/{f=1;next} f && (/^[^[:space:]]/ || /^  [^[:space:]]/){f=0} f && /secret:/{sub(/^.*secret:[[:space:]]*/, ""); gsub(/["\\047[:space:]]/, ""); print; exit}' "$CRED"`,
+    '}',
+    'find_existing_dsh_listen() {',
+    `  PIDS="$(ps -eo pid=,args= 2>/dev/null | awk '($0 ~ /(^|[[:space:]\\/])dsh([[:space:]]|$)/ && $0 ~ /[[:space:]]web([[:space:]]|$)/) && $0 !~ /awk|grep/ {print $1}' || true)"`,
+    '  for P in $PIDS; do',
+    '    ADDR=""',
+    '    if command -v ss >/dev/null 2>&1; then',
+    `      ADDR="$(ss -H -tlnp 2>/dev/null | awk -v pat="pid=\${P}," -v pat2="pid=\${P})" 'index($0, pat) || index($0, pat2) {print $4; exit}' || true)"`,
+    '    fi',
+    '    if [ -z "$ADDR" ] && command -v lsof >/dev/null 2>&1; then',
+    `      ADDR="$(lsof -nP -iTCP -sTCP:LISTEN -a -p "$P" 2>/dev/null | awk 'NR>1 {for(i=1;i<=NF;i++) if ($i=="(LISTEN)") {print $(i-1); exit}}' || true)"`,
+    '    fi',
+    '    if [ -n "$ADDR" ]; then printf "%s\\n" "$ADDR"; return 0; fi',
+    '  done',
+    '  return 1',
+    '}',
     `if [ "${restartFlag}" = "1" ]; then`,
     '  if [ -f "$PID_FILE" ]; then OLD="$(cat "$PID_FILE" 2>/dev/null || true)"; [ -n "$OLD" ] && kill "$OLD" 2>/dev/null || true; fi',
     '  rm -f "$PID_FILE" "$LOG_FILE"',
@@ -371,6 +542,14 @@ export function buildRemoteDshScript(
     '    URL="$(extract_url || true)"',
     '    if [ -n "$URL" ]; then printf "DSH_URL\\t%s\\n" "$URL"; exit 0; fi',
     '  fi',
+    'fi',
+    'EXISTING_ADDR="$(find_existing_dsh_listen || true)"',
+    'if [ -n "$EXISTING_ADDR" ]; then',
+    '  printf "DSH_LISTEN\\t%s\\n" "$EXISTING_ADDR"',
+    '  printf "DSH_REUSED\\t1\\n"',
+    '  SEC="$(read_dsh_secret || true)"',
+    '  if [ -n "$SEC" ]; then printf "DSH_AUTH_SECRET\\t%s\\n" "$SEC"; fi',
+    '  exit 0',
     'fi',
     `WORK_DIR=${qCwd}`,
     '[ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ] || WORK_DIR="$HOME"',
@@ -446,6 +625,11 @@ export function buildRemoteDshForwardArgs(forwardSpec: string, destination: stri
 export class DshWebManager {
   private byHost = new Map<string, SharedHostDsh>();
   private inflight = new Map<string, Promise<SharedHostDsh>>();
+  private setAuthCookie?: (partition: string, cookie: DshAuthCookie) => Promise<void>;
+
+  constructor(options?: DshWebManagerOptions) {
+    this.setAuthCookie = options?.setAuthCookie;
+  }
 
   list(): DshInstanceInfo[] {
     return Array.from(this.byHost.values()).map((inst) => ({
@@ -455,6 +639,7 @@ export class DshWebManager {
       status: "ready",
       error: null,
       isCustomUrl: inst.isCustomUrl,
+      reusedExisting: inst.reusedExisting,
     }));
   }
 
@@ -474,6 +659,7 @@ export class DshWebManager {
         url: normalizedCustom,
         cwd: projectPath,
         isCustomUrl: true,
+        reusedExisting: false,
       };
       this.byHost.set(hostId, custom);
       writePersistedDshForHost(hostId, { url: normalizedCustom, isCustomUrl: true });
@@ -498,7 +684,7 @@ export class DshWebManager {
       return this.toProjectInfo(projectId, projectPath, inst);
     }
 
-    const inst = await this.startNewLocalShared(projectPath);
+    const inst = await this.detectOrStartLocal(projectPath);
     return this.toProjectInfo(projectId, projectPath, inst);
   }
 
@@ -527,6 +713,7 @@ export class DshWebManager {
       status: "ready",
       error: null,
       isCustomUrl: inst.isCustomUrl,
+      reusedExisting: inst.reusedExisting,
     };
   }
 
@@ -556,7 +743,7 @@ export class DshWebManager {
     const existing = this.byHost.get(hostId);
     if (existing) {
       const procAlive = !existing.proc || existing.proc.exitCode === null;
-      if (procAlive && (await probeDshUrl(existing.url))) {
+      if (procAlive && (await probeDshUrl(existing.url, 1500, existing.authCookieHeader))) {
         return existing;
       }
       this.killHostManaged(hostId);
@@ -597,6 +784,7 @@ export class DshWebManager {
           url: saved.url,
           cwd: projectPath,
           isCustomUrl: true,
+          reusedExisting: false,
         };
         this.byHost.set(hostId, reused);
         return reused;
@@ -614,11 +802,22 @@ export class DshWebManager {
     );
 
     let remoteUrl = "";
+    let listenAddr = "";
+    let authSecret = "";
+    let reusedExisting = false;
     for (const line of stdout.split(/\r?\n/)) {
       if (line.startsWith("DSH_URL\t")) {
         remoteUrl = line.slice("DSH_URL\t".length).trim();
-        break;
+      } else if (line.startsWith("DSH_LISTEN\t")) {
+        listenAddr = line.slice("DSH_LISTEN\t".length).trim();
+      } else if (line.startsWith("DSH_AUTH_SECRET\t")) {
+        authSecret = line.slice("DSH_AUTH_SECRET\t".length).trim();
+      } else if (line.startsWith("DSH_REUSED\t")) {
+        reusedExisting = line.slice("DSH_REUSED\t".length).trim() === "1";
       }
+    }
+    if (!remoteUrl && listenAddr) {
+      remoteUrl = parseListenAddressToUrl(listenAddr) ?? "";
     }
     if (!remoteUrl) {
       remoteUrl = extractDshWebUrl(stdout) ?? "";
@@ -662,6 +861,15 @@ export class DshWebManager {
     }
 
     const localUrl = `${parsed.protocol}//127.0.0.1:${localPort}${parsed.pathname}${parsed.search}`;
+    let authCookieHeader: string | undefined;
+    if (authSecret && !parsed.searchParams.has("token")) {
+      const cookie = mintDshSessionCookie(localUrl, authSecret);
+      if (cookie) {
+        authCookieHeader = cookie.header;
+        await this.setAuthCookie?.(`persist:dsh-${hostId}`, cookie);
+      }
+    }
+
     const record: SharedHostDsh = {
       hostId,
       proc,
@@ -669,6 +877,8 @@ export class DshWebManager {
       url: localUrl,
       cwd: projectPath,
       isCustomUrl: false,
+      reusedExisting,
+      authCookieHeader,
     };
     proc.once("exit", () => {
       if (this.byHost.get(hostId) === record) {
@@ -681,28 +891,58 @@ export class DshWebManager {
 
   private async detectOrStartLocal(projectPath: string): Promise<SharedHostDsh> {
     const shellEnv = await loadLoginShellEnv();
+    const localSecret = readLocalDshBrowserSessionSecret(shellEnv);
 
-    const candidates: Array<{ url: string; isCustomUrl: boolean }> = [];
+    const candidates: Array<{ url: string; isCustomUrl: boolean; reusedExisting: boolean }> = [];
+    const seen = new Set<string>();
+    const addCandidate = (url: string, isCustomUrl: boolean, reusedExisting: boolean) => {
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      candidates.push({ url, isCustomUrl, reusedExisting });
+    };
+
     const saved = readPersistedDshForHost(LOCAL_HOST_ID);
     if (saved) {
-      candidates.push({ url: saved.url, isCustomUrl: saved.isCustomUrl === true });
+      addCandidate(saved.url, saved.isCustomUrl === true, false);
     }
     const envUrl = shellEnv.DSH_WEB_URL?.trim() || process.env.DSH_WEB_URL?.trim();
     if (envUrl && /^https?:\/\//i.test(envUrl)) {
-      candidates.push({ url: envUrl, isCustomUrl: false });
+      addCandidate(envUrl, false, true);
     }
+
+    // Discover any already-running local `dsh web` process (even on non-loopback host/custom port)
+    const runningAddrs = await findRunningLocalDshListenAddresses();
+    for (const addr of runningAddrs) {
+      const resolved = parseListenAddressToUrl(addr);
+      if (resolved) addCandidate(resolved, false, true);
+    }
+
     for (const defUrl of DEFAULT_LOCAL_CANDIDATES) {
-      candidates.push({ url: defUrl, isCustomUrl: false });
+      addCandidate(defUrl, false, true);
     }
 
     for (const cand of candidates) {
-      if (await probeDshUrl(cand.url)) {
+      let hasToken = false;
+      try {
+        hasToken = new URL(cand.url).searchParams.has("token");
+      } catch {
+        hasToken = false;
+      }
+
+      const cookie =
+        !hasToken && localSecret ? mintDshSessionCookie(cand.url, localSecret) : null;
+      if (await probeDshUrl(cand.url, 1500, cookie?.header)) {
+        if (cookie) {
+          await this.setAuthCookie?.(`persist:dsh-${LOCAL_HOST_ID}`, cookie);
+        }
         const reused: SharedHostDsh = {
           hostId: LOCAL_HOST_ID,
           proc: null,
           url: cand.url,
           cwd: projectPath,
           isCustomUrl: cand.isCustomUrl,
+          reusedExisting: cand.reusedExisting,
+          authCookieHeader: cookie?.header,
         };
         this.byHost.set(LOCAL_HOST_ID, reused);
         return reused;

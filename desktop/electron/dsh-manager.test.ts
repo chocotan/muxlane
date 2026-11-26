@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -8,8 +9,11 @@ import {
   buildDshWebArgs,
   buildRemoteDshForwardArgs,
   buildRemoteDshScript,
+  extractDshBrowserSessionSecret,
   extractDshWebUrl,
+  mintDshSessionCookie,
   normalizeCustomDshUrl,
+  parseListenAddressToUrl,
   probeDshUrl,
 } from "./dsh-manager";
 
@@ -47,9 +51,9 @@ describe("dsh-manager helpers", () => {
     expect(() => normalizeCustomDshUrl("ftp://invalid")).toThrow();
   });
 
-  it("probes live DSH endpoints and rejects 401 unauthorized", async () => {
+  it("probes live DSH endpoints with token or signed Cookie and rejects 401 unauthorized", async () => {
     const server = http.createServer((req, res) => {
-      if (req.url === "/ok") {
+      if (req.url === "/ok" || req.headers.cookie === "dsh-auth-test=valid") {
         res.writeHead(200);
         res.end("ok");
       } else if (req.url === "/?token=good") {
@@ -66,15 +70,66 @@ describe("dsh-manager helpers", () => {
     try {
       expect(await probeDshUrl(`http://127.0.0.1:${port}/ok`)).toBe(true);
       expect(await probeDshUrl(`http://127.0.0.1:${port}/?token=good`)).toBe(true);
+      expect(await probeDshUrl(`http://127.0.0.1:${port}/`, 1500, "dsh-auth-test=valid")).toBe(
+        true,
+      );
       expect(await probeDshUrl(`http://127.0.0.1:${port}/`)).toBe(false);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 
-  it("generates remote SSH dsh script without --no-open and with trusted-host port", () => {
+  it("extracts only browser-session secret and mints authority-bound dsh-auth cookie", () => {
+    const rawSecret = crypto
+      .randomBytes(32)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    const yaml = [
+      "version: 1",
+      "records:",
+      "  client-connection/browser-session:",
+      "    kind: grant",
+      "    payload:",
+      "      version: 1",
+      `      secret: ${rawSecret}`,
+      "  other/provider:",
+      "    payload:",
+      "      secret: DO_NOT_PICK_THIS_SECRET_VALUE",
+      "refs:",
+      "  JKL_API_KEY: super-secret-api-key",
+    ].join("\n");
+
+    expect(extractDshBrowserSessionSecret(yaml)).toBe(rawSecret);
+
+    const cookie = mintDshSessionCookie("http://127.0.0.1:3080/", rawSecret, 1_700_000_000_000);
+    expect(cookie).not.toBeNull();
+    expect(cookie?.url).toBe("http://127.0.0.1:3080/");
+    expect(cookie?.name.startsWith("dsh-auth-")).toBe(true);
+    expect(cookie?.value.startsWith("v1.")).toBe(true);
+    expect(cookie?.value.split(".")).toHaveLength(3);
+    expect(cookie?.header).toBe(`${cookie?.name}=${cookie?.value}`);
+  });
+
+  it("normalizes ss/lsof listen addresses into connectable HTTP URLs", () => {
+    expect(parseListenAddressToUrl("100.64.10.138:3080")).toBe("http://100.64.10.138:3080/");
+    expect(parseListenAddressToUrl("127.0.0.1:45443")).toBe("http://127.0.0.1:45443/");
+    expect(parseListenAddressToUrl("0.0.0.0:3080")).toBe("http://127.0.0.1:3080/");
+    expect(parseListenAddressToUrl("*:3080")).toBe("http://127.0.0.1:3080/");
+    expect(parseListenAddressToUrl("[::]:3080")).toBe("http://127.0.0.1:3080/");
+    expect(parseListenAddressToUrl("[::ffff:100.64.10.138]:3080")).toBe(
+      "http://100.64.10.138:3080/",
+    );
+    expect(parseListenAddressToUrl("[::1]:3080")).toBe("http://[::1]:3080/");
+    expect(parseListenAddressToUrl("invalid")).toBeNull();
+  });
+
+  it("generates remote SSH dsh script without --no-open and with existing-process reuse", () => {
     const script = buildRemoteDshScript("/srv/repo", 41234, false);
     expect(script).toContain("dsh-web.pid");
+    expect(script).toContain("find_existing_dsh_listen");
+    expect(script).toContain("read_dsh_secret");
     expect(script).toContain("--port 41234 --trusted-host 127.0.0.1:41234");
     expect(script).toContain("SSH_CONNECTION=");
     expect(script).not.toContain("--no-open");

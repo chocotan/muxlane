@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, session, shell } from "electron";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -15,7 +15,20 @@ import { MuxlaneSocketClient, resolveMuxlaneSocketPath } from "./muxlane-socket"
 let mainWindow: BrowserWindow | null = null;
 let rpcClient: MuxlaneSocketClient | null = null;
 let hostManager: HostManager | null = null;
-const dshManager = new DshWebManager();
+const dshManager = new DshWebManager({
+  setAuthCookie: async (partition, cookie) => {
+    const ses = session.fromPartition(partition);
+    await ses.cookies.set({
+      url: cookie.url,
+      name: cookie.name,
+      value: cookie.value,
+      path: "/",
+      httpOnly: true,
+      sameSite: "strict",
+      expirationDate: Math.floor(cookie.expiresAt / 1000),
+    });
+  },
+});
 
 function resolveAppIcon() {
   const iconPath = path.join(__dirname, "..", "assets", "muxlane-icon.png");
