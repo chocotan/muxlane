@@ -23,8 +23,8 @@ android {
         applicationId = "com.muxlane.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.0.36"
+        versionCode = 6
+        versionName = "0.0.37"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes {
