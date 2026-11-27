@@ -32,10 +32,8 @@ import muxlane.chat.ChatSessionSummary
 import muxlane.chat.ChatSpawnParams
 import muxlane.chat.ChatSubscribeParams
 import muxlane.chat.ChatSubscribeResult
-import muxlane.chat.ChatSwitchModeParams
 import muxlane.chat.ChatTimelineSnapshot
 import muxlane.chat.PendingApproval
-import muxlane.chat.SessionDriverMode
 import muxlane.chat.StreamingBehavior
 import muxlane.crypto.E2eeKeyPair
 import muxlane.crypto.E2eeSession
@@ -439,14 +437,11 @@ class MuxlaneSession(private val app: Application) {
         _state.value = _state.value.copy(confirmRemoveHost = hostId)
     }
 
-    fun isChatCapable(agentId: String): Boolean {
-        if (_state.value.chatSessions.containsKey(agentId)) return true
-        val type = snapshotAgent(agentId)?.agentType ?: return false
-        return type != AgentType.SHELL && type != AgentType.UNKNOWN
-    }
+    fun isChatOnlySession(agentId: String): Boolean =
+        isChatOnlySession(snapshotAgent(agentId))
 
     fun openAgent(id: String) {
-        val mode = if (isChatCapable(id)) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
+        val mode = if (isChatOnlySession(id)) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
         val nextTabs = appendOrFocusTab(_state.value.openTabs, id)
         _state.value = _state.value.copy(
             selectedAgent = id,
@@ -531,42 +526,6 @@ class MuxlaneSession(private val app: Application) {
 
     fun setChatTextScale(scale: Float) {
         _state.value = _state.value.copy(chatTextScale = scale.coerceIn(0.85f, 1.4f))
-    }
-
-    fun setSessionMode(mode: SessionPaneMode) {
-        val agent = _state.value.selectedAgent ?: return
-        if (_state.value.sessionMode == mode) return
-        val meta = _state.value.chatTimelines[agent]?.meta ?: _state.value.chatSessions[agent]?.meta
-        if (mode == SessionPaneMode.CHAT && !isChatCapable(agent)) return
-        if (mode == SessionPaneMode.TERMINAL && meta != null && !meta.hasPty && !meta.supportsTerminalSwitch) {
-            _state.value = _state.value.copy(error = "当前会话未开启交互终端")
-            return
-        }
-        _state.value = _state.value.copy(sessionMode = mode, error = null)
-        if (!_state.value.connected) return
-        scope.launch {
-            runCatching {
-                when (mode) {
-                    SessionPaneMode.TERMINAL -> {
-                        unsubscribeChatLocked()
-                        if (meta != null && meta.driver != SessionDriverMode.TERMINAL_PTY && meta.supportsTerminalSwitch) {
-                            val resp = client.call(
-                                Methods.CHAT_SWITCH_MODE,
-                                encodeParams(ChatSwitchModeParams.serializer(), ChatSwitchModeParams(agent, SessionDriverMode.TERMINAL_PTY)),
-                            )
-                            resp.error?.let { error(it.message) }
-                        }
-                        subscribeTerm(agent)
-                    }
-                    SessionPaneMode.CHAT -> {
-                        unsubscribeTermLocked()
-                        // Orca-style Dual-Lane Bridge: never kill/restart a live PTY on view toggle.
-                        // `chat.subscribe` attaches directly to the live PTY Bridge or structured driver.
-                        subscribeChat(agent)
-                    }
-                }
-            }.onFailure(::setError)
-        }
     }
 
     fun closeAgent() {
@@ -777,39 +736,27 @@ class MuxlaneSession(private val app: Application) {
     fun spawnChat(preset: AgentPreset, initialPrompt: String? = null) {
         val project = _state.value.spawnProject ?: return
         val driver = presetChatDriver(preset.agentType)
+        if (driver == null) {
+            spawn(preset)
+            return
+        }
         val prompt = initialPrompt?.trim()?.takeIf { it.isNotEmpty() }
         rpc {
-            val response = if (driver != null) {
-                client.call(
-                    Methods.CHAT_SPAWN,
-                    encodeParams(
-                        ChatSpawnParams.serializer(),
-                        ChatSpawnParams(
-                            project = project,
-                            agentType = preset.agentType,
-                            program = preset.program,
-                            args = preset.args,
-                            presetName = preset.label,
-                            driver = driver,
-                            initialPrompt = prompt,
-                        ),
+            val response = client.call(
+                Methods.CHAT_SPAWN,
+                encodeParams(
+                    ChatSpawnParams.serializer(),
+                    ChatSpawnParams(
+                        project = project,
+                        agentType = preset.agentType,
+                        program = preset.program,
+                        args = preset.args.takeIf { it.isNotEmpty() },
+                        presetName = preset.label,
+                        driver = driver,
+                        initialPrompt = prompt,
                     ),
-                )
-            } else {
-                client.call(
-                    Methods.AGENT_SPAWN,
-                    encodeParams(
-                        AgentSpawnParams.serializer(),
-                        AgentSpawnParams(
-                            project = project,
-                            agentType = preset.agentType,
-                            program = preset.program.takeIf { preset.id != "shell" },
-                            args = preset.args,
-                            presetName = preset.label,
-                        ),
-                    ),
-                )
-            }
+                ),
+            )
             val spawned = muxlaneJson.decodeFromJsonElement(
                 AgentInstance.serializer(),
                 response.result ?: error(response.error?.message ?: "无法创建对话会话"),
@@ -818,18 +765,6 @@ class MuxlaneSession(private val app: Application) {
             refreshSnapshot()
             refreshChatList()
             openAgent(spawned.id)
-            if (driver == null && prompt != null) {
-                // For PTY dual-lane agents (Claude/Codex), dispatch optional initial prompt through chat.send.
-                runCatching {
-                    client.call(
-                        Methods.CHAT_SEND,
-                        encodeParams(
-                            ChatSendParams.serializer(),
-                            ChatSendParams(agent = spawned.id, text = prompt),
-                        ),
-                    )
-                }
-            }
         }
     }
 
@@ -966,7 +901,7 @@ class MuxlaneSession(private val app: Application) {
                 refreshChatList()
                 refreshBots()
                 _state.value.selectedAgent?.let { agent ->
-                    val mode = if (isChatCapable(agent)) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
+                    val mode = if (isChatOnlySession(agent)) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
                     _state.value = _state.value.copy(sessionMode = mode)
                     if (mode == SessionPaneMode.CHAT) subscribeChat(agent) else subscribeTerm(agent)
                 }
@@ -1250,7 +1185,7 @@ class MuxlaneViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelRemoveMachine() = session.cancelRemoveMachine()
     fun confirmRemoveMachine() = session.confirmRemoveMachine()
     fun unpair() = session.unpair()
-    fun isChatCapable(agentId: String) = session.isChatCapable(agentId)
+    fun isChatOnlySession(agentId: String) = session.isChatOnlySession(agentId)
     fun openAgent(id: String) = session.openAgent(id)
     fun stepTab(delta: Int) = session.stepTab(delta)
     fun closeTab(agentId: String) = session.closeTab(agentId)
@@ -1261,7 +1196,6 @@ class MuxlaneViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleProjectCollapsed(projectId: String) = session.toggleProjectCollapsed(projectId)
     fun setTerminalTextScale(scale: Float) = session.setTerminalTextScale(scale)
     fun setChatTextScale(scale: Float) = session.setChatTextScale(scale)
-    fun setSessionMode(mode: SessionPaneMode) = session.setSessionMode(mode)
     fun closeAgent() = session.closeAgent()
     fun sendChatPrompt(text: String, steer: Boolean = true) = session.sendChatPrompt(text, steer)
     fun deleteQueuedMessage(agent: String, messageId: String) = session.deleteQueuedMessage(agent, messageId)

@@ -210,6 +210,8 @@ pub enum TimelineEntry {
         input: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<ChatAttachment>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<Box<ToolDiff>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

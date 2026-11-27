@@ -132,12 +132,12 @@ private fun RowScope.HubNavButton(
     badgeColor: Color,
     onClick: () -> Unit,
 ) {
-    val tint = if (selected) MuxAccent else MuxFg2
+    val tint = if (selected) MuxFg0 else MuxFg2
     Box(
         Modifier
             .weight(1f)
             .height(58.dp)
-            .background(if (selected) MuxAccentBg.copy(alpha = 0.55f) else MuxBg1, Square)
+            .background(MuxBg1, Square)
             .clickable(onClick = onClick),
     ) {
         if (selected) {
@@ -154,7 +154,7 @@ private fun RowScope.HubNavButton(
                 .align(Alignment.Center)
                 .padding(horizontal = 4.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             Box {
                 Icon(icon, label, tint = tint, modifier = Modifier.size(21.dp))
@@ -179,7 +179,7 @@ private fun RowScope.HubNavButton(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = tint,
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -485,7 +485,7 @@ internal fun MuxSectionHeading(
             Text(
                 aside,
                 style = MaterialTheme.typography.labelMedium,
-                color = MuxAccent,
+                color = MuxCobalt,
                 modifier = Modifier
                     .clickable(onClick = onAsideClick)
                     .padding(horizontal = 4.dp, vertical = 2.dp),
@@ -512,17 +512,17 @@ internal fun ConnectionBadgesRow(
         }
         Row(
             Modifier
-                .background(MuxBg2, Square)
-                .border(BorderStroke(1.dp, MuxControlLine), Square)
+                .background(MuxBg0, Square)
+                .border(BorderStroke(1.dp, MuxLine), Square)
                 .padding(horizontal = 6.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {
-            Box(Modifier.size(7.dp).background(dotColor, Square))
+            Box(Modifier.size(6.dp).background(dotColor, Square))
             Text(
                 statusText,
                 style = MaterialTheme.typography.labelSmall,
-                color = MuxFg0,
+                color = MuxFg1,
                 fontFamily = MonoFamily,
             )
         }
@@ -530,13 +530,13 @@ internal fun ConnectionBadgesRow(
             Box(
                 Modifier
                     .background(MuxAccentBg, Square)
-                    .border(BorderStroke(1.dp, MuxAccent.copy(alpha = 0.45f)), Square)
+                    .border(BorderStroke(1.dp, MuxCobalt.copy(alpha = 0.35f)), Square)
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             ) {
                 Text(
                     stringResource(R.string.connection_e2ee),
                     style = MaterialTheme.typography.labelSmall,
-                    color = MuxAccent,
+                    color = MuxCobalt,
                     fontFamily = MonoFamily,
                 )
             }
@@ -640,7 +640,12 @@ internal fun EmptyStateBox(
             Icon(icon, null, tint = MuxFg2, modifier = Modifier.size(34.dp))
             Text(title, style = MaterialTheme.typography.bodyMedium, color = MuxFg1)
             if (!subtitle.isNullOrBlank()) {
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MuxFg2)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MuxFg2,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
             }
         }
     }

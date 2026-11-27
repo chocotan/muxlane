@@ -661,6 +661,7 @@ impl MuxlaneServer {
             .unwrap_or_else(|| agent_type.program().to_string());
         let args = params
             .args
+            .filter(|a| !a.is_empty())
             .or_else(|| {
                 preset
                     .as_ref()
@@ -668,13 +669,18 @@ impl MuxlaneServer {
             })
             .unwrap_or_else(|| match driver_kind {
                 muxlane_core::ChatDriverKind::PiRpc => vec!["--mode".into(), "rpc".into()],
-                muxlane_core::ChatDriverKind::Acp => {
-                    if agent_type == muxlane_core::model::AgentType::Opencode {
-                        vec!["acp".into()]
-                    } else {
-                        vec!["--acp".into()]
-                    }
-                }
+                muxlane_core::ChatDriverKind::Acp => match agent_type {
+                    muxlane_core::model::AgentType::Opencode => vec!["acp".into()],
+                    muxlane_core::model::AgentType::Agy => vec![
+                        "--input-format".into(),
+                        "stream-json".into(),
+                        "--output-format".into(),
+                        "stream-json".into(),
+                        "--dangerously-skip-permissions".into(),
+                        "--print=".into(),
+                    ],
+                    _ => vec!["--acp".into()],
+                },
             });
 
         let spec = muxlane_chat::DriverLaunchSpec {

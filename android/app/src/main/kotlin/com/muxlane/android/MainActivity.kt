@@ -13,8 +13,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.light(0xFFF6F8F7.toInt(), 0xFF101413.toInt()),
-            navigationBarStyle = SystemBarStyle.light(0xFFF6F8F7.toInt(), 0xFF101413.toInt()),
+            statusBarStyle = SystemBarStyle.light(0xFFF9F8F5.toInt(), 0xFFF9F8F5.toInt()),
+            navigationBarStyle = SystemBarStyle.light(0xFFF9F8F5.toInt(), 0xFFF9F8F5.toInt()),
         )
         if (android.os.Build.VERSION.SDK_INT >= 29) {
             window.isNavigationBarContrastEnforced = false

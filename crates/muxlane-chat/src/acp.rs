@@ -1228,6 +1228,7 @@ impl AcpTranslator {
             title,
             input,
             output,
+            attachments: Vec::new(),
             diff,
             exit_code,
             locations,

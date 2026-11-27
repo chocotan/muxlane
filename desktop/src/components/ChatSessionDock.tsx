@@ -1,16 +1,16 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
+  Layers,
   ListChecks,
   Pause,
   Play,
   Square,
   Target,
-  Terminal,
   Trash2,
 } from "lucide-react";
 import type {
@@ -28,20 +28,15 @@ interface ChatSessionDockProps {
 }
 
 /**
- * DeepSeek Harness-style composer dock for Pie extensions:
- * - GoalBar (objective, phase, rounds, pause/resume/clear)
- * - TodoPanel (Pie task ledger)
- * - SubagentsPanel (Pie delegated subagent runs)
- * - BackgroundJobsPanel (Pie background shell `bg` jobs)
+ * Compact bottom composer dock: only GoalBar and TodoPanel remain anchored
+ * above the composer so background jobs and subagents never crowd the input area.
  * Strictly 0px square corners throughout.
  */
 export const ChatSessionDock: React.FC<ChatSessionDockProps> = ({ meta, onRunCommand }) => {
   const goal = meta.goal && meta.goal.status !== "complete" ? meta.goal : null;
   const tasks = meta.tasks ?? [];
-  const subagents = meta.subagents ?? [];
-  const bgJobs = meta.background_jobs ?? [];
 
-  if (!goal && tasks.length === 0 && subagents.length === 0 && bgJobs.length === 0) {
+  if (!goal && tasks.length === 0) {
     return null;
   }
 
@@ -50,11 +45,78 @@ export const ChatSessionDock: React.FC<ChatSessionDockProps> = ({ meta, onRunCom
       <div className="mx-auto w-full max-w-[68rem] space-y-1.5">
         {goal && <GoalBarStrip goal={goal} onRunCommand={onRunCommand} />}
         {tasks.length > 0 && <TodoPanelStrip tasks={tasks} />}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * DeepSeek Harness (`dsh`) style session header actions for Subagents & Background Jobs:
+ * Compact top-right trigger buttons with live pulsing status dots and counts,
+ * opening floating square-cornered dropdown popovers (live section first, collapsible
+ * settled section with clear action below).
+ */
+export const ChatSessionHeaderActions: React.FC<ChatSessionDockProps> = ({
+  meta,
+  onRunCommand,
+}) => {
+  const subagents = meta.subagents ?? [];
+  const bgJobs = meta.background_jobs ?? [];
+  const [openMenu, setOpenMenu] = useState<"subagents" | "jobs" | null>(null);
+  const barRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!openMenu) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (barRef.current && !barRef.current.contains(e.target as Node)) {
+        setOpenMenu(null);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpenMenu(null);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openMenu]);
+
+  useEffect(() => {
+    if (openMenu === "subagents" && subagents.length === 0) setOpenMenu(null);
+    if (openMenu === "jobs" && bgJobs.length === 0) setOpenMenu(null);
+  }, [openMenu, subagents.length, bgJobs.length]);
+
+  if (subagents.length === 0 && bgJobs.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      ref={barRef}
+      className="relative z-20 shrink-0 border-b border-line-subtle bg-canvas px-5 py-1.5"
+    >
+      <div className="mx-auto flex w-full max-w-[68rem] items-center justify-end gap-2">
         {subagents.length > 0 && (
-          <SubagentsPanelStrip subagents={subagents} onRunCommand={onRunCommand} />
+          <SubagentsHeaderAction
+            subagents={subagents}
+            open={openMenu === "subagents"}
+            onToggle={() => setOpenMenu((cur) => (cur === "subagents" ? null : "subagents"))}
+            onClose={() => setOpenMenu(null)}
+            onRunCommand={onRunCommand}
+          />
         )}
         {bgJobs.length > 0 && (
-          <BackgroundJobsPanelStrip jobs={bgJobs} onRunCommand={onRunCommand} />
+          <BackgroundJobsHeaderAction
+            jobs={bgJobs}
+            open={openMenu === "jobs"}
+            onToggle={() => setOpenMenu((cur) => (cur === "jobs" ? null : "jobs"))}
+            onClose={() => setOpenMenu(null)}
+            onRunCommand={onRunCommand}
+          />
         )}
       </div>
     </div>
@@ -139,7 +201,9 @@ const GoalBarStrip: React.FC<{
 const TodoPanelStrip: React.FC<{ tasks: SessionTask[] }> = ({ tasks }) => {
   const completedCount = tasks.filter((t) => t.status === "completed").length;
   const inProgressCount = tasks.filter((t) => t.status === "in_progress").length;
-  const pendingCount = tasks.filter((t) => t.status !== "completed" && t.status !== "in_progress").length;
+  const pendingCount = tasks.filter(
+    (t) => t.status !== "completed" && t.status !== "in_progress",
+  ).length;
   const hasOpen = inProgressCount > 0 || pendingCount > 0;
   const [open, setOpen] = useState(hasOpen);
 
@@ -163,7 +227,9 @@ const TodoPanelStrip: React.FC<{ tasks: SessionTask[] }> = ({ tasks }) => {
         <div className="flex items-center gap-2 font-mono text-[10.5px] text-ink-muted tabular-nums">
           <span className={completedCount > 0 ? "text-done" : ""}>已完成 {completedCount}</span>
           <span>·</span>
-          <span className={inProgressCount > 0 ? "text-working" : ""}>进行中 {inProgressCount}</span>
+          <span className={inProgressCount > 0 ? "text-working" : ""}>
+            进行中 {inProgressCount}
+          </span>
           <span>·</span>
           <span>待办 {pendingCount}</span>
         </div>
@@ -220,147 +286,294 @@ const TodoPanelStrip: React.FC<{ tasks: SessionTask[] }> = ({ tasks }) => {
   );
 };
 
-// ── 3. Pie Subagents Panel ──────────────────────────────────────────────────
+// ── 3. dsh-style Subagents Header Action + Floating Popover ─────────────────
 
-const SubagentsPanelStrip: React.FC<{
+function isLiveSubagent(sub: SessionSubagent): boolean {
+  return sub.status === "running" || sub.status === "queued";
+}
+
+const SubagentsHeaderAction: React.FC<{
   subagents: SessionSubagent[];
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
   onRunCommand: (cmd: string) => void;
-}> = ({ subagents, onRunCommand }) => {
-  const runningCount = subagents.filter(
-    (s) => s.status === "running" || s.status === "queued",
-  ).length;
-  const doneCount = subagents.filter((s) => s.status === "completed").length;
-  const failedCount = subagents.filter(
-    (s) => s.status === "error" || s.status === "stopped" || s.status === "interrupted",
-  ).length;
-  const [open, setOpen] = useState(runningCount > 0);
-  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+}> = ({ subagents, open, onToggle, onClose, onRunCommand }) => {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [settledOpen, setSettledOpen] = useState(false);
+  const [clearedIds, setClearedIds] = useState<Record<string, boolean>>({});
+  const [now, setNow] = useState(() => Date.now());
+
+  const { liveRows, settledRows } = useMemo(() => {
+    const live: SessionSubagent[] = [];
+    const settled: SessionSubagent[] = [];
+    for (const s of subagents) {
+      if (isLiveSubagent(s)) {
+        live.push(s);
+      } else if (!clearedIds[s.id]) {
+        settled.push(s);
+      }
+    }
+    live.sort((a, b) => (a.started_at_ms ?? 0) - (b.started_at_ms ?? 0));
+    settled.sort(
+      (a, b) =>
+        (b.finished_at_ms ?? b.started_at_ms ?? 0) - (a.finished_at_ms ?? a.started_at_ms ?? 0),
+    );
+    return { liveRows: live, settledRows: settled };
+  }, [subagents, clearedIds]);
+
+  useEffect(() => {
+    if (!open || liveRows.length === 0) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [open, liveRows.length]);
+
+  const visibleCount = liveRows.length + settledRows.length;
+  const triggerLabel =
+    liveRows.length > 0
+      ? `子代理 · ${liveRows.length} 运行中`
+      : `子代理 · ${visibleCount > 0 ? visibleCount : subagents.length}`;
+  const showSettled = liveRows.length === 0 || settledOpen;
+
+  const renderRow = (sub: SessionSubagent) => {
+    const isRunning = sub.status === "running";
+    const isQueued = sub.status === "queued";
+    const isDone = sub.status === "completed";
+    const isErr = sub.status === "error" || sub.status === "interrupted";
+    const isExpanded = expandedId === sub.id;
+    const elapsedMs =
+      sub.started_at_ms != null
+        ? Math.max(0, (sub.finished_at_ms ?? now) - sub.started_at_ms)
+        : null;
+    const hasDetail = Boolean(sub.output || sub.error);
+
+    return (
+      <div key={sub.id} className="px-3 py-2 text-[12px]">
+        <div className="flex items-start gap-2">
+          <span
+            className={`mt-1.5 h-2 w-2 shrink-0 ${
+              isRunning
+                ? "bg-working animate-pulse"
+                : isQueued
+                  ? "border border-working bg-transparent"
+                  : isDone
+                    ? "bg-done"
+                    : isErr
+                      ? "bg-danger"
+                      : "bg-ink-faint"
+            }`}
+          />
+          <button
+            type="button"
+            disabled={!hasDetail}
+            onClick={() => setExpandedId((cur) => (cur === sub.id ? null : sub.id))}
+            className={`min-w-0 flex-1 text-left ${hasDetail ? "cursor-pointer" : "cursor-default"}`}
+            title={sub.description}
+          >
+            <div className="flex items-center gap-1.5">
+              <span className="truncate font-medium text-ink-strong">{sub.description}</span>
+            </div>
+            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 font-mono text-[10.5px] text-ink-muted tabular-nums">
+              <span className="border border-line-subtle bg-canvas px-1 text-[10px] text-ink-2">
+                {sub.agent}
+              </span>
+              {sub.active_tool && isRunning && (
+                <span className="border border-working/30 bg-working-soft px-1 text-[10px] text-working">
+                  {sub.active_tool}
+                </span>
+              )}
+              <span>
+                {sub.turns > 0
+                  ? `${sub.turns}${sub.max_turns ? `/${sub.max_turns}` : ""} 轮`
+                  : subStatusLabel(sub.status)}
+              </span>
+              {elapsedMs != null && elapsedMs > 0 && <span>· {formatDurationMs(elapsedMs)}</span>}
+            </div>
+          </button>
+          <div className="flex shrink-0 items-center gap-1 pt-0.5">
+            {(isRunning || isQueued) && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onRunCommand("/agents");
+                }}
+                title="管理子代理 (/agents)"
+                className="inline-flex h-5 items-center gap-1 border border-line bg-canvas px-1.5 font-mono text-[10px] text-ink-muted hover:border-line-strong hover:bg-hover hover:text-ink cursor-pointer"
+              >
+                <Square className="h-2 w-2" />
+                <span>管理</span>
+              </button>
+            )}
+            {hasDetail && (
+              <button
+                type="button"
+                onClick={() => setExpandedId((cur) => (cur === sub.id ? null : sub.id))}
+                className="inline-flex h-5 w-5 items-center justify-center text-ink-muted hover:text-ink-strong cursor-pointer"
+                aria-label="展开子代理详情"
+              >
+                <ChevronDown
+                  className={`h-3 w-3 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                />
+              </button>
+            )}
+          </div>
+        </div>
+        {isExpanded && hasDetail && (
+          <div className="mt-2 border-l-2 border-line-strong bg-canvas px-2.5 py-1.5 font-mono text-[11px] leading-[1.45] text-ink-2 whitespace-pre-wrap break-words select-text max-h-40 overflow-y-auto">
+            {sub.error ? <span className="text-danger">{sub.error}</span> : sub.output}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
-    <div className="border border-line bg-elevated">
+    <div className="relative">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-2 bg-sidebar/60 px-3 py-1 text-left text-[11px] text-ink-2 hover:bg-hover/60 transition-colors cursor-pointer select-none"
+        onClick={onToggle}
+        aria-expanded={open}
+        className={`inline-flex h-6 items-center gap-1.5 border px-2 text-[11.5px] transition-colors cursor-pointer select-none ${
+          open
+            ? "border-line-strong bg-elevated text-ink-strong"
+            : liveRows.length > 0
+              ? "border-working/40 bg-working-soft/60 text-ink-strong hover:bg-working-soft"
+              : "border-line bg-elevated text-ink-2 hover:border-line-strong hover:bg-hover hover:text-ink-strong"
+        }`}
       >
-        <div className="flex items-center gap-1.5">
-          {open ? (
-            <ChevronDown className="h-3 w-3 text-ink-muted" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-ink-muted" />
-          )}
-          <Bot className={`h-3.5 w-3.5 ${runningCount > 0 ? "text-working" : "text-ink-2"}`} />
-          <span className="font-medium text-ink">子代理</span>
-          <span className="font-mono text-[10.5px] text-ink-muted">({subagents.length})</span>
-        </div>
-        <div className="flex items-center gap-2 font-mono text-[10.5px] text-ink-muted tabular-nums">
-          {runningCount > 0 && <span className="text-working">运行中 {runningCount}</span>}
-          {runningCount > 0 && (doneCount > 0 || failedCount > 0) && <span>·</span>}
-          {doneCount > 0 && <span className="text-done">已完成 {doneCount}</span>}
-          {doneCount > 0 && failedCount > 0 && <span>·</span>}
-          {failedCount > 0 && <span className="text-danger">已终止 {failedCount}</span>}
-        </div>
+        <span className="relative inline-flex items-center">
+          <Bot className={`h-3.5 w-3.5 ${liveRows.length > 0 ? "text-working" : "text-ink-muted"}`} />
+        </span>
+        {liveRows.length > 0 && <span className="h-1.5 w-1.5 bg-working animate-pulse" />}
+        <span className="font-mono text-[11px] tabular-nums">{triggerLabel}</span>
+        <ChevronDown
+          className={`h-3 w-3 text-ink-muted transition-transform ${open ? "rotate-180" : ""}`}
+        />
       </button>
 
       {open && (
-        <div className="max-h-44 overflow-y-auto divide-y divide-line-subtle border-t border-line-subtle">
-          {subagents.map((sub) => {
-            const isRunning = sub.status === "running";
-            const isQueued = sub.status === "queued";
-            const isDone = sub.status === "completed";
-            const isErr = sub.status === "error" || sub.status === "interrupted";
-            const isExpanded = !!expandedIds[sub.id];
-            const elapsedMs =
-              sub.started_at_ms != null
-                ? Math.max(0, (sub.finished_at_ms ?? Date.now()) - sub.started_at_ms)
-                : null;
-            const hasDetail = Boolean(sub.output || sub.error);
+        <div className="mux-popover-shadow absolute top-full right-0 z-40 mt-1.5 flex w-[460px] max-w-[calc(100vw-3rem)] max-h-[60vh] flex-col border border-line-strong bg-elevated">
+          <div className="flex items-center justify-between gap-2 border-b border-line-subtle bg-sidebar px-3 py-1.5 select-none">
+            <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-ink-strong">
+              <Bot className="h-3.5 w-3.5 text-ink-2" />
+              <span>子代理</span>
+              <span className="font-mono text-[10.5px] text-ink-muted">({subagents.length})</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onRunCommand("/agents");
+              }}
+              className="border border-line bg-canvas px-1.5 py-[1px] font-mono text-[10px] text-ink-2 hover:border-line-strong hover:bg-hover hover:text-ink-strong cursor-pointer"
+            >
+              /agents
+            </button>
+          </div>
 
-            return (
-              <div key={sub.id} className="px-3 py-1.5 text-[12px]">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`h-2 w-2 shrink-0 ${
-                      isRunning
-                        ? "bg-working animate-pulse"
-                        : isQueued
-                          ? "border border-working bg-transparent"
-                          : isDone
-                            ? "bg-done"
-                            : isErr
-                              ? "bg-danger"
-                              : "bg-ink-faint"
-                    }`}
-                  />
-                  <span className="shrink-0 border border-line-subtle bg-canvas px-1 font-mono text-[10px] text-ink-2">
-                    {sub.agent}
-                  </span>
+          <div className="min-h-0 flex-1 overflow-y-auto divide-y divide-line-subtle">
+            {liveRows.length > 0 && (
+              <div>
+                <div className="bg-sidebar/45 px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-ink-muted select-none">
+                  进行中 ({liveRows.length})
+                </div>
+                <div className="divide-y divide-line-subtle">{liveRows.map(renderRow)}</div>
+              </div>
+            )}
+
+            {settledRows.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between gap-2 bg-sidebar/45 px-3 py-1 select-none">
                   <button
                     type="button"
-                    disabled={!hasDetail}
-                    onClick={() =>
-                      setExpandedIds((prev) => ({ ...prev, [sub.id]: !prev[sub.id] }))
-                    }
-                    className={`min-w-0 flex-1 truncate text-left text-ink ${
-                      hasDetail ? "hover:text-ink-strong cursor-pointer" : "cursor-default"
-                    }`}
-                    title={sub.description}
+                    onClick={() => setSettledOpen((v) => !v)}
+                    className="inline-flex items-center gap-1 font-mono text-[10px] text-ink-muted hover:text-ink-strong cursor-pointer"
                   >
-                    {sub.description}
+                    <ChevronDown
+                      className={`h-3 w-3 transition-transform ${showSettled ? "" : "-rotate-90"}`}
+                    />
+                    <span>已结束 ({settledRows.length})</span>
                   </button>
-                  {sub.active_tool && isRunning && (
-                    <span className="shrink-0 border border-working/30 bg-working-soft px-1 font-mono text-[10px] text-working">
-                      {sub.active_tool}
-                    </span>
-                  )}
-                  <span className="shrink-0 font-mono text-[10.5px] text-ink-muted tabular-nums">
-                    {sub.turns > 0
-                      ? `${sub.turns}${sub.max_turns ? `/${sub.max_turns}` : ""} 轮`
-                      : subStatusLabel(sub.status)}
-                    {elapsedMs != null && elapsedMs > 0 ? ` · ${formatDurationMs(elapsedMs)}` : ""}
-                  </span>
-                  {(isRunning || isQueued) && (
-                    <button
-                      type="button"
-                      onClick={() => onRunCommand(`/agents`)}
-                      title="管理子代理 (/agents)"
-                      className="inline-flex h-5 items-center gap-1 border border-line bg-canvas px-1.5 font-mono text-[10px] text-ink-muted hover:border-line-strong hover:bg-hover hover:text-ink cursor-pointer"
-                    >
-                      <Square className="h-2 w-2" />
-                      <span>管理</span>
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClearedIds((prev) => {
+                        const next = { ...prev };
+                        for (const s of settledRows) next[s.id] = true;
+                        return next;
+                      });
+                    }}
+                    className="font-mono text-[10px] text-ink-muted hover:text-ink-strong cursor-pointer"
+                  >
+                    隐藏已结束
+                  </button>
                 </div>
-                {isExpanded && hasDetail && (
-                  <div className="mt-1.5 border-l-2 border-line-strong bg-canvas px-2.5 py-1.5 font-mono text-[11px] leading-[1.45] text-ink-2 whitespace-pre-wrap break-words select-text max-h-32 overflow-y-auto">
-                    {sub.error ? (
-                      <span className="text-danger">{sub.error}</span>
-                    ) : (
-                      sub.output
-                    )}
-                  </div>
+                {showSettled && (
+                  <div className="divide-y divide-line-subtle">{settledRows.map(renderRow)}</div>
                 )}
               </div>
-            );
-          })}
+            )}
+
+            {liveRows.length === 0 && settledRows.length === 0 && (
+              <div className="flex items-center justify-between px-3 py-3 text-[11.5px] text-ink-muted">
+                <span>已隐藏历史记录</span>
+                <button
+                  type="button"
+                  onClick={() => setClearedIds({})}
+                  className="border border-line bg-canvas px-2 py-0.5 font-mono text-[10.5px] text-ink-2 hover:bg-hover hover:text-ink-strong cursor-pointer"
+                >
+                  恢复显示
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
   );
 };
 
-// ── 4. Pie Background Shell Jobs (bg) Panel ─────────────────────────────────
+// ── 4. dsh-style Background Jobs (bg) Header Action + Floating Popover ──────
 
-const BackgroundJobsPanelStrip: React.FC<{
+const BackgroundJobsHeaderAction: React.FC<{
   jobs: BackgroundJob[];
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
   onRunCommand: (cmd: string) => void;
-}> = ({ jobs, onRunCommand }) => {
-  const runningCount = jobs.filter((j) => j.status === "running").length;
-  const doneCount = jobs.filter((j) => j.status === "completed").length;
-  const failedCount = jobs.filter((j) => j.status === "failed" || j.status === "killed").length;
-  const [open, setOpen] = useState(runningCount > 0 || jobs.length <= 4);
-  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+}> = ({ jobs, open, onToggle, onClose, onRunCommand }) => {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [settledOpen, setSettledOpen] = useState(false);
+  const [clearedIds, setClearedIds] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  const { liveRows, settledRows } = useMemo(() => {
+    const live: BackgroundJob[] = [];
+    const settled: BackgroundJob[] = [];
+    for (const j of jobs) {
+      if (j.status === "running") {
+        live.push(j);
+      } else if (!clearedIds[j.id]) {
+        settled.push(j);
+      }
+    }
+    live.sort((a, b) => (a.started_at_ms ?? 0) - (b.started_at_ms ?? 0));
+    settled.sort(
+      (a, b) =>
+        (b.finished_at_ms ?? b.started_at_ms ?? 0) - (a.finished_at_ms ?? a.started_at_ms ?? 0),
+    );
+    return { liveRows: live, settledRows: settled };
+  }, [jobs, clearedIds]);
+
+  useEffect(() => {
+    if (!open || liveRows.length === 0) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [open, liveRows.length]);
 
   const copyPath = (job: BackgroundJob) => {
     if (!job.output_path) return;
@@ -369,133 +582,205 @@ const BackgroundJobsPanelStrip: React.FC<{
     window.setTimeout(() => setCopiedId((cur) => (cur === job.id ? null : cur)), 1500);
   };
 
-  return (
-    <div className="border border-line bg-elevated">
-      <div className="flex items-center justify-between gap-2 bg-sidebar/60 px-3 py-1 select-none">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[11px] text-ink-2 hover:text-ink transition-colors cursor-pointer"
-        >
-          {open ? (
-            <ChevronDown className="h-3 w-3 text-ink-muted" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-ink-muted" />
-          )}
-          <Terminal className={`h-3.5 w-3.5 ${runningCount > 0 ? "text-working" : "text-ink-2"}`} />
-          <span className="font-medium text-ink">后台任务 (bg)</span>
-          <span className="font-mono text-[10.5px] text-ink-muted">({jobs.length})</span>
-        </button>
+  const visibleCount = liveRows.length + settledRows.length;
+  const triggerLabel =
+    liveRows.length > 0
+      ? `后台任务 · ${liveRows.length} 运行中`
+      : `后台任务 · ${visibleCount > 0 ? visibleCount : jobs.length}`;
+  const showSettled = liveRows.length === 0 || settledOpen;
 
-        <div className="flex shrink-0 items-center gap-2 font-mono text-[10.5px] text-ink-muted tabular-nums">
-          {runningCount > 0 && <span className="text-working">运行中 {runningCount}</span>}
-          {runningCount > 0 && (doneCount > 0 || failedCount > 0) && <span>·</span>}
-          {doneCount > 0 && <span className="text-done">已完成 {doneCount}</span>}
-          {doneCount > 0 && failedCount > 0 && <span>·</span>}
-          {failedCount > 0 && <span className="text-danger">失败/终止 {failedCount}</span>}
+  const renderRow = (job: BackgroundJob) => {
+    const isRunning = job.status === "running";
+    const isDone = job.status === "completed";
+    const isErr = job.status === "failed" || job.status === "killed";
+    const isExpanded = expandedId === job.id;
+    const elapsedMs =
+      job.started_at_ms != null
+        ? Math.max(0, (job.finished_at_ms ?? now) - job.started_at_ms)
+        : null;
+    const sizeLabel = formatBytes(job.bytes_written);
+    const labelText =
+      job.description !== job.name ? job.description : job.command || job.description;
+
+    return (
+      <div key={job.id} className="px-3 py-2 text-[12px]">
+        <div className="flex items-start gap-2">
+          <span
+            className={`mt-1.5 h-2 w-2 shrink-0 ${
+              isRunning
+                ? "bg-working animate-pulse"
+                : isDone
+                  ? "bg-done"
+                  : isErr
+                    ? "bg-danger"
+                    : "bg-ink-faint"
+            }`}
+          />
           <button
             type="button"
-            onClick={() => onRunCommand("/jobs")}
-            title="在会话中查看所有后台任务 (/jobs)"
-            className="ml-1 border border-line bg-canvas px-1.5 py-[1px] text-[10px] text-ink-2 hover:border-line-strong hover:bg-hover hover:text-ink cursor-pointer"
+            onClick={() => setExpandedId((cur) => (cur === job.id ? null : job.id))}
+            className="min-w-0 flex-1 text-left cursor-pointer"
+            title={job.command || job.description}
           >
-            /jobs
+            <div className="truncate font-medium text-ink-strong">{labelText}</div>
+            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 font-mono text-[10.5px] text-ink-muted tabular-nums">
+              <span className="border border-line-subtle bg-canvas px-1 text-[10px] text-ink-2">
+                {job.name}
+              </span>
+              {job.exit_code != null && (
+                <span className={job.exit_code === 0 ? "text-done" : "text-danger"}>
+                  exit {job.exit_code}
+                </span>
+              )}
+              {isRunning && <span className="text-working">运行中</span>}
+              {sizeLabel && <span>{sizeLabel}</span>}
+              {elapsedMs != null && elapsedMs > 0 && <span>· {formatDurationMs(elapsedMs)}</span>}
+            </div>
           </button>
+          <div className="flex shrink-0 items-center gap-1 pt-0.5">
+            {job.output_path && (
+              <button
+                type="button"
+                onClick={() => copyPath(job)}
+                title={`复制日志路径: ${job.output_path}`}
+                className="inline-flex h-5 w-5 items-center justify-center border border-line-subtle bg-canvas text-ink-muted hover:border-line-strong hover:bg-hover hover:text-ink cursor-pointer"
+              >
+                {copiedId === job.id ? (
+                  <Check className="h-2.5 w-2.5 text-done" />
+                ) : (
+                  <Copy className="h-2.5 w-2.5" />
+                )}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setExpandedId((cur) => (cur === job.id ? null : job.id))}
+              className="inline-flex h-5 w-5 items-center justify-center text-ink-muted hover:text-ink-strong cursor-pointer"
+              aria-label="展开后台任务详情"
+            >
+              <ChevronDown
+                className={`h-3 w-3 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+              />
+            </button>
+          </div>
         </div>
+
+        {isExpanded && (
+          <div className="mt-2 space-y-1 border-l-2 border-line-strong bg-canvas px-2.5 py-1.5 font-mono text-[11px] text-ink-2 select-text">
+            {job.command && (
+              <div className="break-all">
+                <span className="text-ink-faint">$ </span>
+                <span className="text-ink">{job.command}</span>
+              </div>
+            )}
+            {job.output_path && (
+              <div className="break-all text-[10.5px] text-ink-muted">log: {job.output_path}</div>
+            )}
+            {job.error && <div className="whitespace-pre-wrap text-danger">{job.error}</div>}
+          </div>
+        )}
       </div>
+    );
+  };
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className={`inline-flex h-6 items-center gap-1.5 border px-2 text-[11.5px] transition-colors cursor-pointer select-none ${
+          open
+            ? "border-line-strong bg-elevated text-ink-strong"
+            : liveRows.length > 0
+              ? "border-working/40 bg-working-soft/60 text-ink-strong hover:bg-working-soft"
+              : "border-line bg-elevated text-ink-2 hover:border-line-strong hover:bg-hover hover:text-ink-strong"
+        }`}
+      >
+        <Layers className={`h-3.5 w-3.5 ${liveRows.length > 0 ? "text-working" : "text-ink-muted"}`} />
+        {liveRows.length > 0 && <span className="h-1.5 w-1.5 bg-working animate-pulse" />}
+        <span className="font-mono text-[11px] tabular-nums">{triggerLabel}</span>
+        <ChevronDown
+          className={`h-3 w-3 text-ink-muted transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
 
       {open && (
-        <div className="max-h-44 overflow-y-auto divide-y divide-line-subtle border-t border-line-subtle">
-          {jobs.map((job) => {
-            const isRunning = job.status === "running";
-            const isDone = job.status === "completed";
-            const isErr = job.status === "failed" || job.status === "killed";
-            const isExpanded = !!expandedIds[job.id];
-            const elapsedMs =
-              job.started_at_ms != null
-                ? Math.max(0, (job.finished_at_ms ?? Date.now()) - job.started_at_ms)
-                : null;
-            const sizeLabel = formatBytes(job.bytes_written);
+        <div className="mux-popover-shadow absolute top-full right-0 z-40 mt-1.5 flex w-[480px] max-w-[calc(100vw-3rem)] max-h-[60vh] flex-col border border-line-strong bg-elevated">
+          <div className="flex items-center justify-between gap-2 border-b border-line-subtle bg-sidebar px-3 py-1.5 select-none">
+            <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-ink-strong">
+              <Layers className="h-3.5 w-3.5 text-ink-2" />
+              <span>后台任务 (bg)</span>
+              <span className="font-mono text-[10.5px] text-ink-muted">({jobs.length})</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onRunCommand("/jobs");
+              }}
+              className="border border-line bg-canvas px-1.5 py-[1px] font-mono text-[10px] text-ink-2 hover:border-line-strong hover:bg-hover hover:text-ink-strong cursor-pointer"
+            >
+              /jobs
+            </button>
+          </div>
 
-            return (
-              <div key={job.id} className="px-3 py-1.5 text-[12px]">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`h-2 w-2 shrink-0 ${
-                      isRunning
-                        ? "bg-working animate-pulse"
-                        : isDone
-                          ? "bg-done"
-                          : isErr
-                            ? "bg-danger"
-                            : "bg-ink-faint"
-                    }`}
-                  />
-                  <span className="shrink-0 border border-line-subtle bg-canvas px-1 font-mono text-[10px] text-ink-2">
-                    {job.name}
-                  </span>
+          <div className="min-h-0 flex-1 overflow-y-auto divide-y divide-line-subtle">
+            {liveRows.length > 0 && (
+              <div>
+                <div className="bg-sidebar/45 px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-ink-muted select-none">
+                  进行中 ({liveRows.length})
+                </div>
+                <div className="divide-y divide-line-subtle">{liveRows.map(renderRow)}</div>
+              </div>
+            )}
+
+            {settledRows.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between gap-2 bg-sidebar/45 px-3 py-1 select-none">
                   <button
                     type="button"
-                    onClick={() =>
-                      setExpandedIds((prev) => ({ ...prev, [job.id]: !prev[job.id] }))
-                    }
-                    className="min-w-0 flex-1 truncate text-left text-ink hover:text-ink-strong cursor-pointer"
-                    title={job.command || job.description}
+                    onClick={() => setSettledOpen((v) => !v)}
+                    className="inline-flex items-center gap-1 font-mono text-[10px] text-ink-muted hover:text-ink-strong cursor-pointer"
                   >
-                    {job.description !== job.name
-                      ? job.description
-                      : job.command || job.description}
+                    <ChevronDown
+                      className={`h-3 w-3 transition-transform ${showSettled ? "" : "-rotate-90"}`}
+                    />
+                    <span>已结束 ({settledRows.length})</span>
                   </button>
-
-                  <div className="flex shrink-0 items-center gap-2 font-mono text-[10.5px] text-ink-muted tabular-nums">
-                    {job.exit_code != null && (
-                      <span className={job.exit_code === 0 ? "text-done" : "text-danger"}>
-                        exit {job.exit_code}
-                      </span>
-                    )}
-                    {isRunning && <span className="text-working">运行中</span>}
-                    {sizeLabel && <span>{sizeLabel}</span>}
-                    {elapsedMs != null && elapsedMs > 0 && (
-                      <span>{formatDurationMs(elapsedMs)}</span>
-                    )}
-                    {job.output_path && (
-                      <button
-                        type="button"
-                        onClick={() => copyPath(job)}
-                        title={`复制日志路径: ${job.output_path}`}
-                        className="inline-flex h-5 w-5 items-center justify-center border border-line-subtle bg-canvas text-ink-muted hover:border-line-strong hover:bg-hover hover:text-ink cursor-pointer"
-                      >
-                        {copiedId === job.id ? (
-                          <Check className="h-2.5 w-2.5 text-done" />
-                        ) : (
-                          <Copy className="h-2.5 w-2.5" />
-                        )}
-                      </button>
-                    )}
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClearedIds((prev) => {
+                        const next = { ...prev };
+                        for (const j of settledRows) next[j.id] = true;
+                        return next;
+                      });
+                    }}
+                    className="font-mono text-[10px] text-ink-muted hover:text-ink-strong cursor-pointer"
+                  >
+                    隐藏已结束
+                  </button>
                 </div>
-
-                {isExpanded && (
-                  <div className="mt-1.5 space-y-1 border-l-2 border-line-strong bg-canvas px-2.5 py-1.5 font-mono text-[11px] text-ink-2 select-text">
-                    {job.command && (
-                      <div className="truncate">
-                        <span className="text-ink-faint">$ </span>
-                        <span className="text-ink">{job.command}</span>
-                      </div>
-                    )}
-                    {job.output_path && (
-                      <div className="truncate text-[10.5px] text-ink-muted">
-                        log: {job.output_path}
-                      </div>
-                    )}
-                    {job.error && (
-                      <div className="whitespace-pre-wrap text-danger">{job.error}</div>
-                    )}
-                  </div>
+                {showSettled && (
+                  <div className="divide-y divide-line-subtle">{settledRows.map(renderRow)}</div>
                 )}
               </div>
-            );
-          })}
+            )}
+
+            {liveRows.length === 0 && settledRows.length === 0 && (
+              <div className="flex items-center justify-between px-3 py-3 text-[11.5px] text-ink-muted">
+                <span>已隐藏历史任务</span>
+                <button
+                  type="button"
+                  onClick={() => setClearedIds({})}
+                  className="border border-line bg-canvas px-2 py-0.5 font-mono text-[10.5px] text-ink-2 hover:bg-hover hover:text-ink-strong cursor-pointer"
+                >
+                  恢复显示
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

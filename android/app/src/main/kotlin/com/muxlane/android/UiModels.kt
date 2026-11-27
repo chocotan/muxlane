@@ -129,6 +129,9 @@ internal fun pruneStaleTabs(openTabs: List<String>, agents: List<AgentInstance>)
     return openTabs.filter { it in validIds }
 }
 
+internal fun isChatOnlySession(agent: AgentInstance?): Boolean =
+    agent != null && agent.tmuxSession.isNullOrBlank()
+
 internal fun buildSessionTabSummaries(
     openTabs: List<String>,
     snapshot: Snapshot?,
@@ -140,6 +143,7 @@ internal fun buildSessionTabSummaries(
     return openTabs.mapNotNull { id ->
         val agent = agentsById[id] ?: return@mapNotNull null
         val summary = chatSessions[id]
+        val chatOnly = isChatOnlySession(agent)
         val approvalsForAgent = maxOf(
             summary?.pendingApprovals ?: 0,
             globalApprovals.count { it.agent == id },
@@ -160,8 +164,12 @@ internal fun buildSessionTabSummaries(
             projectName = project?.displayName() ?: agent.project,
             agentType = agent.agentType,
             status = agent.status,
-            isChatCapable = summary != null,
-            driverMode = summary?.meta?.driver ?: SessionDriverMode.TERMINAL_PTY,
+            isChatCapable = chatOnly,
+            driverMode = if (chatOnly) {
+                summary?.meta?.driver ?: SessionDriverMode.PI_RPC
+            } else {
+                SessionDriverMode.TERMINAL_PTY
+            },
             pendingApprovalsCount = approvalsForAgent,
             isStreaming = isStreaming,
             statusSince = agent.statusSince,
@@ -184,6 +192,7 @@ internal fun buildAgentListProjection(
     val allRows = snapshot?.agents.orEmpty().map { agent ->
         val project = projectsById[agent.project]
         val chat = chatSessions[agent.id]
+        val chatOnly = isChatOnlySession(agent)
         val approvalsCount = maxOf(
             chat?.pendingApprovals ?: 0,
             globalApprovals.count { it.agent == agent.id },
@@ -193,8 +202,11 @@ internal fun buildAgentListProjection(
             agent = agent,
             projectName = project?.displayName() ?: agent.project,
             projectBranch = project?.branch,
-            isChatCapable = chat != null,
-            driverLabel = driverBadgeLabel(agent.agentType, chat?.meta?.driver),
+            isChatCapable = chatOnly,
+            driverLabel = driverBadgeLabel(
+                agent.agentType,
+                if (chatOnly) chat?.meta?.driver ?: SessionDriverMode.PI_RPC else SessionDriverMode.TERMINAL_PTY,
+            ),
             pendingApprovalsCount = approvalsCount,
             isStreaming = chat?.meta?.isStreaming == true,
             needsYou = needsYou,
@@ -334,7 +346,8 @@ private fun presetPriority(type: AgentType): Int = when (type) {
 
 internal fun driverBadgeLabel(agentType: AgentType, driver: SessionDriverMode?): String {
     val base = when (agentType) {
-        AgentType.PI, AgentType.PIE -> "Pi"
+        AgentType.PI -> "Pi"
+        AgentType.PIE -> "Pie"
         AgentType.OPENCODE -> "OpenCode"
         AgentType.QWEN -> "Qwen"
         AgentType.KIMI -> "Kimi"
@@ -346,7 +359,7 @@ internal fun driverBadgeLabel(agentType: AgentType, driver: SessionDriverMode?):
         AgentType.UNKNOWN -> "Agent"
     }
     return when (driver) {
-        SessionDriverMode.PI_RPC -> "$base · RPC"
+        SessionDriverMode.PI_RPC -> "$base · 对话"
         SessionDriverMode.ACP -> "$base · ACP"
         SessionDriverMode.TERMINAL_PTY, null -> "$base · CLI"
     }
@@ -384,7 +397,7 @@ internal fun statusPriority(status: AgentStatus): Int = when (status) {
 }
 
 internal fun statusColor(status: AgentStatus): Color = when (status) {
-    AgentStatus.WORKING -> MuxAccent
+    AgentStatus.WORKING -> MuxCobalt
     AgentStatus.BLOCKED -> MuxYellow
     AgentStatus.DONE -> MuxGreen
     AgentStatus.FAILED -> MuxRed

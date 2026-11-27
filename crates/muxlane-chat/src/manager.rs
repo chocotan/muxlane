@@ -271,6 +271,9 @@ impl ChatManager {
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
         let handle = match spec.driver_kind {
             ChatDriverKind::PiRpc => pi_rpc::spawn(spec.clone(), initial_meta.clone(), ev_tx),
+            ChatDriverKind::Acp if spec.agent_type == AgentType::Agy => {
+                crate::agy_stream::spawn(spec.clone(), initial_meta.clone(), ev_tx)
+            }
             ChatDriverKind::Acp => acp::spawn(spec.clone(), initial_meta.clone(), ev_tx),
         };
         if let Some(prompt) = initial_prompt.filter(|p| !p.trim().is_empty()) {
@@ -1395,6 +1398,9 @@ impl ChatManager {
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
         let handle = match launch_spec.driver_kind {
             ChatDriverKind::PiRpc => pi_rpc::spawn(launch_spec, meta, ev_tx),
+            ChatDriverKind::Acp if launch_spec.agent_type == AgentType::Agy => {
+                crate::agy_stream::spawn(launch_spec, meta, ev_tx)
+            }
             ChatDriverKind::Acp => acp::spawn(launch_spec, meta, ev_tx),
         };
         {
@@ -1772,7 +1778,7 @@ const WIRE_TOOL_INPUT_MAX_BYTES: usize = 8 * 1024;
 const WIRE_DIFF_SIDE_MAX_BYTES: usize = 24 * 1024;
 const WIRE_THINKING_MAX_BYTES: usize = 24 * 1024;
 const WIRE_TEXT_MAX_BYTES: usize = 96 * 1024;
-const WIRE_ATTACHMENT_B64_MAX_BYTES: usize = 64 * 1024;
+const WIRE_ATTACHMENT_B64_MAX_BYTES: usize = 260 * 1024;
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
@@ -1787,6 +1793,51 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     out
 }
 
+/// Keeps small image attachments lossless and downscales oversized photos into a crisp JPEG
+/// preview so every photo displays over 1 MiB RPC frames (local, remote SSH, and mobile Relay)
+/// without ever being stripped to `None`.
+fn compact_attachment_for_wire(mut att: ChatAttachment) -> ChatAttachment {
+    let Some(raw_b64) = att.data_b64.as_deref() else {
+        return att;
+    };
+    if raw_b64.len() <= WIRE_ATTACHMENT_B64_MAX_BYTES {
+        return att;
+    }
+    if !att.mime_type.starts_with("image/") {
+        att.data_b64 = None;
+        return att;
+    }
+    use base64::Engine as _;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(raw_b64.trim()) else {
+        att.data_b64 = None;
+        return att;
+    };
+    let Ok(img) = image::load_from_memory(&bytes) else {
+        att.data_b64 = None;
+        return att;
+    };
+    for (max_dim, quality) in [(1280u32, 82u8), (900, 74), (640, 65)] {
+        let resized = if img.width() > max_dim || img.height() > max_dim {
+            img.resize(max_dim, max_dim, image::imageops::FilterType::Triangle)
+        } else {
+            img.clone()
+        };
+        let mut jpeg_bytes = Vec::new();
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality);
+        if encoder.encode_image(&resized.to_rgb8()).is_ok() {
+            let encoded_b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+            if encoded_b64.len() <= WIRE_ATTACHMENT_B64_MAX_BYTES {
+                att.mime_type = "image/jpeg".to_string();
+                att.data_b64 = Some(encoded_b64);
+                return att;
+            }
+        }
+    }
+    att.data_b64 = None;
+    att
+}
+
 fn compact_entry_for_wire(entry: TimelineEntry) -> TimelineEntry {
     match entry {
         TimelineEntry::UserMessage {
@@ -1798,16 +1849,7 @@ fn compact_entry_for_wire(entry: TimelineEntry) -> TimelineEntry {
         } => {
             let attachments = attachments
                 .into_iter()
-                .map(|mut att| {
-                    if att
-                        .data_b64
-                        .as_ref()
-                        .is_some_and(|b| b.len() > WIRE_ATTACHMENT_B64_MAX_BYTES)
-                    {
-                        att.data_b64 = None;
-                    }
-                    att
-                })
+                .map(compact_attachment_for_wire)
                 .collect();
             TimelineEntry::UserMessage {
                 id,
@@ -1858,6 +1900,7 @@ fn compact_entry_for_wire(entry: TimelineEntry) -> TimelineEntry {
             title,
             input,
             output,
+            attachments,
             diff,
             exit_code,
             locations,
@@ -1873,6 +1916,10 @@ fn compact_entry_for_wire(entry: TimelineEntry) -> TimelineEntry {
                 _ => input,
             };
             let compact_output = output.map(|o| truncate_utf8(&o, WIRE_TOOL_OUTPUT_MAX_BYTES));
+            let compact_attachments = attachments
+                .into_iter()
+                .map(compact_attachment_for_wire)
+                .collect();
             let compact_diff = diff.map(|mut d| {
                 d.old_text = truncate_utf8(&d.old_text, WIRE_DIFF_SIDE_MAX_BYTES);
                 d.new_text = truncate_utf8(&d.new_text, WIRE_DIFF_SIDE_MAX_BYTES);
@@ -1887,6 +1934,7 @@ fn compact_entry_for_wire(entry: TimelineEntry) -> TimelineEntry {
                 title,
                 input: compact_input,
                 output: compact_output,
+                attachments: compact_attachments,
                 diff: compact_diff,
                 exit_code,
                 locations,
@@ -2473,5 +2521,42 @@ process.stdin.on("data", (chunk) => {
                 .meta
                 .supports_chat_input
         );
+    }
+
+    #[test]
+    fn compact_attachment_for_wire_resizes_large_image_instead_of_dropping() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        use image::{ImageBuffer, Rgb};
+        use std::io::Cursor;
+
+        // Generate a noisy 1024x1024 PNG whose base64 exceeds WIRE_ATTACHMENT_B64_MAX_BYTES.
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(1024, 1024, |x, y| {
+            let v = ((x.wrapping_mul(73) ^ y.wrapping_mul(151)) & 0xff) as u8;
+            Rgb([v, v.wrapping_mul(3), v.wrapping_add(91)])
+        });
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .unwrap();
+        let raw_b64 = BASE64.encode(&png_bytes);
+        assert!(
+            raw_b64.len() > WIRE_ATTACHMENT_B64_MAX_BYTES,
+            "test fixture should exceed wire budget (got {})",
+            raw_b64.len()
+        );
+
+        let compacted = compact_attachment_for_wire(ChatAttachment {
+            name: "photo.png".to_string(),
+            path: None,
+            mime_type: "image/png".to_string(),
+            data_b64: Some(raw_b64),
+        });
+        let out_b64 = compacted
+            .data_b64
+            .expect("oversized image should be compressed, not dropped");
+        assert!(out_b64.len() <= WIRE_ATTACHMENT_B64_MAX_BYTES);
+        assert_eq!(compacted.mime_type, "image/jpeg");
+        let decoded = BASE64.decode(out_b64.as_bytes()).unwrap();
+        assert!(image::load_from_memory(&decoded).is_ok());
     }
 }

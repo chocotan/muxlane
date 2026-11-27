@@ -131,7 +131,7 @@ internal fun TerminalPane(
         softwareKeyboard?.show()
     }
 
-    Column(modifier.fillMaxSize().background(MuxCanvas)) {
+    Column(modifier.fillMaxSize().background(TerminalSurface)) {
         Box(
             Modifier
                 .weight(1f)
@@ -320,7 +320,7 @@ private fun TerminalCanvas(
     )
     Canvas(
         modifier
-            .background(MuxCanvas)
+            .background(TerminalSurface)
             .pointerInput(Unit) {
                 detectTransformGestures { _, _, zoom, _ ->
                     if (kotlin.math.abs(zoom - 1f) > 0.02f) {
@@ -361,7 +361,7 @@ private fun TerminalCanvas(
                 val cell = line[column]
                 val fg = Color(if (cell.inverse) cell.bg else cell.fg)
                 val bg = Color(if (cell.inverse) cell.fg else cell.bg)
-                if (bg != MuxCanvas) drawRect(bg, Offset(column * cellW, drawRow * cellH), Size(cellW + 0.5f, cellH + 0.5f))
+                if (bg != TerminalSurface) drawRect(bg, Offset(column * cellW, drawRow * cellH), Size(cellW + 0.5f, cellH + 0.5f))
                 if (cell.ch != " ") drawIntoCanvas { canvas ->
                     paint.color = fg.toArgb()
                     val codePoint = cell.ch.codePointAt(0)
@@ -406,7 +406,7 @@ private fun TerminalCommandDock(
     val haptic = LocalHapticFeedback.current
     val softwareKeyboard = LocalSoftwareKeyboardController.current
 
-    Surface(color = TerminalSurface, contentColor = TerminalForeground) {
+    Surface(color = MuxBg2, contentColor = TerminalForeground) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -628,17 +628,17 @@ private fun RowScope.TacticalKeycap(
 ) {
     val bg = when {
         active -> TerminalAccent
-        isDanger -> Color(0xFFFDE8E8)
+        isDanger -> MuxErrorBg
         else -> TerminalKeycap
     }
     val border = when {
         active -> TerminalAccent
-        isDanger -> MuxRed
+        isDanger -> MuxErrorLine
         else -> TerminalBorder
     }
     val fg = when {
         active -> MuxOnAccent
-        isDanger -> MuxRed
+        isDanger -> MuxErrorFg
         !enabled -> TerminalMuted
         else -> TerminalForeground
     }

@@ -140,6 +140,7 @@ sealed class TimelineEntry {
         val title: String? = null,
         val input: JsonElement = JsonObject(emptyMap()),
         val output: String? = null,
+        val attachments: List<ChatAttachment> = emptyList(),
         val diff: ToolDiff? = null,
         @SerialName("exit_code") val exitCode: Int? = null,
         val locations: List<String> = emptyList(),

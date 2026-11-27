@@ -121,7 +121,15 @@ class MobileArchitectureTest {
             needsYouOnly = false,
         )
         assertEquals(1, driverProj.totalCount)
-        assertEquals("Pi · RPC", driverProj.sections.first().title)
+        assertEquals("Pi · 对话", driverProj.sections.first().title)
+    }
+
+    @Test
+    fun isChatOnlySessionMatchesDesktopTmuxRule() {
+        val chatAgent = AgentInstance(id = "a1", project = "p1", agentType = AgentType.PIE, title = "Pie", tmuxSession = null)
+        val ptyAgent = AgentInstance(id = "a2", project = "p1", agentType = AgentType.PIE, title = "Pie CLI", tmuxSession = "muxlane-a2")
+        assertTrue(isChatOnlySession(chatAgent))
+        assertTrue(!isChatOnlySession(ptyAgent))
     }
 
     @Test

@@ -1,7 +1,7 @@
 //! Pi / Pie 磁盘 JSONL Session 实时解析（用于 PTY/tmux 会话向 Chat 视图实时增量同步与续接）。
 use muxlane_core::chat::{
-    ChatModelInfo, ChatSessionMeta, MessageUsage, NoticeLevel, SessionDriverMode, TimelineEntry,
-    ToolCallKind, ToolCallState, ToolDiff,
+    ChatAttachment, ChatModelInfo, ChatSessionMeta, MessageUsage, NoticeLevel, SessionDriverMode,
+    TimelineEntry, ToolCallKind, ToolCallState, ToolDiff,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -399,15 +399,16 @@ impl PiTranscriptParserState {
                 match role {
                     "user" => {
                         let text = extract_message_text(message);
-                        if !text.is_empty() {
-                            if self.derived_title.is_none() {
+                        let attachments = extract_message_attachments(message);
+                        if !text.is_empty() || !attachments.is_empty() {
+                            if self.derived_title.is_none() && !text.is_empty() {
                                 self.derived_title = derive_title_from_prompt(&text);
                             }
                             out.push(TimelineEntry::UserMessage {
                                 id: format!("pi-user-{entry_id}"),
                                 turn_id: None,
                                 text,
-                                attachments: Vec::new(),
+                                attachments,
                                 created_at_ms: ts,
                             });
                         }
@@ -517,6 +518,7 @@ impl PiTranscriptParserState {
                                             title: None,
                                             input,
                                             output: None,
+                                            attachments: Vec::new(),
                                             diff,
                                             exit_code: None,
                                             locations: Vec::new(),
@@ -564,6 +566,7 @@ impl PiTranscriptParserState {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         let output_text = extract_message_text(message);
+                        let result_attachments = extract_message_attachments(message);
                         let is_error = message
                             .get("isError")
                             .and_then(|v| v.as_bool())
@@ -572,6 +575,7 @@ impl PiTranscriptParserState {
                         if let Some(existing) = self.tool_calls.get_mut(call_id) {
                             if let TimelineEntry::ToolCall {
                                 output,
+                                attachments,
                                 is_error: err_slot,
                                 state,
                                 duration_ms,
@@ -579,6 +583,7 @@ impl PiTranscriptParserState {
                             } = existing
                             {
                                 *output = Some(output_text);
+                                *attachments = result_attachments;
                                 *err_slot = is_error;
                                 if tool_duration.is_some() {
                                     *duration_ms = tool_duration;
@@ -884,6 +889,87 @@ pub(crate) fn extract_message_text(message: &Value) -> String {
     String::new()
 }
 
+pub(crate) fn extract_message_attachments(message: &Value) -> Vec<ChatAttachment> {
+    let Some(arr) = message
+        .get("content")
+        .and_then(|v| v.as_array())
+        .or_else(|| message.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        let block_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if block_type != "image" {
+            continue;
+        }
+        let source = item.get("source");
+        let raw_data = item
+            .get("data")
+            .and_then(|v| v.as_str())
+            .or_else(|| source.and_then(|s| s.get("data")).and_then(|v| v.as_str()));
+        let Some(raw_data) = raw_data.map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let (parsed_mime, clean_b64) = if let Some(rest) = raw_data.strip_prefix("data:") {
+            if let Some((meta, b64)) = rest.split_once(";base64,") {
+                (Some(meta.trim()), b64.trim())
+            } else {
+                (None, raw_data)
+            }
+        } else {
+            (None, raw_data)
+        };
+        if clean_b64.is_empty() {
+            continue;
+        }
+        let mime_type = item
+            .get("mimeType")
+            .or_else(|| item.get("mime_type"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                source
+                    .and_then(|s| s.get("media_type").or_else(|| s.get("mimeType")))
+                    .and_then(|v| v.as_str())
+            })
+            .or(parsed_mime)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("image/png")
+            .to_string();
+        let ext = match mime_type.as_str() {
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "png",
+        };
+        let path = item
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                path.as_deref()
+                    .and_then(|p| Path::new(p).file_name())
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| format!("image-{}.{ext}", out.len() + 1));
+        out.push(ChatAttachment {
+            name,
+            path,
+            mime_type,
+            data_b64: Some(clean_b64.to_string()),
+        });
+    }
+    out
+}
+
 pub(crate) fn infer_tool_diff(name: &str, input: &Value) -> Option<ToolDiff> {
     let lower = name.to_ascii_lowercase();
     let path = input
@@ -1148,5 +1234,70 @@ mod tests {
         let fallback =
             discover_pi_session_file_in_roots(&[pie_sessions], &[cwd], u64::MAX, None, true, &[]);
         assert!(fallback.is_some());
+    }
+
+    #[test]
+    fn extracts_inline_images_from_user_and_tool_result() {
+        let mut parser = PiTranscriptParserState::new(Path::new("test.jsonl"));
+        let user_rec: Value = serde_json::json!({
+            "type": "message",
+            "id": "u1",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "check this photo" },
+                    { "type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png" }
+                ]
+            }
+        });
+        let (_, user_entries, _) = parser.parse_record(&user_rec, false);
+        assert_eq!(user_entries.len(), 1);
+        match &user_entries[0] {
+            TimelineEntry::UserMessage {
+                text, attachments, ..
+            } => {
+                assert_eq!(text, "check this photo");
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].mime_type, "image/png");
+                assert_eq!(attachments[0].data_b64.as_deref(), Some("iVBORw0KGgo="));
+            }
+            other => panic!("expected UserMessage, got {other:?}"),
+        }
+
+        let call_rec: Value = serde_json::json!({
+            "type": "message",
+            "id": "a1",
+            "message": {
+                "role": "assistant",
+                "stopReason": "toolUse",
+                "content": [
+                    { "type": "toolCall", "id": "call-1", "name": "read", "arguments": { "path": "photo.jpg" } }
+                ]
+            }
+        });
+        parser.parse_record(&call_rec, false);
+
+        let result_rec: Value = serde_json::json!({
+            "type": "message",
+            "id": "r1",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "call-1",
+                "content": [
+                    { "type": "text", "text": "Read image file [image/jpeg]" },
+                    { "type": "image", "source": { "data": "/9j/4AAQ", "media_type": "image/jpeg" } }
+                ]
+            }
+        });
+        let (_, res_entries, _) = parser.parse_record(&result_rec, false);
+        assert_eq!(res_entries.len(), 1);
+        match &res_entries[0] {
+            TimelineEntry::ToolCall { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].mime_type, "image/jpeg");
+                assert_eq!(attachments[0].data_b64.as_deref(), Some("/9j/4AAQ"));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
     }
 }

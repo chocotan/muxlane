@@ -3619,6 +3619,7 @@ version = "0.0.36"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "image",
  "muxlane-core",
  "serde",
  "serde_json",

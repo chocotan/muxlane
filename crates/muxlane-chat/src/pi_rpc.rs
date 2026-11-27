@@ -2,7 +2,7 @@
 use crate::driver::{
     extract_text_blocks, read_lf_line, ChatDriverHandle, DriverCmd, DriverEvent, DriverLaunchSpec,
 };
-use crate::transcript::{infer_tool_diff, parse_pi_usage};
+use crate::transcript::{extract_message_attachments, infer_tool_diff, parse_pi_usage};
 use anyhow::Context;
 use muxlane_core::chat::{
     now_ms, ApprovalOption, ApprovalReply, ApprovalSource, BackgroundJob, ChatAttachment,
@@ -959,6 +959,9 @@ impl PiRpcTranslator {
                 }
                 self.sync_queued_meta();
             }
+            if dequeued_attachments.is_empty() {
+                dequeued_attachments = extract_image_blocks(msg);
+            }
             self.emit_meta();
             if !trimmed.is_empty() || !dequeued_attachments.is_empty() {
                 let _ = self
@@ -1334,6 +1337,7 @@ impl PiRpcTranslator {
                     title: None,
                     input,
                     output: None,
+                    attachments: Vec::new(),
                     diff,
                     exit_code: None,
                     locations: Vec::new(),
@@ -1399,6 +1403,7 @@ impl PiRpcTranslator {
             });
         let result = record.get("result");
         let output = result.and_then(extract_text_blocks);
+        let attachments = result.map(extract_image_blocks).unwrap_or_default();
         let exit_code = result
             .and_then(|r| r.pointer("/details/exitCode"))
             .and_then(|v| v.as_i64())
@@ -1418,6 +1423,7 @@ impl PiRpcTranslator {
                     title: None,
                     input: args,
                     output,
+                    attachments,
                     diff,
                     exit_code,
                     locations: Vec::new(),
@@ -2089,6 +2095,10 @@ fn parse_background_job(value: &Value) -> Option<BackgroundJob> {
     })
 }
 
+fn extract_image_blocks(value: &Value) -> Vec<ChatAttachment> {
+    extract_message_attachments(value)
+}
+
 fn sort_tasks(tasks: &mut Vec<SessionTask>) {
     let mut in_progress = Vec::new();
     let mut pending = Vec::new();
@@ -2571,5 +2581,44 @@ mod tests {
         let cleared = tr.remove_queued_message(None);
         assert!(cleared.is_empty());
         assert!(tr.meta.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn pi_rpc_extracts_tool_and_user_image_attachments() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut tr = PiRpcTranslator::new("pie-img", ChatSessionMeta::default(), tx);
+        tr.handle_record(json!({
+            "type": "tool_execution_start",
+            "toolCallId": "tc-img-1",
+            "toolName": "read",
+            "args": { "path": "screenshot.png" }
+        }));
+        tr.handle_record(json!({
+            "type": "tool_execution_end",
+            "toolCallId": "tc-img-1",
+            "toolName": "read",
+            "isError": false,
+            "result": {
+                "content": [
+                    { "type": "text", "text": "Read image file [image/png]" },
+                    { "type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png" }
+                ]
+            }
+        }));
+
+        let mut state = ChatTimelineState::default();
+        while let Ok(ev) = rx.try_recv() {
+            if let DriverEvent::Delta(op) = ev {
+                state.apply_op(op);
+            }
+        }
+        let tool_att = state.entries.iter().find_map(|e| match e {
+            TimelineEntry::ToolCall { attachments, .. } => Some(attachments),
+            _ => None,
+        });
+        let attachments = tool_att.expect("tool call should be present");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].mime_type, "image/png");
+        assert_eq!(attachments[0].data_b64.as_deref(), Some("iVBORw0KGgo="));
     }
 }

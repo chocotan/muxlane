@@ -8,52 +8,61 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-val MuxCanvas = Color(0xFFF4EBDD)
-val MuxBg0 = Color(0xFFF6F8F7)
+// Porcelain Editorial & Obsidian Ink palette (matching Desktop Orca aesthetic, 0px square geometry)
+val MuxCanvas = Color(0xFFF4F2ED)
+val MuxBg0 = Color(0xFFF9F8F5)
 val MuxBg1 = Color(0xFFFFFFFF)
-val MuxBg2 = Color(0xFFE6ECE9)
-val MuxBg3 = Color(0xFFD6E0DC)
-val MuxLine = Color(0xFFDFE6E3)
-val MuxControlLine = Color(0xFFC3CECA)
-val MuxFg0 = Color(0xFF18201E)
-val MuxFg1 = Color(0xFF394541)
-val MuxFg2 = Color(0xFF596662)
-val MuxAccent = Color(0xFF007A68)
-val MuxAccentBg = Color(0xFFE5F4F0)
-val MuxGreen = Color(0xFF007A68)
-val MuxYellow = Color(0xFF8A5100)
-val MuxRed = Color(0xFFBA1A1A)
+val MuxBg2 = Color(0xFFF2F0EB)
+val MuxBg3 = Color(0xFFE7E4DC)
+val MuxLine = Color(0xFFE6E3DC)
+val MuxControlLine = Color(0xFFD0CCC2)
+val MuxFg0 = Color(0xFF14171F)
+val MuxFg1 = Color(0xFF3E4451)
+val MuxFg2 = Color(0xFF707786)
+
+val MuxAccent = Color(0xFF181C24)
+val MuxCobalt = Color(0xFF2563EB)
+val MuxAccentBg = Color(0xFFEFF4FF)
+val MuxUserSurface = Color(0xFFF0EEE8)
+val MuxCodeBg = Color(0xFFF5F4F0)
+val MuxCodeHeader = Color(0xFFECEAE4)
+val MuxGreen = Color(0xFF16803C)
+val MuxYellow = Color(0xFFB45309)
+val MuxRed = Color(0xFFDC2626)
 val MuxOnAccent = Color.White
 
-val TerminalSurface = Color(0xFFFAF4E8)
-val TerminalKeycap = Color(0xFFE8DCC7)
-val TerminalBorder = Color(0xFF8E7D63)
-val TerminalDivider = Color(0xFFCBBDA4)
-val TerminalForeground = Color(0xFF39342C)
-val TerminalMuted = Color(0xFF6A6257)
-val TerminalAccent = Color(0xFF006D5D)
+// Porcelain Light terminal surface (matching Desktop Porcelain Light theme)
+val TerminalSurface = Color(0xFFFAF9F6)
+val TerminalKeycap = Color(0xFFFFFFFF)
+val TerminalBorder = Color(0xFFD0CCC2)
+val TerminalDivider = Color(0xFFE6E3DC)
+val TerminalForeground = Color(0xFF171A21)
+val TerminalMuted = Color(0xFF6B7280)
+val TerminalAccent = Color(0xFF2563EB)
 
-val MuxErrorBg = Color(0xFFFFF0F0)
-val MuxErrorFg = Color(0xFF991B1B)
-val MuxErrorLine = Color(0xFFFCA5A5)
+val MuxErrorBg = Color(0xFFFEF2F2)
+val MuxErrorFg = Color(0xFFB91C1C)
+val MuxErrorLine = Color(0xFFFECACA)
 
-val MuxWarningBg = Color(0xFFFEF3C7)
+val MuxWarningBg = Color(0xFFFFFBEB)
 val MuxWarningFg = Color(0xFF92400E)
-val MuxWarningLine = Color(0xFFFCD34D)
+val MuxWarningLine = Color(0xFFFDE68A)
 
 private val colors = lightColorScheme(
     primary = MuxAccent,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFB9F2E3),
-    onPrimaryContainer = Color(0xFF00201A),
-    secondary = Color(0xFF4C635D),
-    secondaryContainer = Color(0xFFCFE8E0),
+    primaryContainer = MuxAccentBg,
+    onPrimaryContainer = MuxFg0,
+    secondary = MuxCobalt,
+    secondaryContainer = MuxBg2,
     background = MuxBg0,
     surface = MuxBg1,
     surfaceVariant = MuxBg2,
@@ -74,16 +83,38 @@ private val squareShapes = Shapes(
     extraLarge = zeroRadius,
 )
 
+private val cjkLineHeightStyle = LineHeightStyle(
+    alignment = LineHeightStyle.Alignment.Center,
+    trim = LineHeightStyle.Trim.None,
+)
+
+@Suppress("DEPRECATION")
+private val cjkPlatformStyle = PlatformTextStyle(includeFontPadding = false)
+
+private fun editorialStyle(
+    fontSize: Float,
+    lineHeight: Float,
+    fontWeight: FontWeight = FontWeight.Normal,
+    letterSpacing: Float = 0f,
+): TextStyle = TextStyle(
+    fontSize = fontSize.sp,
+    lineHeight = lineHeight.sp,
+    fontWeight = fontWeight,
+    letterSpacing = letterSpacing.sp,
+    lineHeightStyle = cjkLineHeightStyle,
+    platformStyle = cjkPlatformStyle,
+)
+
 private val typography = Typography(
-    headlineSmall = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.02).sp),
-    titleLarge = TextStyle(fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.01).sp),
-    titleMedium = TextStyle(fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
-    bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 22.sp),
-    bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
-    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp),
-    labelLarge = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
-    labelMedium = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
-    labelSmall = TextStyle(fontSize = 10.sp, lineHeight = 14.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp),
+    headlineSmall = editorialStyle(22f, 32f, FontWeight.Bold, -0.2f),
+    titleLarge = editorialStyle(18f, 26f, FontWeight.SemiBold, -0.15f),
+    titleMedium = editorialStyle(15f, 23f, FontWeight.SemiBold),
+    bodyLarge = editorialStyle(15f, 24f),
+    bodyMedium = editorialStyle(14.5f, 23f),
+    bodySmall = editorialStyle(13f, 21f),
+    labelLarge = editorialStyle(14f, 21f, FontWeight.SemiBold),
+    labelMedium = editorialStyle(12.5f, 19f, FontWeight.Medium),
+    labelSmall = editorialStyle(11f, 17f, FontWeight.Medium, 0.2f),
 )
 
 @Composable

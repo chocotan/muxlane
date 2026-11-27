@@ -2,6 +2,7 @@ import { diffLines } from "diff";
 import type {
   AgentPreset,
   AgentType,
+  ApprovalOption,
   ChatDeltaEvent,
   ChatDeltaOp,
   ChatHistoryResult,
@@ -207,7 +208,8 @@ export function isExplorationTool(entry: TimelineEntry): entry is Extract<Timeli
     entry.type === "tool_call" &&
     EXPLORATION_KINDS.has(entry.kind) &&
     !entry.is_error &&
-    !entry.diff
+    !entry.diff &&
+    !(entry.attachments && entry.attachments.length > 0)
   );
 }
 
@@ -249,6 +251,11 @@ export function summarizeToolInput(entry: Extract<TimelineEntry, { type: "tool_c
   if (entry.input && typeof entry.input === "object" && !Array.isArray(entry.input)) {
     const rec = entry.input as Record<string, unknown>;
     for (const key of [
+      "CommandLine",
+      "AbsolutePath",
+      "TargetFile",
+      "Query",
+      "SearchPath",
       "command",
       "cmd",
       "path",
@@ -262,6 +269,16 @@ export function summarizeToolInput(entry: Extract<TimelineEntry, { type: "tool_c
       const v = rec[key];
       if (typeof v === "string" && v.trim()) {
         return v.trim();
+      }
+    }
+    if (Array.isArray(rec.questions)) {
+      for (const item of rec.questions) {
+        if (item && typeof item === "object" && !Array.isArray(item)) {
+          const q = (item as Record<string, unknown>).question;
+          if (typeof q === "string" && q.trim()) {
+            return q.trim();
+          }
+        }
       }
     }
   }
@@ -394,3 +411,219 @@ export function driverSubtitle(driver: SessionDriverMode | undefined, agentType:
   if (driver === "acp") return `${base} · ACP`;
   return `${base} · PTY`;
 }
+
+export interface ParsedPromptOption {
+  optionId: string;
+  indexLabel: string | null;
+  headline: string;
+  description: string | null;
+  isCustom: boolean;
+  isReject: boolean;
+}
+
+export interface ParsedPromptPreview {
+  title: string;
+  body: string;
+}
+
+export interface ParsedApprovalPrompt {
+  isQuestion: boolean;
+  isInputOnly: boolean;
+  isMultiSelectInput: boolean;
+  useListLayout: boolean;
+  badge: string;
+  questionTitle: string;
+  hint: string | null;
+  previews: ParsedPromptPreview[];
+  options: ParsedPromptOption[];
+  embeddedOptions: ParsedPromptOption[];
+}
+
+const CUSTOM_SENTINEL_RE = /^(type something\.?|other|自定义输入|输入其他.*)$/i;
+const LEADING_INDEX_RE = /^(\d+)[.)、]\s+(.+)$/s;
+const HEADER_TAG_RE = /^\[([^\[\]\n]{1,32})\]\s*(.*)$/;
+const PREVIEW_HEADER_RE = /^---\s*(.+?)\s*---$/;
+
+function splitHeadlineAndDescription(body: string): {
+  headline: string;
+  description: string | null;
+} {
+  for (const sep of [" — ", " – "]) {
+    const idx = body.indexOf(sep);
+    if (idx > 0) {
+      const left = body.slice(0, idx).trim();
+      const right = body.slice(idx + sep.length).trim();
+      if (left && right) {
+        return { headline: left, description: right };
+      }
+    }
+  }
+  const dashIdx = body.indexOf(" - ");
+  if (dashIdx > 0 && dashIdx <= 48) {
+    const left = body.slice(0, dashIdx).trim();
+    const right = body.slice(dashIdx + 3).trim();
+    if (left && right) {
+      return { headline: left, description: right };
+    }
+  }
+  return { headline: body, description: null };
+}
+
+export function parsePromptOption(
+  option: ApprovalOption,
+  fallbackIndex: number,
+  showFallbackIndex: boolean,
+): ParsedPromptOption {
+  const rawLabel = option.label.replace(/\r\n/g, "\n").trim();
+  const idxMatch = rawLabel.match(LEADING_INDEX_RE);
+  const indexLabel = idxMatch
+    ? idxMatch[1]
+    : showFallbackIndex
+      ? String(fallbackIndex + 1)
+      : null;
+  const body = (idxMatch ? idxMatch[2] : rawLabel).trim();
+  const isCustom = CUSTOM_SENTINEL_RE.test(body);
+  const kindLower = (option.kind ?? "").toLowerCase();
+  const idLower = option.option_id.toLowerCase();
+  const isReject =
+    kindLower.startsWith("reject") ||
+    kindLower.includes("deny") ||
+    idLower === "deny" ||
+    idLower === "reject" ||
+    idLower.includes("reject_") ||
+    idLower.includes("deny_");
+
+  if (isCustom) {
+    return {
+      optionId: option.option_id,
+      indexLabel,
+      headline: "自定义输入",
+      description: "填写其他回答",
+      isCustom: true,
+      isReject: false,
+    };
+  }
+
+  const { headline, description } = splitHeadlineAndDescription(body);
+  return {
+    optionId: option.option_id,
+    indexLabel,
+    headline: headline || rawLabel,
+    description,
+    isCustom: false,
+    isReject,
+  };
+}
+
+export function parseApprovalPrompt(approval: PendingApproval): ParsedApprovalPrompt {
+  const method = (approval.method || "").toLowerCase();
+  const isInputOnly = method === "input" || method === "editor";
+  const isQuestion = method === "select" || isInputOnly;
+
+  const normalized = (approval.title || "").replace(/\r\n/g, "\n").trim();
+  const blocks = normalized
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  let badge = isQuestion ? (isInputOnly ? "等待输入" : "单选提问") : "需要确认";
+  let questionLines: string[] = [];
+  const previews: ParsedPromptPreview[] = [];
+  const embeddedOptions: ParsedPromptOption[] = [];
+  const hintLines: string[] = [];
+
+  blocks.forEach((block, blockIndex) => {
+    const lines = block.split("\n");
+    const previewMatch = lines[0]?.trim().match(PREVIEW_HEADER_RE);
+    if (previewMatch) {
+      previews.push({
+        title: previewMatch[1].trim(),
+        body: lines.slice(1).join("\n").trim(),
+      });
+      return;
+    }
+
+    if (blockIndex === 0) {
+      const firstLine = lines[0]?.trim() ?? "";
+      const tagMatch = firstLine.match(HEADER_TAG_RE);
+      if (tagMatch && tagMatch[1].trim()) {
+        badge = tagMatch[1].trim();
+        const restFirst = tagMatch[2].trim();
+        if (restFirst) questionLines.push(restFirst);
+        for (const extra of lines.slice(1)) {
+          if (extra.trim()) questionLines.push(extra.trim());
+        }
+      } else {
+        questionLines = lines.map((l) => l.trim()).filter(Boolean);
+      }
+      return;
+    }
+
+    const nonEmptyLines = lines.map((l) => l.trim()).filter(Boolean);
+    const allNumbered =
+      nonEmptyLines.length > 0 && nonEmptyLines.every((l) => LEADING_INDEX_RE.test(l));
+    if (allNumbered && isInputOnly) {
+      nonEmptyLines.forEach((line, i) => {
+        embeddedOptions.push(
+          parsePromptOption({ option_id: line, label: line, kind: "select" }, i, true),
+        );
+      });
+      return;
+    }
+
+    if (isInputOnly && blockIndex === blocks.length - 1) {
+      hintLines.push(nonEmptyLines.join("\n"));
+    } else {
+      questionLines.push(nonEmptyLines.join("\n"));
+    }
+  });
+
+  const rawHint = hintLines.join("\n").trim() || null;
+  const isMultiSelectInput =
+    isInputOnly &&
+    embeddedOptions.length > 0 &&
+    Boolean(rawHint && /(comma-separated|all that apply|numbers|多选)/i.test(rawHint));
+
+  let hint = rawHint;
+  if (isMultiSelectInput) {
+    hint = "可直接点选上方选项，或输入序号（如 1,3）与自定义内容";
+    if (badge === "等待输入") badge = "多选提问";
+  } else if (rawHint && /^type your answer:?$/i.test(rawHint)) {
+    hint = "请输入你的自定义回答";
+  }
+
+  const parsedOptions = approval.options.map((opt, idx) =>
+    parsePromptOption(opt, idx, method === "select"),
+  );
+
+  const useListLayout =
+    method === "select" ||
+    parsedOptions.length > 2 ||
+    parsedOptions.some((o) => Boolean(o.description) || o.headline.length > 18);
+
+  return {
+    isQuestion,
+    isInputOnly,
+    isMultiSelectInput,
+    useListLayout,
+    badge,
+    questionTitle: questionLines.join("\n").trim() || normalized || "等待回复",
+    hint,
+    previews,
+    options: parsedOptions,
+    embeddedOptions,
+  };
+}
+
+export function toggleMultiSelectNumber(current: string, indexLabel: string): string {
+  const trimmed = current.trim();
+  if (!trimmed) return indexLabel;
+  const tokens = trimmed.split(/[,\s]+/).filter(Boolean);
+  if (!tokens.every((t) => /^\d+$/.test(t))) {
+    return indexLabel;
+  }
+  const exists = tokens.includes(indexLabel);
+  const next = exists ? tokens.filter((t) => t !== indexLabel) : [...tokens, indexLabel];
+  return next.sort((a, b) => Number(a) - Number(b)).join(",");
+}
+

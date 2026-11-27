@@ -118,13 +118,8 @@ internal fun SessionWorkspace(
     val agent = state.snapshot?.agents?.find { it.id == agentId }
     val project = state.snapshot?.projects?.find { it.id == agent?.project }
     val chatMeta = state.chatTimelines[agentId]?.meta ?: state.chatSessions[agentId]?.meta
-    val canSwitchToChat = model.isChatCapable(agentId)
-    val canSwitchToTerm = chatMeta == null || chatMeta.hasPty || chatMeta.supportsTerminalSwitch
-    val activePaneMode = if (state.sessionMode == SessionPaneMode.CHAT && canSwitchToChat) {
-        SessionPaneMode.CHAT
-    } else {
-        SessionPaneMode.TERMINAL
-    }
+    val isChatOnly = model.isChatOnlySession(agentId)
+    val activePaneMode = if (isChatOnly) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
 
     val otherApproval = state.globalApprovals.firstOrNull { it.agent != agentId }
 
@@ -134,7 +129,12 @@ internal fun SessionWorkspace(
             subtitle = buildString {
                 append(project?.displayName() ?: agent?.project.orEmpty())
                 if (!agent?.project.isNullOrBlank()) append(" · ")
-                append(driverBadgeLabel(agent?.agentType ?: muxlane.protocol.AgentType.UNKNOWN, chatMeta?.driver))
+                append(
+                    driverBadgeLabel(
+                        agent?.agentType ?: muxlane.protocol.AgentType.UNKNOWN,
+                        if (isChatOnly) chatMeta?.driver ?: muxlane.chat.SessionDriverMode.PI_RPC else muxlane.chat.SessionDriverMode.TERMINAL_PTY,
+                    ),
+                )
             },
             isStreaming = chatMeta?.isStreaming == true,
             connected = state.connected,
@@ -143,13 +143,10 @@ internal fun SessionWorkspace(
             wideSplitMode = wideSplitMode,
             sidebarVisible = sidebarVisible,
             sessionMode = activePaneMode,
-            canSwitchToChat = canSwitchToChat,
-            canSwitchToTerm = canSwitchToTerm,
             onBack = model::closeAgent,
             onToggleSidebar = onToggleSidebar,
             onOpenQuickDrawer = { showQuickDrawer = true },
             onOpenDetails = { showDetailsSheet = true },
-            onSelectMode = model::setSessionMode,
             onOpenTabsSheet = { showTabsSheet = true },
             onOpenNewTab = { onOpenNewTab(agent?.project ?: state.snapshot?.projects?.firstOrNull()?.id) },
             onOpenQuickCommands = { showQuickCommandsSheet = true },
@@ -161,7 +158,7 @@ internal fun SessionWorkspace(
             onDeleteAgent = { model.requestDelete(agentId) },
         )
 
-        if (tabSummaries.isNotEmpty()) {
+        if (tabSummaries.size > 1) {
             SessionTabBar(
                 tabs = tabSummaries,
                 activeAgentId = agentId,
@@ -172,7 +169,7 @@ internal fun SessionWorkspace(
         }
 
         state.error?.let { err ->
-            Box(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) { ErrorPanel(err) }
+            Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) { ErrorPanel(err) }
         }
 
         if (otherApproval != null) {
@@ -186,14 +183,14 @@ internal fun SessionWorkspace(
                     .clickable { model.openAgent(otherApproval.agent) },
             ) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(Icons.Outlined.NotificationsActive, null, tint = MuxWarningFg, modifier = Modifier.size(15.dp))
+                    Icon(Icons.Outlined.NotificationsActive, null, tint = MuxWarningFg, modifier = Modifier.size(16.dp))
                     Text(
                         "$otherAgentTitle 等待审批 · 点击切换处理",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.labelMedium,
                         color = MuxWarningFg,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -210,7 +207,6 @@ internal fun SessionWorkspace(
                     model = model,
                     agentId = agentId,
                     state = state,
-                    canSwitchToTerm = canSwitchToTerm,
                     showSlashMenu = showSlashMenu,
                     onToggleSlash = { showSlashMenu = !showSlashMenu },
                     onDismissSlash = { showSlashMenu = false },
@@ -364,13 +360,10 @@ private fun SessionWorkspaceHeader(
     wideSplitMode: Boolean,
     sidebarVisible: Boolean,
     sessionMode: SessionPaneMode,
-    canSwitchToChat: Boolean,
-    canSwitchToTerm: Boolean,
     onBack: () -> Unit,
     onToggleSidebar: (() -> Unit)?,
     onOpenQuickDrawer: () -> Unit,
     onOpenDetails: () -> Unit,
-    onSelectMode: (SessionPaneMode) -> Unit,
     onOpenTabsSheet: () -> Unit,
     onOpenNewTab: () -> Unit,
     onOpenQuickCommands: () -> Unit,
@@ -385,7 +378,7 @@ private fun SessionWorkspaceHeader(
     Surface(color = MuxBg1, contentColor = MuxFg0) {
         Column(Modifier.fillMaxWidth().statusBarsPadding()) {
             Row(
-                Modifier.fillMaxWidth().height(50.dp).padding(end = 4.dp),
+                Modifier.fillMaxWidth().height(54.dp).padding(end = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (wideSplitMode && onToggleSidebar != null) {
@@ -407,7 +400,7 @@ private fun SessionWorkspaceHeader(
                         .clickable(onClick = onOpenDetails)
                         .padding(horizontal = 4.dp),
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
                             title,
                             style = MaterialTheme.typography.titleMedium,
@@ -416,28 +409,37 @@ private fun SessionWorkspaceHeader(
                             modifier = Modifier.weight(1f, fill = false),
                         )
                         if (isStreaming) {
-                            SquareStepIndicator(blockSize = 4.dp, gap = 2.dp, blockCount = 3)
+                            SquareStepIndicator(color = MuxCobalt, blockSize = 4.dp, gap = 2.dp, blockCount = 3)
                         }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         Box(Modifier.size(6.dp).background(if (connected) MuxGreen else MuxRed, Square))
                         Text(
-                            subtitle + if (e2eeActive) " · E2EE" else "" + if (usingLan) " · LAN" else "",
+                            subtitle + (if (e2eeActive) " · E2EE" else "") + (if (usingLan) " · LAN" else ""),
                             style = MaterialTheme.typography.labelSmall,
                             color = MuxFg2,
-                            fontFamily = MonoFamily,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
 
-                SessionModeSwitcher(
-                    mode = sessionMode,
-                    canSwitchToChat = canSwitchToChat,
-                    canSwitchToTerm = canSwitchToTerm,
-                    onSelect = onSelectMode,
-                )
+                Box(
+                    Modifier
+                        .background(if (sessionMode == SessionPaneMode.CHAT) MuxAccentBg else MuxBg2, Square)
+                        .border(
+                            BorderStroke(1.dp, if (sessionMode == SessionPaneMode.CHAT) MuxCobalt.copy(alpha = 0.4f) else MuxLine),
+                            Square,
+                        )
+                        .padding(horizontal = 7.dp, vertical = 3.dp),
+                ) {
+                    Text(
+                        if (sessionMode == SessionPaneMode.CHAT) "CHAT" else "CLI",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (sessionMode == SessionPaneMode.CHAT) MuxCobalt else MuxFg1,
+                        fontFamily = MonoFamily,
+                    )
+                }
 
                 Box {
                     IconButton(onClick = { moreExpanded = true }, modifier = Modifier.size(40.dp)) {
@@ -576,13 +578,6 @@ private fun SessionTabBar(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
-                        )
-                        Text(
-                            driverBadgeLabel(active.agentType, active.driverMode),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MuxFg2,
-                            fontFamily = MonoFamily,
-                            maxLines = 1,
                         )
                     } else {
                         Text("选择标签", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
@@ -737,9 +732,13 @@ internal fun NewTabSheet(
 ) {
     val projectId = state.spawnProject ?: return
     val projects = state.snapshot?.projects.orEmpty()
-    val (agentPresets, shellPreset) = remember(state.presets) { orderAgentPresetsPiFirst(state.presets) }
+    val (allAgentPresets, shellPreset) = remember(state.presets) { orderAgentPresetsPiFirst(state.presets) }
+    val chatAgentPresets = remember(allAgentPresets) {
+        allAgentPresets.filter { presetChatDriver(it.agentType) != null }
+    }
     var surface by remember(projectId) { mutableStateOf(NewTabSurface.CHAT) }
     var initialPrompt by remember(projectId) { mutableStateOf("") }
+    val visiblePresets = if (surface == NewTabSurface.CHAT) chatAgentPresets else allAgentPresets
 
     MuxSheetFrame(
         onDismiss = model::closeSpawn,
@@ -792,7 +791,7 @@ internal fun NewTabSheet(
                         onValueChange = { initialPrompt = it },
                         maxLines = 3,
                         textStyle = MaterialTheme.typography.bodyMedium.copy(color = MuxFg0),
-                        cursorBrush = SolidColor(MuxAccent),
+                        cursorBrush = SolidColor(MuxCobalt),
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(MuxBg0, Square)
@@ -808,19 +807,24 @@ internal fun NewTabSheet(
                 }
             }
 
-            MuxSectionHeading(title = "Agent (Pi RPC / 通用 ACP)", count = agentPresets.size)
-            if (agentPresets.isEmpty()) {
+            MuxSectionHeading(
+                title = if (surface == NewTabSurface.CHAT) "原生对话 Agent (Pi RPC / ACP)" else "命令行终端 Agent",
+                count = visiblePresets.size,
+            )
+            if (state.presets.isEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    SquareStepIndicator()
+                    SquareStepIndicator(color = MuxCobalt)
                     Text("正在加载预设…", style = MaterialTheme.typography.bodySmall, color = MuxFg2)
                 }
+            } else if (visiblePresets.isEmpty()) {
+                Text("当前主机未检测到支持原生对话模式的 Agent，请切换到终端模式。", style = MaterialTheme.typography.bodySmall, color = MuxFg2)
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    agentPresets.chunked(2).forEach { pair ->
+                    visiblePresets.chunked(2).forEach { pair ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             pair.forEach { preset ->
                                 AgentPresetTile(
@@ -845,18 +849,20 @@ internal fun NewTabSheet(
                 }
             }
 
-            shellPreset?.let { shell ->
-                HorizontalDivider(color = MuxLine)
-                OutlinedButton(
-                    onClick = { model.spawn(shell) },
-                    shape = Square,
-                    border = BorderStroke(1.dp, MuxControlLine),
-                    contentPadding = PaddingValues(vertical = 10.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Outlined.Terminal, null, tint = MuxFg1, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.launch_shell_terminal), color = MuxFg0)
+            if (surface == NewTabSurface.CLI) {
+                shellPreset?.let { shell ->
+                    HorizontalDivider(color = MuxLine)
+                    OutlinedButton(
+                        onClick = { model.spawn(shell) },
+                        shape = Square,
+                        border = BorderStroke(1.dp, MuxControlLine),
+                        contentPadding = PaddingValues(vertical = 10.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Outlined.Terminal, null, tint = MuxFg1, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.launch_shell_terminal), color = MuxFg0)
+                    }
                 }
             }
         }
@@ -881,7 +887,7 @@ private fun AgentPresetTile(
         border = BorderStroke(1.dp, MuxControlLine),
         modifier = modifier.clickable(onClick = onClick),
     ) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -897,13 +903,13 @@ private fun AgentPresetTile(
                 Box(
                     Modifier
                         .background(if (surface == NewTabSurface.CHAT) MuxAccentBg else MuxBg2, Square)
-                        .border(BorderStroke(1.dp, if (surface == NewTabSurface.CHAT) MuxAccent.copy(alpha = 0.45f) else MuxLine), Square)
-                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                        .border(BorderStroke(1.dp, if (surface == NewTabSurface.CHAT) MuxCobalt.copy(alpha = 0.45f) else MuxLine), Square)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
                 ) {
                     Text(
                         driverTag,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (surface == NewTabSurface.CHAT) MuxAccent else MuxFg2,
+                        color = if (surface == NewTabSurface.CHAT) MuxCobalt else MuxFg1,
                         fontFamily = MonoFamily,
                     )
                 }

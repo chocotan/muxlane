@@ -10,7 +10,7 @@ class VtTest {
         val vt = VirtualTerminal(20, 4)
         vt.write("\u001b[31mred\u001b[0m plain".toByteArray())
         assertEquals("red plain", vt.visibleLine(0))
-        assertEquals(0xFFA3333F.toInt(), vt.screen()[0][0].fg)
+        assertEquals(0xFFC81E1E.toInt(), vt.screen()[0][0].fg)
     }
 
     @Test

@@ -57,6 +57,8 @@ const THINKING_LABELS: Record<string, string> = {
   max: "最大 (max)",
 };
 
+const MAX_UPLOAD_IMAGE_B64_BYTES = 520 * 1024;
+
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -68,6 +70,66 @@ function fileToBase64(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error("read image failed"));
     reader.readAsDataURL(file);
   });
+}
+
+function loadImageElement(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("decode image failed"));
+    };
+    img.src = url;
+  });
+}
+
+async function encodeImageFileForWire(
+  file: File,
+): Promise<{ mimeType: string; dataB64: string }> {
+  const rawB64 = await fileToBase64(file);
+  const rawMime = file.type || "image/png";
+  if (rawB64.length <= MAX_UPLOAD_IMAGE_B64_BYTES) {
+    return { mimeType: rawMime, dataB64: rawB64 };
+  }
+  try {
+    const img = await loadImageElement(file);
+    const attempts: Array<[number, number]> = [
+      [1600, 0.84],
+      [1200, 0.78],
+      [880, 0.7],
+      [640, 0.62],
+    ];
+    let best = rawB64;
+    for (const [maxDim, quality] of attempts) {
+      const longest = Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height, 1);
+      const scale = Math.min(1, maxDim / longest);
+      const w = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
+      const h = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) break;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL("image/jpeg", quality);
+      const comma = dataUrl.indexOf(",");
+      const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+      best = b64;
+      if (b64.length <= MAX_UPLOAD_IMAGE_B64_BYTES) {
+        return { mimeType: "image/jpeg", dataB64: b64 };
+      }
+    }
+    return { mimeType: "image/jpeg", dataB64: best };
+  } catch {
+    return { mimeType: rawMime, dataB64: rawB64 };
+  }
 }
 
 export const ChatComposer: React.FC<ChatComposerProps> = ({
@@ -238,12 +300,12 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     if (list.length === 0) return;
     const next: ChatAttachment[] = [];
     for (const file of list) {
-      const b64 = await fileToBase64(file);
-      const ext = file.type.split("/")[1] || "png";
+      const { mimeType, dataB64 } = await encodeImageFileForWire(file);
+      const ext = mimeType.split("/")[1] || "png";
       next.push({
         name: file.name || `image-${Date.now()}.${ext}`,
-        mime_type: file.type,
-        data_b64: b64,
+        mime_type: mimeType,
+        data_b64: dataB64,
       });
     }
     setAttachments((prev) => [...prev, ...next]);

@@ -11,6 +11,7 @@ import {
   FileText,
   Layers,
   Loader2,
+  Pencil,
   Search,
   ShieldAlert,
   Terminal as TerminalIcon,
@@ -28,14 +29,17 @@ import type {
 } from "../shared/protocol";
 import {
   buildDisplayItems,
+  computeDiffRows,
   defaultChatMeta,
+  parseApprovalPrompt,
   summarizeToolInput,
+  toggleMultiSelectNumber,
   type ChatTimelineState,
   type DisplayTimelineItem,
 } from "../shared/timeline";
 import type { AppTheme } from "../state/useTheme";
 import { ChatComposer } from "./ChatComposer";
-import { ChatSessionDock } from "./ChatSessionDock";
+import { ChatSessionDock, ChatSessionHeaderActions } from "./ChatSessionDock";
 import { MessageUsageFooter } from "./ChatStatsBar";
 import { DiffView } from "./DiffView";
 import { MarkdownView } from "./MarkdownView";
@@ -257,16 +261,26 @@ const OUTPUT_PREVIEW_LIMIT = 4000;
  */
 const ToolCallRow: React.FC<{
   entry: Extract<TimelineEntry, { type: "tool_call" }>;
-}> = ({ entry }) => {
-  const [expanded, setExpanded] = useState(Boolean(entry.is_error || entry.diff));
+  onPreviewImage?: (att: ChatAttachment) => void;
+}> = ({ entry, onPreviewImage }) => {
+  const [expanded, setExpanded] = useState(Boolean(entry.is_error));
   const [showFullOutput, setShowFullOutput] = useState(false);
 
   const summary = useMemo(() => summarizeToolInput(entry), [entry]);
+  const diffStats = useMemo(() => {
+    if (!entry.diff) return null;
+    const { additions, deletions } = computeDiffRows(entry.diff.old_text, entry.diff.new_text);
+    return { additions, deletions };
+  }, [entry.diff]);
   const verb = toolVerb(entry);
   const bashCmd = entry.kind === "bash" ? extractBashCommand(entry.input) : null;
   const duration = formatDuration(entry.duration_ms);
   const isRunning = entry.state === "running" || entry.state === "pending";
   const failed = entry.is_error || entry.state === "failed" || (entry.exit_code != null && entry.exit_code !== 0);
+  const imageAttachments = useMemo(
+    () => (entry.attachments ?? []).filter((a) => Boolean(a.data_b64)),
+    [entry.attachments],
+  );
 
   const rawOutput = entry.output ?? "";
   const isTruncated = !showFullOutput && rawOutput.length > OUTPUT_PREVIEW_LIMIT;
@@ -317,6 +331,16 @@ const ToolCallRow: React.FC<{
         </div>
 
         <div className="flex shrink-0 items-center gap-2 font-mono text-[10.5px] text-ink-muted tabular-nums">
+          {diffStats && (diffStats.additions > 0 || diffStats.deletions > 0) && (
+            <span className="inline-flex items-center gap-1">
+              {diffStats.additions > 0 && (
+                <span className="text-diff-add-fg">+{diffStats.additions}</span>
+              )}
+              {diffStats.deletions > 0 && (
+                <span className="text-diff-del-fg">-{diffStats.deletions}</span>
+              )}
+            </span>
+          )}
           {entry.exit_code != null && entry.exit_code !== 0 && (
             <span className="border border-danger/35 bg-danger-soft px-1 text-danger">
               exit {entry.exit_code}
@@ -328,6 +352,29 @@ const ToolCallRow: React.FC<{
           {duration && <span>{duration}</span>}
         </div>
       </button>
+
+      {imageAttachments.length > 0 && (
+        <div className="mt-1.5 mb-1.5 ml-[6.5px] flex flex-wrap gap-2 border-l border-line pl-3">
+          {imageAttachments.map((att, idx) => (
+            <button
+              key={`${entry.id}-img-${idx}`}
+              type="button"
+              onClick={() => onPreviewImage?.(att)}
+              title={`点击查看大图 · ${att.name}`}
+              className="group/img block border border-line bg-canvas p-1 text-left hover:border-line-strong transition-colors cursor-pointer"
+            >
+              <img
+                src={`data:${att.mime_type};base64,${att.data_b64}`}
+                alt={att.name}
+                className="max-h-56 max-w-full object-contain"
+              />
+              <div className="mt-1 truncate font-mono text-[10.5px] text-ink-muted group-hover/img:text-ink-2">
+                {att.name}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
 
       {expanded && hasDetail && (
         <div className="mt-1 mb-1.5 ml-[6.5px] space-y-1.5 border-l border-line pl-3 select-text">
@@ -411,7 +458,8 @@ const ToolCallRow: React.FC<{
 /** Orca-style NativeChatToolRun: collapsed exploration summary opening to an indented rail. */
 const ExplorationClusterRow: React.FC<{
   tools: Extract<TimelineEntry, { type: "tool_call" }>[];
-}> = ({ tools }) => {
+  onPreviewImage?: (att: ChatAttachment) => void;
+}> = ({ tools, onPreviewImage }) => {
   const [expanded, setExpanded] = useState(false);
   const running = tools.some((t) => t.state === "running" || t.state === "pending");
   const hasError = tools.some((t) => t.is_error || t.state === "failed");
@@ -454,7 +502,7 @@ const ExplorationClusterRow: React.FC<{
       {expanded && (
         <div className="mt-0.5 mb-1.5 ml-[6.5px] space-y-0.5 border-l border-line pl-3.5">
           {tools.map((t) => (
-            <ToolCallRow key={t.id} entry={t} />
+            <ToolCallRow key={t.id} entry={t} onPreviewImage={onPreviewImage} />
           ))}
         </div>
       )}
@@ -462,117 +510,290 @@ const ExplorationClusterRow: React.FC<{
   );
 };
 
-/** Docked architectural approval bar right above the composer. */
+/** Docked architectural question / approval card right above the composer. */
 const InlineApprovalCard: React.FC<{
   approval: PendingApproval;
   onReply: (reply: ApprovalReply) => void;
 }> = ({ approval, onReply }) => {
   const [replyText, setReplyText] = useState(approval.prefill ?? "");
+  const parsed = useMemo(() => parseApprovalPrompt(approval), [approval]);
+
+  useEffect(() => {
+    setReplyText(approval.prefill ?? "");
+  }, [approval.id, approval.prefill]);
+
+  const selectedIndices = useMemo(() => {
+    if (!parsed.isMultiSelectInput) return new Set<string>();
+    const tokens = replyText.trim().split(/[,\s]+/).filter(Boolean);
+    if (!tokens.every((t) => /^\d+$/.test(t))) return new Set<string>();
+    return new Set(tokens);
+  }, [parsed.isMultiSelectInput, replyText]);
+
+  const showTextInput = parsed.isInputOnly || approval.prefill != null;
+  const showConfirmFallback = !parsed.isInputOnly && parsed.options.length === 0;
 
   return (
     <div className="shrink-0 px-5 pt-2">
       <div className="mx-auto w-full max-w-[68rem]">
-        <div className="mux-composer-shadow border border-line border-l-2 border-l-question bg-elevated p-3.5">
-          <div className="flex items-start gap-2.5">
-            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-question" strokeWidth={1.8} />
-            <div className="min-w-0 flex-1 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[13px] font-semibold text-ink-strong">
-                  {approval.title}
+        <div
+          className={`mux-composer-shadow border border-line border-l-2 bg-elevated ${
+            parsed.isQuestion ? "border-l-unread" : "border-l-question"
+          }`}
+        >
+          {/* Header bar */}
+          <div className="flex items-center justify-between gap-2 border-b border-line-subtle bg-sidebar/55 px-3.5 py-2">
+            <div className="flex min-w-0 items-center gap-2">
+              {!parsed.isQuestion && (
+                <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-question" strokeWidth={1.8} />
+              )}
+              <span
+                className={`border px-1.5 py-[1px] text-[11px] font-medium ${
+                  parsed.isQuestion
+                    ? "border-unread/30 bg-unread/10 text-unread"
+                    : "border-question/35 bg-question-soft text-question"
+                }`}
+              >
+                {parsed.badge}
+              </span>
+              {approval.tool_name && (
+                <span className="border border-line-subtle bg-canvas px-1.5 py-[1px] font-mono text-[10.5px] text-ink-muted">
+                  {approval.tool_name}
                 </span>
-                {approval.tool_name && (
-                  <span className="border border-line-subtle bg-canvas px-1.5 py-0.5 font-mono text-[10.5px] text-question">
-                    {approval.tool_name}
-                  </span>
-                )}
-              </div>
-
-              {approval.message && (
-                <p className="text-[12.5px] text-ink-2 select-text">{approval.message}</p>
-              )}
-
-              {approval.command_or_input && (
-                <pre className="m-0 max-h-28 overflow-auto border border-line-subtle bg-code-surface px-2.5 py-2 font-mono text-[11.5px] text-ink select-text">
-                  {approval.command_or_input}
-                </pre>
-              )}
-
-              <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                {approval.options.length > 0 ? (
-                  approval.options.map((opt) => {
-                    const isReject =
-                      opt.kind?.startsWith("reject") ||
-                      opt.option_id.toLowerCase().includes("deny") ||
-                      opt.option_id.toLowerCase().includes("reject");
-                    return (
-                      <button
-                        key={opt.option_id}
-                        type="button"
-                        onClick={() =>
-                          onReply({ kind: "selected_option", option_id: opt.option_id })
-                        }
-                        className={`h-7 px-3 text-[12px] font-medium transition-colors cursor-pointer ${
-                          isReject
-                            ? "border border-danger/40 bg-danger-soft text-danger hover:bg-danger hover:text-white"
-                            : "bg-primary-btn text-primary-btn-fg hover:bg-primary-btn-hover"
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  })
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => onReply({ kind: "confirm", confirmed: true })}
-                      className="h-7 bg-primary-btn px-3 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
-                    >
-                      允许
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onReply({ kind: "confirm", confirmed: false })}
-                      className="h-7 border border-danger/40 bg-danger-soft px-3 text-[12px] font-medium text-danger hover:bg-danger hover:text-white transition-colors cursor-pointer"
-                    >
-                      拒绝
-                    </button>
-                  </>
-                )}
-                <button
-                  type="button"
-                  onClick={() => onReply({ kind: "cancel" })}
-                  className="h-7 border border-line bg-canvas px-2.5 text-[12px] text-ink-2 hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
-                >
-                  取消
-                </button>
-              </div>
-
-              {(approval.prefill != null || approval.options.length === 0) && (
-                <div className="flex items-center gap-2 pt-0.5">
-                  <input
-                    type="text"
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && replyText.trim()) {
-                        onReply({ kind: "text", value: replyText.trim() });
-                      }
-                    }}
-                    placeholder="输入自定义回复，按 Enter 提交…"
-                    className="h-8 flex-1 border border-line bg-canvas px-2.5 font-mono text-[12px] text-ink-strong placeholder:text-ink-muted focus:border-line-strong focus:outline-none select-text"
-                  />
-                  <button
-                    type="button"
-                    disabled={!replyText.trim()}
-                    onClick={() => onReply({ kind: "text", value: replyText.trim() })}
-                    className="h-8 border border-line bg-canvas px-3 text-[12px] text-ink hover:bg-hover disabled:opacity-45 cursor-pointer"
-                  >
-                    提交
-                  </button>
-                </div>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => onReply({ kind: "cancel" })}
+              className="flex h-6 items-center gap-1 border border-line bg-canvas px-2 text-[11px] text-ink-muted hover:border-line-strong hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
+            >
+              <X className="h-3 w-3" />
+              <span>取消</span>
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="max-h-[46vh] overflow-y-auto px-3.5 py-3 space-y-2.5">
+            <div className="text-[13.5px] font-semibold leading-[1.45] text-ink-strong whitespace-pre-wrap select-text">
+              {parsed.questionTitle}
+            </div>
+
+            {approval.message && (
+              <p className="m-0 text-[12.5px] leading-[1.5] text-ink-2 whitespace-pre-wrap select-text">
+                {approval.message}
+              </p>
+            )}
+
+            {approval.command_or_input && (
+              <pre className="m-0 max-h-28 overflow-auto border border-line-subtle bg-code-surface px-2.5 py-2 font-mono text-[11.5px] text-ink select-text">
+                {approval.command_or_input}
+              </pre>
+            )}
+
+            {parsed.previews.length > 0 && (
+              <div className="space-y-2">
+                {parsed.previews.map((preview, idx) => (
+                  <div key={`${preview.title}-${idx}`} className="border border-line-subtle bg-code-surface">
+                    <div className="border-b border-line-subtle bg-code-header px-2.5 py-1 font-mono text-[10.5px] text-ink-muted">
+                      {preview.title}
+                    </div>
+                    <pre className="m-0 max-h-36 overflow-auto px-2.5 py-2 font-mono text-[11.5px] leading-[1.45] text-ink whitespace-pre-wrap select-text">
+                      {preview.body}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Structured vertical option list (aligned left rail, zero jagged wrapping) */}
+            {parsed.options.length > 0 && parsed.useListLayout && (
+              <div className="border border-line divide-y divide-line-subtle bg-canvas">
+                {parsed.options.map((opt) => (
+                  <button
+                    key={opt.optionId}
+                    type="button"
+                    onClick={() => onReply({ kind: "selected_option", option_id: opt.optionId })}
+                    className={`group flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors cursor-pointer ${
+                      opt.isReject
+                        ? "hover:bg-danger-soft"
+                        : opt.isCustom
+                          ? "bg-sidebar/40 hover:bg-elevated"
+                          : "hover:bg-elevated"
+                    }`}
+                  >
+                    {opt.indexLabel ? (
+                      <span
+                        className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center border font-mono text-[11px] font-medium transition-colors ${
+                          opt.isReject
+                            ? "border-danger/35 bg-danger-soft text-danger group-hover:bg-danger group-hover:text-white"
+                            : opt.isCustom
+                              ? "border-line bg-elevated text-ink-muted group-hover:border-line-strong group-hover:text-ink-strong"
+                              : "border-line bg-elevated text-ink-2 group-hover:border-primary-btn group-hover:bg-primary-btn group-hover:text-primary-btn-fg"
+                        }`}
+                      >
+                        {opt.isCustom ? <Pencil className="h-2.5 w-2.5" /> : opt.indexLabel}
+                      </span>
+                    ) : null}
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className={`text-[13px] font-medium leading-[1.4] break-words ${
+                          opt.isReject
+                            ? "text-danger"
+                            : opt.isCustom
+                              ? "text-ink-2 group-hover:text-ink-strong"
+                              : "text-ink-strong"
+                        }`}
+                      >
+                        {opt.headline}
+                      </div>
+                      {opt.description && (
+                        <div className="mt-0.5 text-[12px] leading-[1.45] text-ink-muted break-words">
+                          {opt.description}
+                        </div>
+                      )}
+                    </div>
+                    <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint group-hover:text-ink-strong transition-colors" />
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Embedded option rows parsed from Pi input / multi-select title */}
+            {parsed.embeddedOptions.length > 0 && (
+              <div className="border border-line divide-y divide-line-subtle bg-canvas">
+                {parsed.embeddedOptions.map((opt) => {
+                  const idx = opt.indexLabel ?? "";
+                  const checked = parsed.isMultiSelectInput && idx !== "" && selectedIndices.has(idx);
+                  if (parsed.isMultiSelectInput) {
+                    return (
+                      <button
+                        key={opt.optionId}
+                        type="button"
+                        onClick={() => setReplyText((prev) => toggleMultiSelectNumber(prev, idx))}
+                        className={`group flex w-full items-start gap-3 px-3 py-2 text-left transition-colors cursor-pointer ${
+                          checked ? "bg-unread/8" : "hover:bg-elevated"
+                        }`}
+                      >
+                        <span
+                          className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center border font-mono text-[11px] font-medium transition-colors ${
+                            checked
+                              ? "border-primary-btn bg-primary-btn text-primary-btn-fg"
+                              : "border-line bg-elevated text-ink-2 group-hover:border-line-strong"
+                          }`}
+                        >
+                          {checked ? <Check className="h-3 w-3" /> : idx}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[13px] font-medium leading-[1.4] text-ink-strong break-words">
+                            {opt.headline}
+                          </div>
+                          {opt.description && (
+                            <div className="mt-0.5 text-[12px] leading-[1.45] text-ink-muted break-words">
+                              {opt.description}
+                            </div>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  }
+                  return (
+                    <div
+                      key={opt.optionId}
+                      className="flex w-full items-start gap-3 px-3 py-2 text-left"
+                    >
+                      {opt.indexLabel && (
+                        <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center border border-line-subtle bg-elevated font-mono text-[11px] text-ink-muted">
+                          {opt.indexLabel}
+                        </span>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[12.5px] font-medium leading-[1.4] text-ink-2 break-words">
+                          {opt.headline}
+                        </div>
+                        {opt.description && (
+                          <div className="mt-0.5 text-[11.5px] leading-[1.45] text-ink-muted break-words">
+                            {opt.description}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Compact horizontal actions for binary confirm / permission approvals */}
+            {parsed.options.length > 0 && !parsed.useListLayout && (
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                {parsed.options.map((opt) => (
+                  <button
+                    key={opt.optionId}
+                    type="button"
+                    onClick={() => onReply({ kind: "selected_option", option_id: opt.optionId })}
+                    className={`min-h-7 px-3 py-1 text-[12px] font-medium transition-colors cursor-pointer ${
+                      opt.isReject
+                        ? "border border-danger/40 bg-danger-soft text-danger hover:bg-danger hover:text-white"
+                        : "bg-primary-btn text-primary-btn-fg hover:bg-primary-btn-hover"
+                    }`}
+                  >
+                    {opt.headline}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {showConfirmFallback && (
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => onReply({ kind: "confirm", confirmed: true })}
+                  className="h-7 bg-primary-btn px-3 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover transition-colors cursor-pointer"
+                >
+                  允许
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onReply({ kind: "confirm", confirmed: false })}
+                  className="h-7 border border-danger/40 bg-danger-soft px-3 text-[12px] font-medium text-danger hover:bg-danger hover:text-white transition-colors cursor-pointer"
+                >
+                  拒绝
+                </button>
+              </div>
+            )}
+
+            {parsed.hint && (
+              <div className="text-[11.5px] leading-[1.45] text-ink-muted select-text">
+                {parsed.hint}
+              </div>
+            )}
+
+            {showTextInput && (
+              <div className="flex items-center gap-2 pt-0.5">
+                <input
+                  type="text"
+                  value={replyText}
+                  onChange={(e) => setReplyText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && replyText.trim()) {
+                      onReply({ kind: "text", value: replyText.trim() });
+                    }
+                  }}
+                  placeholder={
+                    parsed.isMultiSelectInput
+                      ? "输入选项序号（如 1,3）或自定义内容，按 Enter 提交…"
+                      : "输入自定义回复，按 Enter 提交…"
+                  }
+                  className="h-8 flex-1 border border-line bg-canvas px-2.5 text-[12.5px] text-ink-strong placeholder:text-ink-muted focus:border-line-strong focus:outline-none select-text"
+                />
+                <button
+                  type="button"
+                  disabled={!replyText.trim()}
+                  onClick={() => onReply({ kind: "text", value: replyText.trim() })}
+                  className="h-8 bg-primary-btn px-3.5 text-[12px] font-medium text-primary-btn-fg hover:bg-primary-btn-hover disabled:opacity-45 transition-colors cursor-pointer"
+                >
+                  提交
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -594,6 +815,18 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [atBottom, setAtBottom] = useState(true);
   const [draft, setDraft] = useState("");
+  const [lightboxImage, setLightboxImage] = useState<ChatAttachment | null>(null);
+
+  useEffect(() => {
+    if (!lightboxImage) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setLightboxImage(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [lightboxImage]);
 
   const meta = timeline?.meta ?? defaultChatMeta();
   const entries = timeline?.entries ?? [];
@@ -733,6 +966,12 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
       onKeyDown={handlePaneKeyDown}
       className="relative flex h-full w-full min-h-0 min-w-0 flex-col overflow-hidden bg-canvas"
     >
+      {/* dsh-style Top Header Actions for Subagents & Background Jobs */}
+      <ChatSessionHeaderActions
+        meta={meta}
+        onRunCommand={(cmd) => void onSend(cmd, [])}
+      />
+
       {/* Scroll Viewport Wrapper */}
       <div className="relative min-h-0 min-w-0 flex-1">
         <div
@@ -780,7 +1019,10 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
                 if (item.kind === "exploration_cluster") {
                   return (
                     <div key={item.key} className={`min-w-0 ${spacing}`}>
-                      <ExplorationClusterRow tools={item.tools} />
+                      <ExplorationClusterRow
+                        tools={item.tools}
+                        onPreviewImage={setLightboxImage}
+                      />
                     </div>
                   );
                 }
@@ -812,11 +1054,18 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
                                   className="border border-line-subtle bg-canvas p-1 font-mono text-[11px] text-ink-2"
                                 >
                                   {att.data_b64 ? (
-                                    <img
-                                      src={`data:${att.mime_type};base64,${att.data_b64}`}
-                                      alt={att.name}
-                                      className="max-h-40 object-contain"
-                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => setLightboxImage(att)}
+                                      title={`点击查看大图 · ${att.name}`}
+                                      className="block cursor-pointer"
+                                    >
+                                      <img
+                                        src={`data:${att.mime_type};base64,${att.data_b64}`}
+                                        alt={att.name}
+                                        className="max-h-48 object-contain"
+                                      />
+                                    </button>
                                   ) : (
                                     <span>{att.path || att.name}</span>
                                   )}
@@ -863,7 +1112,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
                   case "tool_call":
                     return (
                       <div key={entry.id} className={`min-w-0 ${spacing}`}>
-                        <ToolCallRow entry={entry} />
+                        <ToolCallRow entry={entry} onPreviewImage={setLightboxImage} />
                       </div>
                     );
 
@@ -916,6 +1165,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
       {/* Docked Inline Approval Card */}
       {approvals[0] && (
         <InlineApprovalCard
+          key={approvals[0].id}
           approval={approvals[0]}
           onReply={(reply) => onApprove(approvals[0].id, reply)}
         />
@@ -1006,6 +1256,40 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
         onAbort={onAbort}
         onConfigure={onConfigure}
       />
+
+      {/* Square-cornered Fullscreen Image Lightbox */}
+      {lightboxImage && lightboxImage.data_b64 && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-6"
+          onClick={() => setLightboxImage(null)}
+        >
+          <div
+            className="flex max-h-full max-w-full flex-col border border-line-strong bg-elevated"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-4 border-b border-line bg-sidebar px-3 py-1.5">
+              <span className="truncate font-mono text-[11.5px] text-ink-strong">
+                {lightboxImage.name} · {lightboxImage.mime_type}
+              </span>
+              <button
+                type="button"
+                onClick={() => setLightboxImage(null)}
+                aria-label="关闭图片预览"
+                className="flex h-6 w-6 shrink-0 items-center justify-center border border-line bg-canvas text-ink-2 hover:bg-hover hover:text-ink-strong transition-colors cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="flex items-center justify-center overflow-auto bg-canvas p-3">
+              <img
+                src={`data:${lightboxImage.mime_type};base64,${lightboxImage.data_b64}`}
+                alt={lightboxImage.name}
+                className="max-h-[82vh] max-w-[86vw] object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

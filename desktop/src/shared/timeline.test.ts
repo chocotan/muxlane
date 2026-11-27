@@ -6,8 +6,10 @@ import {
   computeDiffRows,
   defaultChatMeta,
   orderPresetsPiFirst,
+  parseApprovalPrompt,
   summarizeToolInput,
   timelineFromHistory,
+  toggleMultiSelectNumber,
 } from "./timeline";
 
 describe("timeline reducer & display helpers", () => {
@@ -178,5 +180,108 @@ describe("usage reducer & formatStats helpers", () => {
     expect(computeCacheHitPct(1000, 3000)).toBe(75);
     expect(computeTps(200, 2000)).toBe("100");
     expect(computeTps(50, 2000)).toBe("25.0");
+  });
+
+  it("parses Pi/Pie select questions into aligned structured options and badge", () => {
+    const parsed = parseApprovalPrompt({
+      id: "q1",
+      agent: "pi_1",
+      source: "pi_extension_ui",
+      method: "select",
+      title: "[新闻偏好] 你最想了解马斯克哪方面的新闻？",
+      options: [
+        {
+          option_id: "1. 特斯拉与机器人 — 关注电动车、自动驾驶和机器人进展。",
+          label: "1. 特斯拉与机器人 — 关注电动车、自动驾驶和机器人进展。",
+          kind: "select",
+        },
+        {
+          option_id: "2. SpaceX 与星链 — 关注火箭发射、星舰和卫星互联网。",
+          label: "2. SpaceX 与星链 — 关注火箭发射、星舰和卫星互联网。",
+          kind: "select",
+        },
+        {
+          option_id: "3. Type something.",
+          label: "3. Type something.",
+          kind: "select",
+        },
+      ],
+      created_at_ms: 1,
+    });
+
+    expect(parsed.isQuestion).toBe(true);
+    expect(parsed.useListLayout).toBe(true);
+    expect(parsed.badge).toBe("新闻偏好");
+    expect(parsed.questionTitle).toBe("你最想了解马斯克哪方面的新闻？");
+    expect(parsed.options).toEqual([
+      {
+        optionId: "1. 特斯拉与机器人 — 关注电动车、自动驾驶和机器人进展。",
+        indexLabel: "1",
+        headline: "特斯拉与机器人",
+        description: "关注电动车、自动驾驶和机器人进展。",
+        isCustom: false,
+        isReject: false,
+      },
+      {
+        optionId: "2. SpaceX 与星链 — 关注火箭发射、星舰和卫星互联网。",
+        indexLabel: "2",
+        headline: "SpaceX 与星链",
+        description: "关注火箭发射、星舰和卫星互联网。",
+        isCustom: false,
+        isReject: false,
+      },
+      {
+        optionId: "3. Type something.",
+        indexLabel: "3",
+        headline: "自定义输入",
+        description: "填写其他回答",
+        isCustom: true,
+        isReject: false,
+      },
+    ]);
+  });
+
+  it("parses Pi multi-select input prompts and toggles indices cleanly", () => {
+    const parsed = parseApprovalPrompt({
+      id: "q2",
+      agent: "pi_1",
+      source: "pi_extension_ui",
+      method: "input",
+      title:
+        '[功能范围] 本次要修改哪些模块？\n\n1. Desktop — 桌面端界面\n2. Android — 移动端界面\n\nEnter the numbers of all that apply, comma-separated (e.g. "1,3"), or type a custom answer as plain text.',
+      options: [],
+      created_at_ms: 2,
+    });
+
+    expect(parsed.isQuestion).toBe(true);
+    expect(parsed.isInputOnly).toBe(true);
+    expect(parsed.isMultiSelectInput).toBe(true);
+    expect(parsed.badge).toBe("功能范围");
+    expect(parsed.questionTitle).toBe("本次要修改哪些模块？");
+    expect(parsed.embeddedOptions).toHaveLength(2);
+    expect(parsed.embeddedOptions[0].headline).toBe("Desktop");
+    expect(parsed.embeddedOptions[0].description).toBe("桌面端界面");
+
+    expect(toggleMultiSelectNumber("", "2")).toBe("2");
+    expect(toggleMultiSelectNumber("2", "1")).toBe("1,2");
+    expect(toggleMultiSelectNumber("1,2", "2")).toBe("1");
+  });
+
+  it("extracts question text for ask_user_question tool summaries", () => {
+    const summary = summarizeToolInput({
+      type: "tool_call",
+      id: "tc-1",
+      call_id: "c1",
+      name: "ask_user_question",
+      kind: "other",
+      input: {
+        questions: [{ header: "偏好", question: "你最想了解哪方面？", options: [] }],
+      },
+      locations: [],
+      state: "running",
+      is_error: false,
+      created_at_ms: 1,
+    });
+    expect(summary).toBe("你最想了解哪方面？");
   });
 });

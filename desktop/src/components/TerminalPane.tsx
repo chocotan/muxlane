@@ -4,6 +4,11 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Methods, type TermSubscribeResult } from "../shared/protocol";
+import {
+  decodeKittyImageBitmap,
+  KittyGraphicsScanner,
+  scanKittyPlaceholderSlices,
+} from "../shared/kittyGraphics";
 import { parseOsc52Payload } from "../shared/osc52";
 import { resolveCustomTerminalSequence } from "../shared/terminalKeys";
 import { encodeStringToBase64, type TermStreamChunk } from "../state/useMuxlaneStore";
@@ -119,6 +124,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   registerTermListener,
 }) => {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const themeRef = useRef<AppTheme>(theme);
@@ -242,18 +248,166 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         .catch(() => {});
     };
 
+    const kittyScanner = new KittyGraphicsScanner();
+    const kittyBitmaps = new Map<number, ImageBitmap>();
+    const directPlacements: Array<{
+      id: number;
+      absRow: number;
+      col: number;
+      cols?: number;
+      rows?: number;
+    }> = [];
+    let overlayRaf: number | null = null;
+    let disposed = false;
+
+    const clearKittyBitmaps = () => {
+      for (const bmp of kittyBitmaps.values()) {
+        try {
+          bmp.close();
+        } catch {
+          // ignore
+        }
+      }
+      kittyBitmaps.clear();
+      directPlacements.length = 0;
+    };
+
+    const drawKittyOverlay = () => {
+      overlayRaf = null;
+      if (disposed) return;
+      const canvas = overlayCanvasRef.current;
+      if (!canvas) return;
+      const screenEl = container.querySelector(".xterm-screen") as HTMLElement | null;
+      if (!screenEl) return;
+
+      const hostRect = container.getBoundingClientRect();
+      const screenRect = screenEl.getBoundingClientRect();
+      const width = Math.max(0, Math.round(screenRect.width));
+      const height = Math.max(0, Math.round(screenRect.height));
+      if (width === 0 || height === 0 || term.cols <= 0 || term.rows <= 0) return;
+
+      const left = screenRect.left - hostRect.left;
+      const top = screenRect.top - hostRect.top;
+      canvas.style.left = `${left}px`;
+      canvas.style.top = `${top}px`;
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+
+      const dpr = window.devicePixelRatio || 1;
+      const pixelW = Math.round(width * dpr);
+      const pixelH = Math.round(height * dpr);
+      if (canvas.width !== pixelW || canvas.height !== pixelH) {
+        canvas.width = pixelW;
+        canvas.height = pixelH;
+      }
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+
+      if (kittyBitmaps.size === 0) return;
+
+      const cellW = width / term.cols;
+      const cellH = height / term.rows;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+
+      // 1. Render Unicode Placeholder (U+10EEEE) placements (used by pi, pie, tmux passthrough)
+      const slices = scanKittyPlaceholderSlices(term, kittyScanner);
+      const renderedIds = new Set<number>();
+      for (const slice of slices) {
+        const bmp = kittyBitmaps.get(slice.imageId);
+        if (!bmp) continue;
+        renderedIds.add(slice.imageId);
+
+        const sx = (slice.srcColStart / slice.totalCols) * bmp.width;
+        const sy = (slice.srcRowStart / slice.totalRows) * bmp.height;
+        const sw = (slice.spanCols / slice.totalCols) * bmp.width;
+        const sh = (slice.spanRows / slice.totalRows) * bmp.height;
+        const dx = slice.screenCol * cellW;
+        const dy = slice.screenRow * cellH;
+        const dw = slice.spanCols * cellW;
+        const dh = slice.spanRows * cellH;
+        ctx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
+      }
+
+      // 2. Render direct `a=T` placements (non-placeholder Kitty tools)
+      const viewportY = term.buffer.active.viewportY;
+      for (const dp of directPlacements) {
+        if (renderedIds.has(dp.id)) continue;
+        const bmp = kittyBitmaps.get(dp.id);
+        if (!bmp) continue;
+        const drawCols = dp.cols ?? Math.max(1, Math.min(term.cols - dp.col, Math.ceil(bmp.width / cellW)));
+        const drawRows = dp.rows ?? Math.max(1, Math.ceil(bmp.height / cellH));
+        const screenRow = dp.absRow - viewportY;
+        if (screenRow + drawRows <= 0 || screenRow >= term.rows) continue;
+        ctx.drawImage(bmp, dp.col * cellW, screenRow * cellH, drawCols * cellW, drawRows * cellH);
+      }
+    };
+
+    const scheduleOverlayDraw = () => {
+      if (disposed || overlayRaf !== null) return;
+      overlayRaf = requestAnimationFrame(drawKittyOverlay);
+    };
+
     let isParsingReplay = false;
     const writeBytes = (bytes: Uint8Array, isReplay: boolean) => {
       if (bytes.length === 0) return;
+
+      const kittyRes = kittyScanner.process(bytes);
+      if (kittyRes.cleared) {
+        clearKittyBitmaps();
+        scheduleOverlayDraw();
+      }
+      if (!isReplay) {
+        for (const reply of kittyRes.replies) {
+          sendInput(reply);
+        }
+      }
+      for (const dp of kittyRes.directPlacements) {
+        directPlacements.push({
+          id: dp.id,
+          absRow: term.buffer.active.baseY + term.buffer.active.cursorY,
+          col: term.buffer.active.cursorX,
+          cols: dp.cols,
+          rows: dp.rows,
+        });
+        if (directPlacements.length > 64) directPlacements.shift();
+      }
+      for (const id of kittyRes.updatedImageIds) {
+        const stored = kittyScanner.getImage(id);
+        if (!stored) continue;
+        void decodeKittyImageBitmap(stored)
+          .then((bmp) => {
+            if (!bmp) return;
+            if (disposed) {
+              bmp.close();
+              return;
+            }
+            const prev = kittyBitmaps.get(id);
+            if (prev) prev.close();
+            kittyBitmaps.set(id, bmp);
+            scheduleOverlayDraw();
+          })
+          .catch(() => {
+            // ignore corrupt/unsupported image payloads
+          });
+      }
+
+      if (kittyRes.cleanBytes.length === 0) return;
       if (isReplay) {
         term.write("", () => {
           isParsingReplay = true;
         });
-        term.write(bytes, () => {
+        term.write(kittyRes.cleanBytes, () => {
           isParsingReplay = false;
+          scheduleOverlayDraw();
         });
       } else {
-        term.write(bytes);
+        term.write(kittyRes.cleanBytes, () => {
+          if (kittyScanner.hasImages()) scheduleOverlayDraw();
+        });
       }
     };
 
@@ -317,20 +471,31 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     });
 
     const dataDisposable = term.onData(sendInput);
+    const renderDisposable = term.onRender(() => {
+      if (kittyBitmaps.size > 0) scheduleOverlayDraw();
+    });
+    const scrollDisposable = term.onScroll(() => {
+      if (kittyBitmaps.size > 0) scheduleOverlayDraw();
+    });
 
     const resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(fitAndNotify);
+      requestAnimationFrame(() => {
+        fitAndNotify();
+        scheduleOverlayDraw();
+      });
     });
     resizeObserver.observe(container);
 
     let subId: string | null = null;
-    let disposed = false;
     setExited(false);
 
     const unregister = registerTermListener(agentId, (chunk) => {
       if (disposed) return;
       if (chunk.kind === "reset") {
         term.reset();
+        kittyScanner.reset();
+        clearKittyBitmaps();
+        scheduleOverlayDraw();
         writeBytes(chunk.bytes, chunk.isReplay !== false);
       } else if (chunk.kind === "append") {
         writeBytes(chunk.bytes, chunk.isReplay === true);
@@ -363,9 +528,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             const bytes = new Uint8Array(bin.length);
             for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
             term.reset();
+            kittyScanner.reset();
+            clearKittyBitmaps();
             writeBytes(bytes, true);
           }
-          requestAnimationFrame(fitAndNotify);
+          requestAnimationFrame(() => {
+            fitAndNotify();
+            scheduleOverlayDraw();
+          });
         })
         .catch((err) => {
           if (!disposed) {
@@ -376,10 +546,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
     return () => {
       disposed = true;
+      if (overlayRaf !== null) cancelAnimationFrame(overlayRaf);
       unregister();
       resizeObserver.disconnect();
       osc52Disposable.dispose();
+      renderDisposable.dispose();
+      scrollDisposable.dispose();
       dataDisposable.dispose();
+      clearKittyBitmaps();
       if (subId) {
         void window.muxlane.rpc(Methods.TERM_UNSUBSCRIBE, { sub_id: subId }).catch(() => {});
       }
@@ -399,7 +573,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       }}
       className="relative flex h-full min-h-0 flex-col bg-terminal-surface"
     >
-      <div ref={hostRef} className="min-h-0 flex-1 overflow-hidden px-1 py-0.5" />
+      <div className="relative min-h-0 flex-1 overflow-hidden px-1 py-0.5">
+        <div ref={hostRef} className="h-full w-full overflow-hidden" />
+        <canvas
+          ref={overlayCanvasRef}
+          className="pointer-events-none absolute top-0 left-0 z-10"
+        />
+      </div>
       {exited && (
         <div className="pointer-events-none absolute right-3 bottom-3 border border-line bg-elevated px-2 py-0.5 font-mono text-[11px] text-working select-none">
           终端已退出

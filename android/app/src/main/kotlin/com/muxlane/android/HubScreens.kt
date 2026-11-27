@@ -330,7 +330,7 @@ private fun HomeHubHeader(
                     Text(
                         when (state.hubTab) {
                             HubTab.FEED -> stringResource(R.string.app_name)
-                            HubTab.WORKSPACES -> activeHost?.machineName ?: stringResource(R.string.tab_workspaces)
+                            HubTab.WORKSPACES -> stringResource(R.string.tab_workspaces)
                             HubTab.AGENTS -> stringResource(R.string.tab_agents)
                             HubTab.BOTS -> stringResource(R.string.tab_bots)
                         },
@@ -361,17 +361,17 @@ private fun HomeHubHeader(
                     Row(
                         Modifier
                             .background(MuxAccentBg, Square)
-                            .border(BorderStroke(1.dp, MuxAccent), Square)
+                            .border(BorderStroke(1.dp, MuxCobalt.copy(alpha = 0.4f)), Square)
                             .clickable(onClick = onResumeTabs)
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                            .padding(horizontal = 9.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
-                        Icon(Icons.Outlined.Tab, null, tint = MuxAccent, modifier = Modifier.size(15.dp))
+                        Icon(Icons.Outlined.Tab, null, tint = MuxCobalt, modifier = Modifier.size(15.dp))
                         Text(
                             "${state.openTabs.size} 标签",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MuxAccent,
+                            color = MuxCobalt,
                             fontFamily = MonoFamily,
                         )
                     }
@@ -655,6 +655,7 @@ internal fun WorkspacesPane(
                             } else {
                                 items(projectAgents, key = { "ws_agent_${it.id}" }) { agent ->
                                     val chat = state.chatSessions[agent.id]
+                                    val chatOnly = isChatOnlySession(agent)
                                     val needsYou = agent.status == AgentStatus.BLOCKED ||
                                         agent.status == AgentStatus.FAILED ||
                                         (chat?.pendingApprovals ?: 0) > 0 ||
@@ -664,8 +665,11 @@ internal fun WorkspacesPane(
                                             agent = agent,
                                             projectName = project.displayName(),
                                             projectBranch = project.branch,
-                                            isChatCapable = chat != null,
-                                            driverLabel = driverBadgeLabel(agent.agentType, chat?.meta?.driver),
+                                            isChatCapable = chatOnly,
+                                            driverLabel = driverBadgeLabel(
+                                                agent.agentType,
+                                                if (chatOnly) chat?.meta?.driver ?: muxlane.chat.SessionDriverMode.PI_RPC else muxlane.chat.SessionDriverMode.TERMINAL_PTY,
+                                            ),
                                             pendingApprovalsCount = maxOf(
                                                 chat?.pendingApprovals ?: 0,
                                                 state.globalApprovals.count { it.agent == agent.id },
@@ -955,23 +959,23 @@ private fun AgentHubRowCard(
 ) {
     val now = System.currentTimeMillis()
     val borderColor = when {
-        isActiveTab -> MuxAccent
-        row.needsYou -> MuxYellow
+        isActiveTab -> MuxCobalt
+        row.needsYou -> MuxWarningLine
         else -> MuxLine
     }
     Surface(
         shape = Square,
-        color = if (isActiveTab) MuxAccentBg.copy(alpha = 0.45f) else MuxBg1,
+        color = if (isActiveTab) MuxAccentBg.copy(alpha = 0.55f) else MuxBg1,
         border = BorderStroke(1.dp, borderColor),
         modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
     ) {
         Row(
-            Modifier.padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
+            Modifier.padding(start = 12.dp, top = 11.dp, bottom = 11.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
         ) {
-            Box(Modifier.size(9.dp).background(statusColor(row.agent.status), Square))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Box(Modifier.size(8.dp).background(statusColor(row.agent.status), Square))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
                         row.agent.title,
@@ -981,7 +985,7 @@ private fun AgentHubRowCard(
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     if (!row.agent.seen) {
-                        Box(Modifier.background(MuxAccent, Square).padding(horizontal = 5.dp, vertical = 1.dp)) {
+                        Box(Modifier.background(MuxCobalt, Square).padding(horizontal = 5.dp, vertical = 1.dp)) {
                             Text("NEW", style = MaterialTheme.typography.labelSmall, color = MuxOnAccent, fontFamily = MonoFamily)
                         }
                     }
@@ -993,14 +997,13 @@ private fun AgentHubRowCard(
                     Box(
                         Modifier
                             .background(if (row.isChatCapable) MuxAccentBg else MuxBg2, Square)
-                            .border(BorderStroke(1.dp, if (row.isChatCapable) MuxAccent.copy(alpha = 0.4f) else MuxLine), Square)
-                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                            .border(BorderStroke(1.dp, if (row.isChatCapable) MuxCobalt.copy(alpha = 0.35f) else MuxLine), Square)
+                            .padding(horizontal = 6.dp, vertical = 1.dp),
                     ) {
                         Text(
                             row.driverLabel,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (row.isChatCapable) MuxAccent else MuxFg2,
-                            fontFamily = MonoFamily,
+                            color = if (row.isChatCapable) MuxCobalt else MuxFg1,
                         )
                     }
                     Text(
@@ -1056,24 +1059,24 @@ private fun DesktopHostCard(
     Surface(
         shape = Square,
         color = MuxBg1,
-        border = BorderStroke(1.dp, if (isCurrent) MuxAccent else MuxLine),
+        border = BorderStroke(1.dp, if (isCurrent) MuxCobalt else MuxLine),
         modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenWorkspaces),
     ) {
         Row(
-            Modifier.padding(12.dp),
+            Modifier.padding(13.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Box(
                 Modifier
-                    .size(36.dp)
+                    .size(38.dp)
                     .background(if (isCurrent) MuxAccentBg else MuxBg2, Square)
-                    .border(BorderStroke(1.dp, if (isCurrent) MuxAccent else MuxControlLine), Square),
+                    .border(BorderStroke(1.dp, if (isCurrent) MuxCobalt.copy(alpha = 0.45f) else MuxLine), Square),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Outlined.Computer, null, tint = if (isCurrent) MuxAccent else MuxFg1, modifier = Modifier.size(20.dp))
+                Icon(Icons.Outlined.Computer, null, tint = if (isCurrent) MuxCobalt else MuxFg1, modifier = Modifier.size(20.dp))
             }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(host.machineName ?: host.hostId, style = MaterialTheme.typography.titleMedium)
                 if (isCurrent) {
                     ConnectionBadgesRow(
@@ -1099,7 +1102,7 @@ private fun DesktopHostCard(
                 }
             }
             if (isCurrent) {
-                Text("查看工作区", style = MaterialTheme.typography.labelMedium, color = MuxAccent)
+                Text("工作区", style = MaterialTheme.typography.labelMedium, color = MuxCobalt)
             }
             IconButton(onClick = onRemove, modifier = Modifier.size(34.dp)) {
                 Icon(Icons.Outlined.DeleteOutline, stringResource(R.string.delete), tint = MuxFg2, modifier = Modifier.size(18.dp))
@@ -1286,9 +1289,38 @@ private fun NeedsYouApprovalSection(
             }
             approvals.take(4).forEach { approval ->
                 val agentName = snapshot?.agents?.find { it.id == approval.agent }?.title ?: approval.agent
-                Surface(shape = Square, color = MuxBg1, border = BorderStroke(1.dp, MuxWarningLine)) {
+                val parsed = parseApprovalPrompt(approval)
+                Surface(shape = Square, color = MuxBg1, border = BorderStroke(1.dp, MuxControlLine)) {
                     Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("$agentName · ${approval.title}", style = MaterialTheme.typography.labelLarge)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Box(
+                                Modifier
+                                    .background(if (parsed.isQuestion) MuxAccentBg else MuxWarningBg, Square)
+                                    .border(
+                                        BorderStroke(
+                                            1.dp,
+                                            if (parsed.isQuestion) MuxCobalt.copy(alpha = 0.28f) else MuxWarningLine,
+                                        ),
+                                        Square,
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 1.dp),
+                            ) {
+                                Text(
+                                    parsed.badge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (parsed.isQuestion) MuxCobalt else MuxWarningFg,
+                                )
+                            }
+                            Text(
+                                "$agentName · ${parsed.questionTitle}",
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         val previewText = approval.commandOrInput?.takeIf { it.isNotBlank() } ?: approval.message
                         if (!previewText.isNullOrBlank()) {
                             Text(
@@ -1300,37 +1332,56 @@ private fun NeedsYouApprovalSection(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        val allowOption = approval.options.firstOrNull {
-                            val k = it.kind.orEmpty().lowercase()
-                            "reject" !in k && "deny" !in k
-                        }
-                        val denyOption = approval.options.firstOrNull {
-                            val k = it.kind.orEmpty().lowercase()
-                            "reject" in k || "deny" in k
-                        }
-                        val allowReply = allowOption?.let { ApprovalReply.SelectedOption(it.optionId) } ?: ApprovalReply.Confirm(true)
-                        val denyReply = denyOption?.let { ApprovalReply.SelectedOption(it.optionId) } ?: ApprovalReply.Confirm(false)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                onClick = { onApprove(approval, allowReply) },
-                                shape = Square,
-                                colors = ButtonDefaults.buttonColors(containerColor = MuxGreen),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier.height(34.dp),
-                            ) { Text(allowOption?.label ?: stringResource(R.string.approve_allow), fontSize = 12.sp) }
-                            OutlinedButton(
-                                onClick = { onApprove(approval, denyReply) },
-                                shape = Square,
-                                border = BorderStroke(1.dp, MuxRed),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier.height(34.dp),
-                            ) { Text(denyOption?.label ?: stringResource(R.string.approve_deny), color = MuxRed, fontSize = 12.sp) }
-                            Spacer(Modifier.weight(1f))
-                            TextButton(
-                                onClick = { onOpenAgent(approval.agent) },
-                                shape = Square,
-                                modifier = Modifier.height(34.dp),
-                            ) { Text("查看会话", fontSize = 12.sp) }
+                        if (parsed.isQuestion || parsed.useListLayout) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = { onOpenAgent(approval.agent) },
+                                    shape = Square,
+                                    colors = ButtonDefaults.buttonColors(containerColor = MuxAccent),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp),
+                                ) { Text("前往回答", fontSize = 12.sp) }
+                                OutlinedButton(
+                                    onClick = { onApprove(approval, ApprovalReply.Cancel) },
+                                    shape = Square,
+                                    border = BorderStroke(1.dp, MuxControlLine),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp),
+                                ) { Text("取消", color = MuxFg1, fontSize = 12.sp) }
+                            }
+                        } else {
+                            val allowOption = approval.options.firstOrNull {
+                                val k = it.kind.orEmpty().lowercase()
+                                "reject" !in k && "deny" !in k
+                            }
+                            val denyOption = approval.options.firstOrNull {
+                                val k = it.kind.orEmpty().lowercase()
+                                "reject" in k || "deny" in k
+                            }
+                            val allowReply = allowOption?.let { ApprovalReply.SelectedOption(it.optionId) } ?: ApprovalReply.Confirm(true)
+                            val denyReply = denyOption?.let { ApprovalReply.SelectedOption(it.optionId) } ?: ApprovalReply.Confirm(false)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = { onApprove(approval, allowReply) },
+                                    shape = Square,
+                                    colors = ButtonDefaults.buttonColors(containerColor = MuxAccent),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp),
+                                ) { Text(allowOption?.label ?: stringResource(R.string.approve_allow), fontSize = 12.sp) }
+                                OutlinedButton(
+                                    onClick = { onApprove(approval, denyReply) },
+                                    shape = Square,
+                                    border = BorderStroke(1.dp, MuxRed),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp),
+                                ) { Text(denyOption?.label ?: stringResource(R.string.approve_deny), color = MuxRed, fontSize = 12.sp) }
+                                Spacer(Modifier.weight(1f))
+                                TextButton(
+                                    onClick = { onOpenAgent(approval.agent) },
+                                    shape = Square,
+                                    modifier = Modifier.height(34.dp),
+                                ) { Text("查看会话", fontSize = 12.sp) }
+                            }
                         }
                     }
                 }

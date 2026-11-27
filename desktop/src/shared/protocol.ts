@@ -137,6 +137,7 @@ export type TimelineEntry =
       title?: string | null;
       input: unknown;
       output?: string | null;
+      attachments?: ChatAttachment[];
       diff?: ToolDiff | null;
       exit_code?: number | null;
       locations: string[];

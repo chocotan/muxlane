@@ -80,6 +80,31 @@ impl AgentPreset {
                         args.insert(0, "acp".into());
                     }
                 }
+                AgentType::Agy => {
+                    if !args.iter().any(|a| a == "--input-format") {
+                        args.push("--input-format".into());
+                        args.push("stream-json".into());
+                    }
+                    if !args.iter().any(|a| a == "--output-format") {
+                        args.push("--output-format".into());
+                        args.push("stream-json".into());
+                    }
+                    if !args.iter().any(|a| a == "--dangerously-skip-permissions") {
+                        args.push("--dangerously-skip-permissions".into());
+                    }
+                    if let Some(session) = session_id_or_file.filter(|s| !s.is_empty()) {
+                        if !args.iter().any(|a| a == "--conversation") {
+                            args.push("--conversation".into());
+                            args.push(session.to_string());
+                        }
+                    }
+                    if !args
+                        .iter()
+                        .any(|a| a == "--print" || a == "-p" || a.starts_with("--print="))
+                    {
+                        args.push("--print=".into());
+                    }
+                }
                 _ => {
                     if !args
                         .iter()
@@ -109,8 +134,12 @@ impl AgentPreset {
                 args.push("-r".into());
                 args.push(session_id_or_file.to_string());
             }
-            AgentType::Kimi | AgentType::Agy => {
+            AgentType::Kimi => {
                 args.push("--resume".into());
+                args.push(session_id_or_file.to_string());
+            }
+            AgentType::Agy => {
+                args.push("--conversation".into());
                 args.push(session_id_or_file.to_string());
             }
             _ => {}

@@ -11,14 +11,14 @@ data class Cell(
 
 data class Cursor(var col: Int = 0, var row: Int = 0)
 
-const val DEFAULT_FG: Int = 0xFF39342C.toInt()
-const val DEFAULT_BG: Int = 0xFFF4EBDD.toInt()
+const val DEFAULT_FG: Int = 0xFF171A21.toInt()
+const val DEFAULT_BG: Int = 0xFFFAF9F6.toInt()
 
 private val ANSI16 = intArrayOf(
-    0xFF2F2B25.toInt(), 0xFFA3333F.toInt(), 0xFF356A42.toInt(), 0xFF7A5B17.toInt(),
-    0xFF355E8A.toInt(), 0xFF754D73.toInt(), 0xFF2C6868.toInt(), 0xFF5C554B.toInt(),
-    0xFF72695D.toInt(), 0xFFA92F3A.toInt(), 0xFF2F7042.toInt(), 0xFF745711.toInt(),
-    0xFF2F6098.toInt(), 0xFF7B4778.toInt(), 0xFF246A70.toInt(), 0xFF49433A.toInt(),
+    0xFF171A21.toInt(), 0xFFC81E1E.toInt(), 0xFF166534.toInt(), 0xFFA16207.toInt(),
+    0xFF1D4ED8.toInt(), 0xFF7E22CE.toInt(), 0xFF0E7490.toInt(), 0xFF4B5563.toInt(),
+    0xFF6B7280.toInt(), 0xFFDC2626.toInt(), 0xFF15803D.toInt(), 0xFFB45309.toInt(),
+    0xFF2563EB.toInt(), 0xFF9333EA.toInt(), 0xFF0891B2.toInt(), 0xFF111827.toInt(),
 )
 
 class VirtualTerminal(
