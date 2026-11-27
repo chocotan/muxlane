@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -35,10 +36,12 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.FormatSize
+import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NotificationsActive
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Tab
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
@@ -62,6 +65,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
@@ -69,6 +73,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import muxlane.chat.BackgroundJob
+import muxlane.chat.SessionSubagent
 import muxlane.protocol.AgentPreset
 import kotlin.math.roundToInt
 
@@ -94,13 +100,15 @@ internal fun SessionWorkspace(
 
     var showTabsSheet by remember { mutableStateOf(false) }
     var showQuickDrawer by remember { mutableStateOf(false) }
+    var showActivitySheet by remember { mutableStateOf(false) }
     var showDetailsSheet by remember { mutableStateOf(false) }
     var showQuickCommandsSheet by remember { mutableStateOf(false) }
     var showTextSizeSheet by remember { mutableStateOf(false) }
     var showSlashMenu by remember(agentId) { mutableStateOf(false) }
 
     if (!wideSplitMode) {
-        BackHandler(enabled = agentId != null) { model.closeAgent() }
+        BackHandler(enabled = showQuickDrawer) { showQuickDrawer = false }
+        BackHandler(enabled = !showQuickDrawer && agentId != null) { model.closeAgent() }
     }
 
     if (agentId == null) {
@@ -120,107 +128,152 @@ internal fun SessionWorkspace(
     val chatMeta = state.chatTimelines[agentId]?.meta ?: state.chatSessions[agentId]?.meta
     val isChatOnly = model.isChatOnlySession(agentId)
     val activePaneMode = if (isChatOnly) SessionPaneMode.CHAT else SessionPaneMode.TERMINAL
+    val subagents = chatMeta?.subagents.orEmpty()
+    val bgJobs = chatMeta?.backgroundJobs.orEmpty()
+    val runningActivityCount = subagents.count { it.status == "running" || it.status == "queued" } +
+        bgJobs.count { it.status == "running" }
+    val totalActivityCount = subagents.size + bgJobs.size
 
     val otherApproval = state.globalApprovals.firstOrNull { it.agent != agentId }
 
-    Column(Modifier.fillMaxSize().background(MuxBg0)) {
-        SessionWorkspaceHeader(
-            title = agent?.title ?: agentId,
-            subtitle = buildString {
-                append(project?.displayName() ?: agent?.project.orEmpty())
-                if (!agent?.project.isNullOrBlank()) append(" · ")
-                append(
-                    driverBadgeLabel(
-                        agent?.agentType ?: muxlane.protocol.AgentType.UNKNOWN,
-                        if (isChatOnly) chatMeta?.driver ?: muxlane.chat.SessionDriverMode.PI_RPC else muxlane.chat.SessionDriverMode.TERMINAL_PTY,
-                    ),
-                )
-            },
-            isStreaming = chatMeta?.isStreaming == true,
-            connected = state.connected,
-            e2eeActive = state.e2eeActive,
-            usingLan = state.usingLan,
-            wideSplitMode = wideSplitMode,
-            sidebarVisible = sidebarVisible,
-            sessionMode = activePaneMode,
-            onBack = model::closeAgent,
-            onToggleSidebar = onToggleSidebar,
-            onOpenQuickDrawer = { showQuickDrawer = true },
-            onOpenDetails = { showDetailsSheet = true },
-            onOpenTabsSheet = { showTabsSheet = true },
-            onOpenNewTab = { onOpenNewTab(agent?.project ?: state.snapshot?.projects?.firstOrNull()?.id) },
-            onOpenQuickCommands = { showQuickCommandsSheet = true },
-            onOpenTextSize = { showTextSizeSheet = true },
-            onClaimSize = model::claimTerminalSize,
-            onClearTerminal = model::clearTerminal,
-            onOpenDiagnostics = onOpenDiagnostics,
-            onCloseTab = { model.closeTab(agentId) },
-            onDeleteAgent = { model.requestDelete(agentId) },
-        )
-
-        if (tabSummaries.size > 1) {
-            SessionTabBar(
-                tabs = tabSummaries,
-                activeAgentId = agentId,
-                onStepTab = model::stepTab,
+    Box(Modifier.fillMaxSize().background(MuxBg1)) {
+        Column(Modifier.fillMaxSize()) {
+            SessionWorkspaceHeader(
+                title = agent?.title ?: agentId,
+                subtitle = buildString {
+                    append(project?.displayName() ?: agent?.project.orEmpty())
+                    if (!agent?.project.isNullOrBlank()) append(" · ")
+                    append(
+                        driverBadgeLabel(
+                            agent?.agentType ?: muxlane.protocol.AgentType.UNKNOWN,
+                            if (isChatOnly) chatMeta?.driver ?: muxlane.chat.SessionDriverMode.PI_RPC else muxlane.chat.SessionDriverMode.TERMINAL_PTY,
+                        ),
+                    )
+                },
+                isStreaming = chatMeta?.isStreaming == true,
+                connected = state.connected,
+                wideSplitMode = wideSplitMode,
+                sidebarVisible = sidebarVisible,
+                sessionMode = activePaneMode,
+                runningActivityCount = runningActivityCount,
+                totalActivityCount = totalActivityCount,
+                onToggleSidebar = onToggleSidebar,
+                onOpenQuickDrawer = { showQuickDrawer = true },
+                onOpenActivity = { showActivitySheet = true },
+                onOpenDetails = { showDetailsSheet = true },
                 onOpenTabsSheet = { showTabsSheet = true },
                 onOpenNewTab = { onOpenNewTab(agent?.project ?: state.snapshot?.projects?.firstOrNull()?.id) },
+                onOpenQuickCommands = { showQuickCommandsSheet = true },
+                onOpenTextSize = { showTextSizeSheet = true },
+                onClaimSize = model::claimTerminalSize,
+                onClearTerminal = model::clearTerminal,
+                onOpenDiagnostics = onOpenDiagnostics,
+                onCloseTab = { model.closeTab(agentId) },
+                onDeleteAgent = { model.requestDelete(agentId) },
             )
-        }
 
-        state.error?.let { err ->
-            Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) { ErrorPanel(err) }
-        }
+            state.error?.let { err ->
+                Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) { ErrorPanel(err) }
+            }
 
-        if (otherApproval != null) {
-            val otherAgentTitle = state.snapshot?.agents?.find { it.id == otherApproval.agent }?.title ?: otherApproval.agent
-            Surface(
-                color = MuxWarningBg,
-                border = BorderStroke(1.dp, MuxWarningLine),
-                shape = Square,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { model.openAgent(otherApproval.agent) },
-            ) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+            if (otherApproval != null) {
+                val otherAgentTitle = state.snapshot?.agents?.find { it.id == otherApproval.agent }?.title ?: otherApproval.agent
+                Surface(
+                    color = MuxAccentBg,
+                    border = BorderStroke(1.dp, MuxCobalt.copy(alpha = 0.25f)),
+                    shape = Square,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { model.openAgent(otherApproval.agent) },
                 ) {
-                    Icon(Icons.Outlined.NotificationsActive, null, tint = MuxWarningFg, modifier = Modifier.size(16.dp))
-                    Text(
-                        "$otherAgentTitle 等待审批 · 点击切换处理",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MuxWarningFg,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(Icons.Outlined.NotificationsActive, null, tint = MuxCobalt, modifier = Modifier.size(16.dp))
+                        Text(
+                            "$otherAgentTitle 等待回复 · 点击切换",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MuxFg0,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = MuxCobalt, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (activePaneMode == SessionPaneMode.CHAT) {
+                    ChatTimelinePane(
+                        model = model,
+                        agentId = agentId,
+                        state = state,
+                        showSlashMenu = showSlashMenu,
+                        onToggleSlash = { showSlashMenu = !showSlashMenu },
+                        onDismissSlash = { showSlashMenu = false },
+                        modifier = Modifier.fillMaxSize(),
                     )
-                    Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = MuxWarningFg, modifier = Modifier.size(16.dp))
+                } else {
+                    TerminalPane(
+                        model = model,
+                        agentId = agentId,
+                        state = state,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
             }
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (activePaneMode == SessionPaneMode.CHAT) {
-                ChatTimelinePane(
-                    model = model,
-                    agentId = agentId,
-                    state = state,
-                    showSlashMenu = showSlashMenu,
-                    onToggleSlash = { showSlashMenu = !showSlashMenu },
-                    onDismissSlash = { showSlashMenu = false },
-                    modifier = Modifier.fillMaxSize(),
+        // Unified dsh-style Left Slide-Out Workspace Drawer on phones (reuses exact WorkspacesPane!)
+        if (!wideSplitMode && showQuickDrawer) {
+            Box(Modifier.fillMaxSize()) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.28f))
+                        .clickable { showQuickDrawer = false },
                 )
-            } else {
-                TerminalPane(
-                    model = model,
-                    agentId = agentId,
-                    state = state,
-                    modifier = Modifier.fillMaxSize(),
-                )
+                Row(Modifier.fillMaxSize()) {
+                    Surface(
+                        modifier = Modifier.width(308.dp).fillMaxHeight(),
+                        shape = Square,
+                        color = MuxBg0,
+                    ) {
+                        WorkspacesPane(
+                            model = model,
+                            state = state,
+                            showSidebarChrome = true,
+                            onOpenNewTab = { projId ->
+                                showQuickDrawer = false
+                                onOpenNewTab(projId)
+                            },
+                            onOpenDiagnostics = {
+                                showQuickDrawer = false
+                                onOpenDiagnostics()
+                            },
+                            onHideSidebar = { showQuickDrawer = false },
+                            onAfterSelectAgent = { showQuickDrawer = false },
+                        )
+                    }
+                    Box(Modifier.width(1.dp).fillMaxHeight().background(MuxControlLine))
+                }
             }
         }
+    }
+
+    if (showActivitySheet) {
+        SessionActivitySheet(
+            subagents = subagents,
+            bgJobs = bgJobs,
+            onRunCommand = { cmd ->
+                showActivitySheet = false
+                model.sendChatPrompt(cmd, steer = false)
+            },
+            onDismiss = { showActivitySheet = false },
+        )
     }
 
     if (showTabsSheet) {
@@ -237,22 +290,6 @@ internal fun SessionWorkspace(
                 onOpenNewTab(agent?.project ?: state.snapshot?.projects?.firstOrNull()?.id)
             },
             onDismiss = { showTabsSheet = false },
-        )
-    }
-
-    if (showQuickDrawer) {
-        WorkspaceQuickDrawerSheet(
-            state = state,
-            activeAgentId = agentId,
-            onSelectAgent = { targetId ->
-                showQuickDrawer = false
-                model.openAgent(targetId)
-            },
-            onNewSession = { projId ->
-                showQuickDrawer = false
-                onOpenNewTab(projId)
-            },
-            onDismiss = { showQuickDrawer = false },
         )
     }
 
@@ -279,11 +316,7 @@ internal fun SessionWorkspace(
             onRun = { cmd ->
                 showQuickCommandsSheet = false
                 if (activePaneMode == SessionPaneMode.CHAT) {
-                    if (cmd.command == "/clear" || cmd.command == "/compact") {
-                        model.sendChatPrompt(cmd.command, steer = false)
-                    } else {
-                        model.sendChatPrompt(cmd.command, steer = false)
-                    }
+                    model.sendChatPrompt(cmd.command, steer = false)
                 } else {
                     model.sendInput(cmd.command)
                 }
@@ -314,11 +347,11 @@ private fun EmptySessionSplitPlaceholder(
     onOpenDiagnostics: () -> Unit,
 ) {
     Column(
-        Modifier.fillMaxSize().background(MuxBg0).padding(32.dp),
+        Modifier.fillMaxSize().background(MuxBg1).padding(32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(Icons.Outlined.Terminal, null, tint = MuxFg2, modifier = Modifier.size(40.dp))
+        Icon(Icons.Outlined.Terminal, null, tint = MuxFg2, modifier = Modifier.size(38.dp))
         Spacer(Modifier.height(10.dp))
         Text(stringResource(R.string.no_open_tab_title), style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(4.dp))
@@ -355,14 +388,14 @@ private fun SessionWorkspaceHeader(
     subtitle: String,
     isStreaming: Boolean,
     connected: Boolean,
-    e2eeActive: Boolean,
-    usingLan: Boolean,
     wideSplitMode: Boolean,
     sidebarVisible: Boolean,
     sessionMode: SessionPaneMode,
-    onBack: () -> Unit,
+    runningActivityCount: Int,
+    totalActivityCount: Int,
     onToggleSidebar: (() -> Unit)?,
     onOpenQuickDrawer: () -> Unit,
+    onOpenActivity: () -> Unit,
     onOpenDetails: () -> Unit,
     onOpenTabsSheet: () -> Unit,
     onOpenNewTab: () -> Unit,
@@ -378,20 +411,27 @@ private fun SessionWorkspaceHeader(
     Surface(color = MuxBg1, contentColor = MuxFg0) {
         Column(Modifier.fillMaxWidth().statusBarsPadding()) {
             Row(
-                Modifier.fillMaxWidth().height(54.dp).padding(end = 6.dp),
+                Modifier.fillMaxWidth().height(50.dp).padding(start = 4.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                if (wideSplitMode && onToggleSidebar != null) {
-                    IconButton(onClick = onToggleSidebar, modifier = Modifier.size(40.dp)) {
-                        Icon(Icons.AutoMirrored.Outlined.ViewSidebar, if (sidebarVisible) "收起边栏" else "展开边栏", tint = MuxFg1, modifier = Modifier.size(20.dp))
-                    }
-                } else {
-                    IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back), tint = MuxFg0, modifier = Modifier.size(20.dp))
-                    }
-                    IconButton(onClick = onOpenQuickDrawer, modifier = Modifier.size(36.dp)) {
-                        Icon(Icons.Outlined.Menu, stringResource(R.string.workspace_drawer_title), tint = MuxFg1, modifier = Modifier.size(19.dp))
-                    }
+                // Single dsh sidebar/drawer toggle (zero duplicate back + menu buttons)
+                IconButton(
+                    onClick = {
+                        if (wideSplitMode && onToggleSidebar != null) {
+                            onToggleSidebar()
+                        } else {
+                            onOpenQuickDrawer()
+                        }
+                    },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Outlined.ViewSidebar,
+                        if (wideSplitMode && sidebarVisible) "收起边栏" else "工作区侧栏",
+                        tint = MuxFg1,
+                        modifier = Modifier.size(20.dp),
+                    )
                 }
 
                 Column(
@@ -415,7 +455,7 @@ private fun SessionWorkspaceHeader(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         Box(Modifier.size(6.dp).background(if (connected) MuxGreen else MuxRed, Square))
                         Text(
-                            subtitle + (if (e2eeActive) " · E2EE" else "") + (if (usingLan) " · LAN" else ""),
+                            subtitle,
                             style = MaterialTheme.typography.labelSmall,
                             color = MuxFg2,
                             maxLines = 1,
@@ -424,37 +464,48 @@ private fun SessionWorkspaceHeader(
                     }
                 }
 
-                Box(
-                    Modifier
-                        .background(if (sessionMode == SessionPaneMode.CHAT) MuxAccentBg else MuxBg2, Square)
-                        .border(
-                            BorderStroke(1.dp, if (sessionMode == SessionPaneMode.CHAT) MuxCobalt.copy(alpha = 0.4f) else MuxLine),
-                            Square,
+                // dsh-style top header action chip for Subagents & Background Jobs (only when non-empty)
+                if (totalActivityCount > 0) {
+                    Row(
+                        Modifier
+                            .background(if (runningActivityCount > 0) MuxAccentBg else MuxBg2, Square)
+                            .border(
+                                BorderStroke(1.dp, if (runningActivityCount > 0) MuxCobalt.copy(alpha = 0.35f) else MuxControlLine),
+                                Square,
+                            )
+                            .clickable(onClick = onOpenActivity)
+                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Layers,
+                            contentDescription = "子代理与后台任务",
+                            tint = if (runningActivityCount > 0) MuxCobalt else MuxFg1,
+                            modifier = Modifier.size(14.dp),
                         )
-                        .padding(horizontal = 7.dp, vertical = 3.dp),
-                ) {
-                    Text(
-                        if (sessionMode == SessionPaneMode.CHAT) "CHAT" else "CLI",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (sessionMode == SessionPaneMode.CHAT) MuxCobalt else MuxFg1,
-                        fontFamily = MonoFamily,
-                    )
+                        Text(
+                            if (runningActivityCount > 0) "$runningActivityCount" else "$totalActivityCount",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (runningActivityCount > 0) MuxCobalt else MuxFg1,
+                            fontFamily = MonoFamily,
+                        )
+                    }
+                }
+
+                IconButton(onClick = onOpenNewTab, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Outlined.Add, stringResource(R.string.new_tab_title), tint = MuxFg1, modifier = Modifier.size(19.dp))
                 }
 
                 Box {
-                    IconButton(onClick = { moreExpanded = true }, modifier = Modifier.size(40.dp)) {
-                        Icon(Icons.Outlined.MoreVert, "更多操作", tint = MuxFg1, modifier = Modifier.size(20.dp))
+                    IconButton(onClick = { moreExpanded = true }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Outlined.MoreVert, "更多操作", tint = MuxFg1, modifier = Modifier.size(19.dp))
                     }
                     DropdownMenu(expanded = moreExpanded, onDismissRequest = { moreExpanded = false }) {
                         DropdownMenuItem(
                             text = { Text("全部已打开标签") },
                             leadingIcon = { Icon(Icons.Outlined.Tab, null) },
                             onClick = { moreExpanded = false; onOpenTabsSheet() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.new_tab_title)) },
-                            leadingIcon = { Icon(Icons.Outlined.Add, null) },
-                            onClick = { moreExpanded = false; onOpenNewTab() },
                         )
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.quick_commands)) },
@@ -502,139 +553,7 @@ private fun SessionWorkspaceHeader(
     }
 }
 
-@Composable
-private fun SessionTabBar(
-    tabs: List<SessionTabSummary>,
-    activeAgentId: String,
-    onStepTab: (Int) -> Unit,
-    onOpenTabsSheet: () -> Unit,
-    onOpenNewTab: () -> Unit,
-) {
-    val activeIndex = tabs.indexOfFirst { it.agentId == activeAgentId }.coerceAtLeast(0)
-    val active = tabs.getOrNull(activeIndex)
-    val hasPrev = activeIndex > 0
-    val hasNext = activeIndex < tabs.lastIndex
-    val otherNeedsYou = tabs.any { it.agentId != activeAgentId && it.group == TabPriorityGroup.NEEDS_YOU }
-    var dragAccum by remember(activeAgentId) { mutableFloatStateOf(0f) }
 
-    Surface(color = MuxBg0, contentColor = MuxFg0) {
-        Column(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .height(40.dp)
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (tabs.size > 1) {
-                    Box(
-                        Modifier
-                            .size(28.dp)
-                            .background(MuxBg1, Square)
-                            .border(BorderStroke(1.dp, MuxLine), Square)
-                            .clickable(enabled = hasPrev) { onStepTab(-1) },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Outlined.KeyboardArrowLeft,
-                            "上一个标签",
-                            tint = if (hasPrev) MuxFg1 else MuxControlLine,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
-                }
-
-                Row(
-                    Modifier
-                        .weight(1f)
-                        .height(32.dp)
-                        .background(MuxBg1, Square)
-                        .border(BorderStroke(1.dp, MuxControlLine), Square)
-                        .pointerInput(activeAgentId, tabs.size) {
-                            detectHorizontalDragGestures(
-                                onDragStart = { dragAccum = 0f },
-                                onDragEnd = {
-                                    when {
-                                        dragAccum < -48f && hasNext -> onStepTab(1)
-                                        dragAccum > 48f && hasPrev -> onStepTab(-1)
-                                    }
-                                    dragAccum = 0f
-                                },
-                                onDragCancel = { dragAccum = 0f },
-                            ) { _, delta -> dragAccum += delta }
-                        }
-                        .clickable(onClick = onOpenTabsSheet)
-                        .padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    if (active != null) {
-                        Box(Modifier.size(7.dp).background(statusColor(active.status), Square))
-                        Text(
-                            active.title,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MuxFg0,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                    } else {
-                        Text("选择标签", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-                    }
-                    Row(
-                        Modifier
-                            .background(if (otherNeedsYou) MuxWarningBg else MuxBg2, Square)
-                            .border(BorderStroke(1.dp, if (otherNeedsYou) MuxWarningLine else MuxLine), Square)
-                            .padding(horizontal = 5.dp, vertical = 1.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
-                    ) {
-                        if (otherNeedsYou) {
-                            Box(Modifier.size(5.dp).background(MuxYellow, Square))
-                        }
-                        Text(
-                            "${tabs.size} 标签",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (otherNeedsYou) MuxWarningFg else MuxFg1,
-                            fontFamily = MonoFamily,
-                        )
-                    }
-                }
-
-                if (tabs.size > 1) {
-                    Box(
-                        Modifier
-                            .size(28.dp)
-                            .background(MuxBg1, Square)
-                            .border(BorderStroke(1.dp, MuxLine), Square)
-                            .clickable(enabled = hasNext) { onStepTab(1) },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Outlined.KeyboardArrowRight,
-                            "下一个标签",
-                            tint = if (hasNext) MuxFg1 else MuxControlLine,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
-                }
-
-                Box(
-                    Modifier
-                        .size(32.dp)
-                        .background(MuxAccent, Square)
-                        .border(BorderStroke(1.dp, MuxAccent), Square)
-                        .clickable(onClick = onOpenNewTab),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Outlined.Add, stringResource(R.string.new_tab_title), tint = MuxOnAccent, modifier = Modifier.size(18.dp))
-                }
-            }
-            HorizontalDivider(color = MuxLine)
-        }
-    }
-}
 
 @Composable
 private fun OpenTabsSheet(
@@ -927,72 +846,154 @@ private fun AgentPresetTile(
 }
 
 @Composable
-private fun WorkspaceQuickDrawerSheet(
-    state: UiState,
-    activeAgentId: String,
-    onSelectAgent: (String) -> Unit,
-    onNewSession: (String) -> Unit,
+private fun SessionActivitySheet(
+    subagents: List<SessionSubagent>,
+    bgJobs: List<BackgroundJob>,
+    onRunCommand: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val snapshot = state.snapshot
-    val grouped = snapshot?.agents.orEmpty().groupBy { it.project }
     MuxSheetFrame(
         onDismiss = onDismiss,
-        title = stringResource(R.string.workspace_drawer_title),
-        subtitle = state.pairing?.machineName ?: state.pairing?.hostId,
+        title = "子代理与后台任务",
+        subtitle = buildString {
+            if (subagents.isNotEmpty()) append("子代理 ${subagents.size}")
+            if (subagents.isNotEmpty() && bgJobs.isNotEmpty()) append(" · ")
+            if (bgJobs.isNotEmpty()) append("后台任务 ${bgJobs.size}")
+        },
     ) {
         Column(
-            Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            snapshot?.projects.orEmpty().forEach { project ->
-                val list = grouped[project.id].orEmpty()
+            if (subagents.isNotEmpty()) {
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Icon(Icons.Outlined.FolderOpen, null, tint = MuxFg2, modifier = Modifier.size(16.dp))
-                        Text(project.displayName(), style = MaterialTheme.typography.titleMedium)
+                        Icon(Icons.Outlined.SmartToy, null, tint = MuxFg1, modifier = Modifier.size(16.dp))
+                        Text("子代理 (${subagents.size})", style = MaterialTheme.typography.labelLarge, color = MuxFg0)
                     }
                     Text(
-                        "+ 新建",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MuxAccent,
-                        modifier = Modifier.clickable { onNewSession(project.id) }.padding(4.dp),
+                        "/agents",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MuxCobalt,
+                        fontFamily = MonoFamily,
+                        modifier = Modifier
+                            .background(MuxAccentBg, Square)
+                            .border(BorderStroke(1.dp, MuxCobalt.copy(alpha = 0.28f)), Square)
+                            .clickable { onRunCommand("/agents") }
+                            .padding(horizontal = 7.dp, vertical = 2.dp),
                     )
                 }
-                if (list.isEmpty()) {
-                    Text("暂无活动会话", style = MaterialTheme.typography.bodySmall, color = MuxFg2, modifier = Modifier.padding(start = 22.dp))
-                } else {
-                    list.forEach { agent ->
-                        val active = agent.id == activeAgentId
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .border(BorderStroke(1.dp, MuxControlLine), Square)
+                        .background(MuxBg1, Square),
+                ) {
+                    subagents.forEachIndexed { idx, sub ->
+                        if (idx > 0) HorizontalDivider(color = MuxLine)
+                        val isRunning = sub.status == "running" || sub.status == "queued"
+                        val dotColor = when {
+                            isRunning -> MuxCobalt
+                            sub.status == "completed" -> MuxGreen
+                            sub.status == "error" || sub.status == "interrupted" -> MuxRed
+                            else -> MuxFg2
+                        }
                         Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .background(if (active) MuxAccentBg else MuxBg0, Square)
-                                .border(BorderStroke(1.dp, if (active) MuxAccent else MuxLine), Square)
-                                .clickable { onSelectAgent(agent.id) }
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.Top,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Box(Modifier.size(8.dp).background(statusColor(agent.status), Square))
-                            Text(
-                                agent.title,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                driverBadgeLabel(agent.agentType, state.chatSessions[agent.id]?.meta?.driver),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MuxFg2,
-                                fontFamily = MonoFamily,
-                            )
+                            Box(Modifier.padding(top = 6.dp).size(7.dp).background(dotColor, Square))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    sub.description.ifBlank { sub.agent },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MuxFg0,
+                                )
+                                Text(
+                                    buildString {
+                                        append(sub.agent)
+                                        append(" · ")
+                                        append(if (sub.turns > 0) "${sub.turns} 轮" else sub.status)
+                                        sub.activeTool?.takeIf { isRunning && it.isNotBlank() }?.let { append(" · $it") }
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MuxFg2,
+                                    fontFamily = MonoFamily,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (bgJobs.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Outlined.Layers, null, tint = MuxFg1, modifier = Modifier.size(16.dp))
+                        Text("后台任务 (${bgJobs.size})", style = MaterialTheme.typography.labelLarge, color = MuxFg0)
+                    }
+                    Text(
+                        "/jobs",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MuxCobalt,
+                        fontFamily = MonoFamily,
+                        modifier = Modifier
+                            .background(MuxAccentBg, Square)
+                            .border(BorderStroke(1.dp, MuxCobalt.copy(alpha = 0.28f)), Square)
+                            .clickable { onRunCommand("/jobs") }
+                            .padding(horizontal = 7.dp, vertical = 2.dp),
+                    )
+                }
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .border(BorderStroke(1.dp, MuxControlLine), Square)
+                        .background(MuxBg1, Square),
+                ) {
+                    bgJobs.forEachIndexed { idx, job ->
+                        if (idx > 0) HorizontalDivider(color = MuxLine)
+                        val isRunning = job.status == "running"
+                        val dotColor = when {
+                            isRunning -> MuxCobalt
+                            job.status == "completed" -> MuxGreen
+                            job.status == "failed" || job.status == "killed" -> MuxRed
+                            else -> MuxFg2
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Box(Modifier.padding(top = 6.dp).size(7.dp).background(dotColor, Square))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    job.description.ifBlank { job.command.orEmpty().ifBlank { job.name } },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MuxFg0,
+                                )
+                                Text(
+                                    buildString {
+                                        append(job.name)
+                                        append(" · ")
+                                        append(if (isRunning) "运行中" else job.status)
+                                        job.exitCode?.let { append(" · exit $it") }
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MuxFg2,
+                                    fontFamily = MonoFamily,
+                                )
+                            }
                         }
                     }
                 }

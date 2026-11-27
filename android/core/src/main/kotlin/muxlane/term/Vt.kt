@@ -11,8 +11,8 @@ data class Cell(
 
 data class Cursor(var col: Int = 0, var row: Int = 0)
 
-const val DEFAULT_FG: Int = 0xFF171A21.toInt()
-const val DEFAULT_BG: Int = 0xFFFAF9F6.toInt()
+const val DEFAULT_FG: Int = 0xFF0F1115.toInt()
+const val DEFAULT_BG: Int = 0xFFFFFFFF.toInt()
 
 private val ANSI16 = intArrayOf(
     0xFF171A21.toInt(), 0xFFC81E1E.toInt(), 0xFF166534.toInt(), 0xFFA16207.toInt(),

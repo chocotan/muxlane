@@ -16,44 +16,44 @@ import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-// Porcelain Editorial & Obsidian Ink palette (matching Desktop Orca aesthetic, 0px square geometry)
-val MuxCanvas = Color(0xFFF4F2ED)
-val MuxBg0 = Color(0xFFF9F8F5)
-val MuxBg1 = Color(0xFFFFFFFF)
-val MuxBg2 = Color(0xFFF2F0EB)
-val MuxBg3 = Color(0xFFE7E4DC)
-val MuxLine = Color(0xFFE6E3DC)
-val MuxControlLine = Color(0xFFD0CCC2)
-val MuxFg0 = Color(0xFF14171F)
-val MuxFg1 = Color(0xFF3E4451)
-val MuxFg2 = Color(0xFF707786)
+// DeepSeek Harness (dsh) Cool-Neutral Light palette with strict 0px square geometry
+val MuxCanvas = Color(0xFFF1F3F5)
+val MuxBg0 = Color(0xFFF9FAFB)       // Sidebar / workspace browser surface (--dsw-static-neutral-bluish-50)
+val MuxBg1 = Color(0xFFFFFFFF)       // Pure white main canvas / cards (--dsw-static-neutral-bluish-00)
+val MuxBg2 = Color(0xFFF5F6F7)       // Subtle chip / header / dock surface (--dsw-static-neutral-bluish-60)
+val MuxBg3 = Color(0xFFEDF0F4)       // Selected row highlight (--dsw-static-neutral-bluish-90)
+val MuxLine = Color(0xFFEAECEF)      // Hairline structural divider
+val MuxControlLine = Color(0xFFD9DFE8) // Interactive control hairline border
+val MuxFg0 = Color(0xFF0F1115)       // Primary ink (--dsw-static-neutral-bluish-1000)
+val MuxFg1 = Color(0xFF43454A)       // Secondary ink (--dsw-static-neutral-bluish-750)
+val MuxFg2 = Color(0xFF61666B)       // Tertiary / muted ink (--dsw-static-neutral-bluish-700)
 
-val MuxAccent = Color(0xFF181C24)
-val MuxCobalt = Color(0xFF2563EB)
-val MuxAccentBg = Color(0xFFEFF4FF)
-val MuxUserSurface = Color(0xFFF0EEE8)
-val MuxCodeBg = Color(0xFFF5F4F0)
-val MuxCodeHeader = Color(0xFFECEAE4)
-val MuxGreen = Color(0xFF16803C)
-val MuxYellow = Color(0xFFB45309)
+val MuxAccent = Color(0xFF0F1115)    // Crisp obsidian primary action fill (--dsw-alias-button-primary-fill)
+val MuxCobalt = Color(0xFF4176E6)    // DeepSeek Blue active accent (--dsw-static-deepseek-500)
+val MuxAccentBg = Color(0xFFEDF3FE)  // Soft DeepSeek Blue tint (--dsw-static-deepseek-50)
+val MuxUserSurface = Color(0xFFEDF3FE) // dsh signature light user message fill (--dsw-specific-bubble)
+val MuxCodeBg = Color(0xFFF9FAFB)
+val MuxCodeHeader = Color(0xFFF1F3F5)
+val MuxGreen = Color(0xFF16A34A)
+val MuxYellow = Color(0xFFD97706)
 val MuxRed = Color(0xFFDC2626)
 val MuxOnAccent = Color.White
 
-// Porcelain Light terminal surface (matching Desktop Porcelain Light theme)
-val TerminalSurface = Color(0xFFFAF9F6)
+// Pure Light terminal surface aligned with dsh light aesthetic
+val TerminalSurface = Color(0xFFFFFFFF)
 val TerminalKeycap = Color(0xFFFFFFFF)
-val TerminalBorder = Color(0xFFD0CCC2)
-val TerminalDivider = Color(0xFFE6E3DC)
-val TerminalForeground = Color(0xFF171A21)
-val TerminalMuted = Color(0xFF6B7280)
-val TerminalAccent = Color(0xFF2563EB)
+val TerminalBorder = Color(0xFFD9DFE8)
+val TerminalDivider = Color(0xFFEAECEF)
+val TerminalForeground = Color(0xFF0F1115)
+val TerminalMuted = Color(0xFF61666B)
+val TerminalAccent = Color(0xFF4176E6)
 
 val MuxErrorBg = Color(0xFFFEF2F2)
 val MuxErrorFg = Color(0xFFB91C1C)
 val MuxErrorLine = Color(0xFFFECACA)
 
-val MuxWarningBg = Color(0xFFFFFBEB)
-val MuxWarningFg = Color(0xFF92400E)
+val MuxWarningBg = Color(0xFFFEF5E7)
+val MuxWarningFg = Color(0xFFB45309)
 val MuxWarningLine = Color(0xFFFDE68A)
 
 private val colors = lightColorScheme(
@@ -63,9 +63,9 @@ private val colors = lightColorScheme(
     onPrimaryContainer = MuxFg0,
     secondary = MuxCobalt,
     secondaryContainer = MuxBg2,
-    background = MuxBg0,
+    background = MuxBg1,
     surface = MuxBg1,
-    surfaceVariant = MuxBg2,
+    surfaceVariant = MuxBg0,
     onSurface = MuxFg0,
     onSurfaceVariant = MuxFg2,
     outline = MuxControlLine,

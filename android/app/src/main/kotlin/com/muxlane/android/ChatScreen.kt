@@ -308,7 +308,7 @@ internal fun ChatTimelinePane(
         fontScale = baseDensity.fontScale * state.chatTextScale,
     )
 
-    Column(modifier.fillMaxSize().background(MuxBg0)) {
+    Column(modifier.fillMaxSize().background(MuxBg1)) {
         if (meta != null && (meta.currentModel != null || meta.availableModels.isNotEmpty() || meta.thinkingLevel != null)) {
             ChatModelConfigStrip(
                 meta = meta,
@@ -771,7 +771,7 @@ private fun UserMessageCard(
             modifier = Modifier.widthIn(max = 330.dp),
             shape = Square,
             color = MuxUserSurface,
-            border = BorderStroke(1.dp, MuxLine),
+            border = BorderStroke(1.dp, Color(0xFFD3E2FF)),
         ) {
             Column(
                 Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
@@ -1792,13 +1792,11 @@ private fun SessionDockStrip(
     subagents: List<SessionSubagent>,
     backgroundJobs: List<BackgroundJob>,
 ) {
-    val hasContent = goal != null || tasks.isNotEmpty() || subagents.isNotEmpty() || backgroundJobs.isNotEmpty()
+    val hasContent = goal != null || tasks.isNotEmpty()
     if (!hasContent) return
 
     var expanded by remember { mutableStateOf(false) }
     val doneTasks = tasks.count { it.status == "completed" }
-    val runningSubagents = subagents.count { it.status == "running" || it.status == "queued" }
-    val runningJobs = backgroundJobs.count { it.status == "running" }
 
     val summary = buildList {
         if (goal != null) {
@@ -1806,12 +1804,6 @@ private fun SessionDockStrip(
             add("目标: ${goal.objective.take(24)}$rounds")
         }
         if (tasks.isNotEmpty()) add("任务 $doneTasks/${tasks.size}")
-        if (subagents.isNotEmpty()) {
-            add(if (runningSubagents > 0) "子代理 $runningSubagents 运行中" else "子代理 ${subagents.size}")
-        }
-        if (backgroundJobs.isNotEmpty()) {
-            add(if (runningJobs > 0) "后台 $runningJobs 运行中" else "后台 ${backgroundJobs.size}")
-        }
     }.joinToString(" · ")
 
     Column(Modifier.fillMaxWidth().background(MuxBg0)) {
@@ -1838,9 +1830,6 @@ private fun SessionDockStrip(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            if (runningSubagents > 0 || runningJobs > 0) {
-                SquareStepIndicator(color = MuxCobalt, blockSize = 4.dp, gap = 2.dp, blockCount = 3)
-            }
         }
         if (expanded) {
             HorizontalDivider(color = MuxLine)
