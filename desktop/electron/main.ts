@@ -1,4 +1,14 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, session, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  session,
+  shell,
+} from "electron";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -15,6 +25,7 @@ import { MuxlaneSocketClient, resolveMuxlaneSocketPath } from "./muxlane-socket"
 let mainWindow: BrowserWindow | null = null;
 let rpcClient: MuxlaneSocketClient | null = null;
 let hostManager: HostManager | null = null;
+const configuredWebviewSessions = new WeakSet<Electron.Session>();
 const dshManager = new DshWebManager({
   setAuthCookie: async (partition, cookie) => {
     const ses = session.fromPartition(partition);
@@ -76,6 +87,49 @@ function createWindow(): void {
         void shell.openExternal(url);
       }
       return { action: "deny" };
+    });
+
+    // Ensure embedded webviews (e.g. remote/local DSH WebUI) can write to the local clipboard.
+    const ses = webContents.session;
+    if (!configuredWebviewSessions.has(ses)) {
+      configuredWebviewSessions.add(ses);
+      ses.setPermissionCheckHandler((_wc, permission) => {
+        if (permission === "clipboard-sanitized-write" || permission === "clipboard-read") {
+          return true;
+        }
+        return false;
+      });
+      ses.setPermissionRequestHandler((_wc, permission, callback) => {
+        if (permission === "clipboard-sanitized-write" || permission === "clipboard-read") {
+          callback(true);
+          return;
+        }
+        callback(false);
+      });
+    }
+
+    webContents.on("context-menu", (_ctxEvent, params) => {
+      const items: Electron.MenuItemConstructorOptions[] = [];
+      if (params.selectionText) {
+        items.push({ label: "复制", role: "copy" });
+      }
+      if (params.isEditable) {
+        if (params.selectionText) {
+          items.push({ label: "剪切", role: "cut" });
+        }
+        items.push({ label: "粘贴", role: "paste" });
+        items.push({ label: "全选", role: "selectAll" });
+      }
+      if (params.linkURL && /^https?:\/\//i.test(params.linkURL)) {
+        if (items.length > 0) items.push({ type: "separator" });
+        items.push({
+          label: "复制链接地址",
+          click: () => clipboard.writeText(params.linkURL),
+        });
+      }
+      if (items.length > 0) {
+        Menu.buildFromTemplate(items).popup({ window: mainWindow ?? undefined });
+      }
     });
   });
 
@@ -181,6 +235,22 @@ function setupIpc(): void {
     if (typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"))) {
       await shell.openExternal(url);
     }
+  });
+
+  ipcMain.handle("muxlane:clipboard-write", (_ev, text: string, alsoSelection?: boolean) => {
+    if (typeof text !== "string" || text.length === 0) return;
+    clipboard.writeText(text);
+    if (alsoSelection && process.platform === "linux") {
+      try {
+        clipboard.writeText(text, "selection");
+      } catch {
+        // Ignore if X11 primary selection is unavailable (e.g. headless/Wayland-only)
+      }
+    }
+  });
+
+  ipcMain.handle("muxlane:clipboard-read", () => {
+    return clipboard.readText();
   });
 
   ipcMain.handle("muxlane:hosts-list", () => {

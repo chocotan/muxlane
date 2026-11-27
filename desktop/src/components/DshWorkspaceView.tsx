@@ -204,7 +204,11 @@ export const DshWorkspaceView: React.FC<DshWorkspaceViewProps> = ({
   const copyValue = async (text: string, kind: "url" | "token") => {
     if (!text) return;
     try {
-      await navigator.clipboard.writeText(text);
+      if (window.muxlane?.writeClipboardText) {
+        await window.muxlane.writeClipboardText(text);
+      } else {
+        await navigator.clipboard.writeText(text);
+      }
       setCopiedKind(kind);
       window.setTimeout(() => {
         setCopiedKind((prev) => (prev === kind ? null : prev));

@@ -409,10 +409,7 @@ fn identify_agy_pids(panes: &str, process_list: &str) -> HashMap<String, u32> {
 }
 
 fn is_valid_uuid_like(s: &str) -> bool {
-    s.len() >= 16
-        && s.len() <= 64
-        && s.bytes()
-            .all(|b| b.is_ascii_hexdigit() || b == b'-')
+    s.len() >= 16 && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 
 fn extract_agy_conversation_id_from_path(path: &std::path::Path) -> Option<String> {
@@ -422,12 +419,11 @@ fn extract_agy_conversation_id_from_path(path: &std::path::Path) -> Option<Strin
     let tail = &raw[idx + marker.len()..];
     let candidate = if let Some(rest) = tail.strip_prefix("presence/") {
         rest.strip_suffix(".lock")?
-    } else if let Some(rest) = tail.strip_prefix("conversations/") {
+    } else {
+        let rest = tail.strip_prefix("conversations/")?;
         rest.strip_suffix(".db")
             .or_else(|| rest.strip_suffix(".db-wal"))
             .or_else(|| rest.strip_suffix(".db-shm"))?
-    } else {
-        return None;
     };
     is_valid_uuid_like(candidate).then(|| candidate.to_string())
 }

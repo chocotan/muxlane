@@ -116,6 +116,97 @@ class ChatTest {
     }
 
     @Test
+    fun decodesModernChatMetaSetAssistantUsageAndTermResync() {
+        val rawHistory = """
+            {
+              "agent": "pie_1",
+              "seq": 10,
+              "meta": {
+                "driver": "pi_rpc",
+                "supports_chat_input": true,
+                "supports_terminal_switch": true,
+                "has_pty": true,
+                "available_commands": [
+                  { "name": "plan", "description": "Create plan", "kind": "skill", "argument_hint": "<goal>" }
+                ],
+                "queued_messages": [
+                  { "id": "q1", "text": "check tests too", "behavior": "steer", "attachments_count": 0 }
+                ],
+                "is_streaming": true,
+                "stats": {
+                  "turns": 3,
+                  "steps": 7,
+                  "tool_calls": 4,
+                  "input_tokens": 12000,
+                  "output_tokens": 1800,
+                  "total_tokens": 13800,
+                  "total_cost_usd": 0.042
+                },
+                "goal": { "objective": "Ship v0.0.36", "status": "active", "rounds": 1, "max_rounds": 5, "armed": true },
+                "tasks": [
+                  { "id": "t1", "subject": "Fix mobile chat", "status": "in_progress", "active_form": "Fixing mobile chat" }
+                ],
+                "subagents": [
+                  { "id": "s1", "agent": "research", "description": "Audit protocol", "status": "running", "turns": 2 }
+                ],
+                "background_jobs": [
+                  { "id": "j1", "name": "gradle", "description": "Run tests", "status": "completed", "exit_code": 0 }
+                ]
+              },
+              "entries": [
+                {
+                  "type": "assistant_text",
+                  "id": "a1",
+                  "text": "Done.",
+                  "streaming": false,
+                  "created_at_ms": 500
+                }
+              ],
+              "pending_approvals": []
+            }
+        """.trimIndent()
+        val history = muxlaneJson.decodeFromString(ChatHistoryResult.serializer(), rawHistory)
+        var snap = ChatTimelineSnapshot.fromHistory(history)
+        assertEquals(1, snap.meta.availableCommands.size)
+        assertEquals("plan", snap.meta.availableCommands[0].name)
+        assertEquals(1, snap.meta.queuedMessages.size)
+        assertEquals(StreamingBehavior.STEER, snap.meta.queuedMessages[0].behavior)
+        assertEquals(3, snap.meta.stats?.turns)
+        assertEquals("Ship v0.0.36", snap.meta.goal?.objective)
+        assertEquals(1, snap.meta.tasks.size)
+        assertEquals(1, snap.meta.subagents.size)
+        assertEquals(1, snap.meta.backgroundJobs.size)
+
+        val usageDeltaJson = """
+            {
+              "agent": "pie_1",
+              "seq": 11,
+              "delta": {
+                "op": "set_assistant_usage",
+                "entry_id": "a1",
+                "usage": {
+                  "input_tokens": 4200,
+                  "output_tokens": 350,
+                  "total_tokens": 4550,
+                  "cost_usd": 0.0123,
+                  "duration_ms": 1450
+                }
+              }
+            }
+        """.trimIndent()
+        val usageDelta = muxlaneJson.decodeFromString(ChatDeltaEvent.serializer(), usageDeltaJson)
+        snap = snap.applyDelta(usageDelta)
+        val assistant = snap.entries[0] as TimelineEntry.AssistantText
+        assertEquals(4550L, assistant.usage?.totalTokens)
+        assertEquals(1450L, assistant.usage?.durationMs)
+
+        val resyncJson = """{"agent":"shell_1","replay_b64":"aGVsbG8="}"""
+        val resync = muxlaneJson.decodeFromString(muxlane.protocol.TermResyncEvent.serializer(), resyncJson)
+        assertEquals("shell_1", resync.agent)
+        assertEquals("aGVsbG8=", resync.replayB64)
+    }
+
+    @Test
     fun diffLinesDetectsAddedAndRemovedLines() {
         val diff = computeUnifiedDiffLines("line1\nold\nline3", "line1\nnew\nline3")
         assertTrue(diff.any { it.op == DiffOp.DEL && it.text == "old" })

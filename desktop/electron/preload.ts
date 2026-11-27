@@ -27,6 +27,12 @@ const api: MuxlaneDesktopBridge = {
   openExternal(url: string): Promise<void> {
     return ipcRenderer.invoke("muxlane:open-external", url);
   },
+  writeClipboardText(text: string, opts?: { alsoSelection?: boolean }): Promise<void> {
+    return ipcRenderer.invoke("muxlane:clipboard-write", text, opts?.alsoSelection === true);
+  },
+  readClipboardText(): Promise<string> {
+    return ipcRenderer.invoke("muxlane:clipboard-read");
+  },
   setZoomFactor(factor: number): void {
     const clamped = Math.min(1.5, Math.max(0.75, factor));
     webFrame.setZoomFactor(clamped);

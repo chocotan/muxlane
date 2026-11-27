@@ -125,6 +125,7 @@ sealed class TimelineEntry {
         val text: String,
         val streaming: Boolean = false,
         val model: String? = null,
+        val usage: MessageUsage? = null,
         @SerialName("created_at_ms") val createdAtMs: Long = 0,
     ) : TimelineEntry()
 
@@ -224,6 +225,107 @@ data class ChatModelInfo(
 )
 
 @Serializable
+data class ChatSlashCommand(
+    val name: String,
+    val description: String? = null,
+    val kind: String = "command",
+    val source: String? = null,
+    @SerialName("argument_hint") val argumentHint: String? = null,
+)
+
+@Serializable
+data class QueuedMessage(
+    val id: String,
+    val text: String,
+    val behavior: StreamingBehavior = StreamingBehavior.STEER,
+    @SerialName("attachments_count") val attachmentsCount: Int = 0,
+)
+
+@Serializable
+data class MessageUsage(
+    @SerialName("input_tokens") val inputTokens: Long = 0,
+    @SerialName("output_tokens") val outputTokens: Long = 0,
+    @SerialName("cache_read_tokens") val cacheReadTokens: Long = 0,
+    @SerialName("cache_write_tokens") val cacheWriteTokens: Long = 0,
+    @SerialName("reasoning_tokens") val reasoningTokens: Long = 0,
+    @SerialName("total_tokens") val totalTokens: Long = 0,
+    @SerialName("cost_usd") val costUsd: Double? = null,
+    @SerialName("duration_ms") val durationMs: Long? = null,
+    @SerialName("ttft_ms") val ttftMs: Long? = null,
+)
+
+@Serializable
+data class SessionStats(
+    val turns: Int = 0,
+    val steps: Int = 0,
+    @SerialName("tool_calls") val toolCalls: Int = 0,
+    @SerialName("input_tokens") val inputTokens: Long = 0,
+    @SerialName("output_tokens") val outputTokens: Long = 0,
+    @SerialName("cache_read_tokens") val cacheReadTokens: Long = 0,
+    @SerialName("cache_write_tokens") val cacheWriteTokens: Long = 0,
+    @SerialName("reasoning_tokens") val reasoningTokens: Long = 0,
+    @SerialName("total_tokens") val totalTokens: Long = 0,
+    @SerialName("total_cost_usd") val totalCostUsd: Double? = null,
+    @SerialName("llm_ms") val llmMs: Long = 0,
+    @SerialName("tool_ms") val toolMs: Long = 0,
+    @SerialName("ttft_ms") val ttftMs: Long = 0,
+    @SerialName("ttft_steps") val ttftSteps: Int = 0,
+)
+
+@Serializable
+data class SessionGoal(
+    val objective: String,
+    val status: String,
+    val rounds: Int = 0,
+    @SerialName("max_rounds") val maxRounds: Int = 0,
+    val armed: Boolean = false,
+)
+
+@Serializable
+data class SessionTask(
+    val id: String,
+    val subject: String,
+    val description: String? = null,
+    val status: String = "pending",
+    @SerialName("active_form") val activeForm: String? = null,
+    @SerialName("agent_type") val agentType: String? = null,
+    val owner: String? = null,
+    @SerialName("blocked_by") val blockedBy: List<String> = emptyList(),
+)
+
+@Serializable
+data class SessionSubagent(
+    val id: String,
+    val agent: String,
+    val description: String,
+    val status: String = "running",
+    val model: String? = null,
+    val turns: Int = 0,
+    @SerialName("max_turns") val maxTurns: Int? = null,
+    @SerialName("active_tool") val activeTool: String? = null,
+    val output: String? = null,
+    val error: String? = null,
+    @SerialName("task_id") val taskId: String? = null,
+    @SerialName("started_at_ms") val startedAtMs: Long? = null,
+    @SerialName("finished_at_ms") val finishedAtMs: Long? = null,
+)
+
+@Serializable
+data class BackgroundJob(
+    val id: String,
+    val name: String,
+    val description: String,
+    val command: String? = null,
+    val status: String = "running",
+    @SerialName("exit_code") val exitCode: Int? = null,
+    @SerialName("output_path") val outputPath: String? = null,
+    @SerialName("bytes_written") val bytesWritten: Long? = null,
+    val error: String? = null,
+    @SerialName("started_at_ms") val startedAtMs: Long? = null,
+    @SerialName("finished_at_ms") val finishedAtMs: Long? = null,
+)
+
+@Serializable
 data class ChatSessionMeta(
     val driver: SessionDriverMode = SessionDriverMode.TERMINAL_PTY,
     @SerialName("supports_chat_input") val supportsChatInput: Boolean = false,
@@ -235,10 +337,17 @@ data class ChatSessionMeta(
     @SerialName("available_models") val availableModels: List<ChatModelInfo> = emptyList(),
     @SerialName("thinking_level") val thinkingLevel: String? = null,
     @SerialName("available_thinking_levels") val availableThinkingLevels: List<String> = emptyList(),
+    @SerialName("available_commands") val availableCommands: List<ChatSlashCommand> = emptyList(),
+    @SerialName("queued_messages") val queuedMessages: List<QueuedMessage> = emptyList(),
     @SerialName("is_streaming") val isStreaming: Boolean = false,
     @SerialName("context_used_tokens") val contextUsedTokens: Long? = null,
     @SerialName("context_window_tokens") val contextWindowTokens: Long? = null,
     @SerialName("total_cost_usd") val totalCostUsd: Double? = null,
+    val stats: SessionStats? = null,
+    val goal: SessionGoal? = null,
+    val tasks: List<SessionTask> = emptyList(),
+    val subagents: List<SessionSubagent> = emptyList(),
+    @SerialName("background_jobs") val backgroundJobs: List<BackgroundJob> = emptyList(),
     @SerialName("last_error") val lastError: String? = null,
 )
 
@@ -282,6 +391,13 @@ sealed class ChatDeltaOp {
     data class FinishEntry(
         @SerialName("entry_id") val entryId: String,
         @SerialName("duration_ms") val durationMs: Long? = null,
+    ) : ChatDeltaOp()
+
+    @Serializable
+    @SerialName("set_assistant_usage")
+    data class SetAssistantUsage(
+        @SerialName("entry_id") val entryId: String,
+        val usage: MessageUsage,
     ) : ChatDeltaOp()
 
     @Serializable
@@ -357,6 +473,12 @@ data class ChatSendParams(
     val attachments: List<ChatAttachment> = emptyList(),
     @SerialName("streaming_behavior") val streamingBehavior: StreamingBehavior? = null,
     @SerialName("client_msg_id") val clientMsgId: String? = null,
+)
+
+@Serializable
+data class ChatQueueDeleteParams(
+    val agent: String,
+    @SerialName("message_id") val messageId: String,
 )
 
 @Serializable
@@ -456,6 +578,9 @@ data class ChatTimelineSnapshot(
                 is TimelineEntry.Thinking -> e.copy(streaming = false, durationMs = op.durationMs ?: e.durationMs)
                 else -> e
             }
+        }
+        is ChatDeltaOp.SetAssistantUsage -> mutateEntry(op.entryId) { e ->
+            if (e is TimelineEntry.AssistantText) e.copy(usage = op.usage) else e
         }
         is ChatDeltaOp.MetaUpdated -> copy(meta = op.meta)
         is ChatDeltaOp.ApprovalRequested -> {

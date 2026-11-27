@@ -49,4 +49,46 @@ class ChatScreenLogicTest {
         assertEquals(MarkdownBlock.BulletItem("•", "second item"), blocks[4])
         assertEquals(MarkdownBlock.CodeBlock("rust", "fn main() {}"), blocks[5])
     }
+
+    @Test
+    fun filterMobileSlashCommandsMergesServerCommandsAndFiltersByPrefix() {
+        val serverCmds = listOf(
+            muxlane.chat.ChatSlashCommand(name = "plan", description = "Step-by-step plan", kind = "skill"),
+            muxlane.chat.ChatSlashCommand(name = "review", description = "Code review", kind = "command"),
+        )
+        val filtered = filterMobileSlashCommands(serverCmds, "pl", canSwitchToTerm = true)
+        assertEquals(1, filtered.size)
+        assertEquals("plan", filtered[0].name)
+
+        val all = filterMobileSlashCommands(serverCmds, "", canSwitchToTerm = true)
+        assertTrue(all.any { it.name == "plan" })
+        assertTrue(all.any { it.name == "terminal" })
+        assertTrue(all.any { it.name == "abort" })
+    }
+
+    @Test
+    fun presetChatDriverMatchesDesktopRouting() {
+        assertEquals(muxlane.chat.ChatDriverKind.PI_RPC, presetChatDriver(muxlane.protocol.AgentType.PIE))
+        assertEquals(muxlane.chat.ChatDriverKind.PI_RPC, presetChatDriver(muxlane.protocol.AgentType.PI))
+        assertEquals(muxlane.chat.ChatDriverKind.ACP, presetChatDriver(muxlane.protocol.AgentType.AGY))
+        assertEquals(null, presetChatDriver(muxlane.protocol.AgentType.CLAUDE))
+        assertEquals(null, presetChatDriver(muxlane.protocol.AgentType.CODEX))
+        assertEquals(null, presetChatDriver(muxlane.protocol.AgentType.SHELL))
+    }
+
+    @Test
+    fun formatMessageUsageProducesCompactSummary() {
+        val summary = formatMessageUsage(
+            muxlane.chat.MessageUsage(
+                inputTokens = 1500,
+                outputTokens = 400,
+                totalTokens = 1900,
+                durationMs = 2300,
+                costUsd = 0.015,
+            ),
+        )
+        assertTrue(summary.contains("1.5k↑"))
+        assertTrue(summary.contains("400↓"))
+        assertTrue(summary.contains("2.3s"))
+    }
 }

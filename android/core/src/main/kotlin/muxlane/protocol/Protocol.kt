@@ -29,6 +29,7 @@ object Methods {
     const val CHAT_UNSUBSCRIBE = "chat.unsubscribe"
     const val CHAT_SEND = "chat.send"
     const val CHAT_ABORT = "chat.abort"
+    const val CHAT_QUEUE_DELETE = "chat.queue.delete"
     const val CHAT_APPROVE = "chat.approve"
     const val CHAT_CONFIGURE = "chat.configure"
     const val CHAT_SWITCH_MODE = "chat.switch_mode"
@@ -218,6 +219,12 @@ data class TermResizeParams(
 data class TermDataEvent(
     val agent: String,
     @SerialName("data_b64") val dataB64: String,
+)
+
+@Serializable
+data class TermResyncEvent(
+    val agent: String,
+    @SerialName("replay_b64") val replayB64: String = "",
 )
 
 @Serializable

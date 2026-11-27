@@ -690,7 +690,7 @@ fn configure_tmux_server_inner(server: &str, config_path: &Path) -> bool {
         ("extended-keys", "on"),
         ("extended-keys-format", "csi-u"),
         ("history-limit", "50000"),
-        ("set-clipboard", "external"),
+        ("set-clipboard", "on"),
         ("set-titles", "off"),
         // Kitty 图形协议的 APC 序列靠 tmux passthrough 才能穿过 tmux 到达 muxlane；
         // 关着的话 tmux 会把图片数据整个吞掉，只剩占位符。
@@ -753,7 +753,7 @@ set-option -g history-limit 50000
 set-option -g window-size latest
 set-option -g mouse on
 set-option -gq allow-passthrough on
-set-option -g set-clipboard external
+set-option -g set-clipboard on
 set-option -g copy-command \"if command -v pbcopy >/dev/null 2>&1; then pbcopy; elif command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; else cat >/dev/null; fi\"
 set-option -sg escape-time 10
 set-environment -gu NO_COLOR

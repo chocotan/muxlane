@@ -613,6 +613,8 @@ export interface MuxlaneDesktopBridge {
   pickDirectory(): Promise<string | null>;
   pickFile(title?: string): Promise<string | null>;
   openExternal(url: string): Promise<void>;
+  writeClipboardText(text: string, opts?: { alsoSelection?: boolean }): Promise<void>;
+  readClipboardText(): Promise<string>;
   setZoomFactor(factor: number): void;
   listHosts(): Promise<HostsState>;
   addHost(input: AddHostInput): Promise<HostsState>;

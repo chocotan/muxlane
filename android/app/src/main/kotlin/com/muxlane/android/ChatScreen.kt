@@ -34,6 +34,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Lock
@@ -79,10 +80,20 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import muxlane.chat.ApprovalReply
+import muxlane.chat.BackgroundJob
+import muxlane.chat.ChatSessionMeta
+import muxlane.chat.ChatSlashCommand
 import muxlane.chat.DiffOp
+import muxlane.chat.MessageUsage
 import muxlane.chat.NoticeLevel
 import muxlane.chat.PendingApproval
 import muxlane.chat.PlanEntryStatus
+import muxlane.chat.QueuedMessage
+import muxlane.chat.SessionGoal
+import muxlane.chat.SessionStats
+import muxlane.chat.SessionSubagent
+import muxlane.chat.SessionTask
+import muxlane.chat.StreamingBehavior
 import muxlane.chat.TimelineEntry
 import muxlane.chat.ToolCallKind
 import muxlane.chat.ToolCallState
@@ -290,6 +301,22 @@ internal fun ChatTimelinePane(
     val expandedClusters = remember(agentId) { mutableStateMapOf<String, Boolean>() }
     val expandedThinking = remember(agentId) { mutableStateMapOf<String, Boolean>() }
     var draft by remember(agentId) { mutableStateOf("") }
+    var steerWhenStreaming by remember(agentId) { mutableStateOf(true) }
+    val draftSlashQuery = remember(draft) {
+        if (draft.startsWith("/") && !draft.contains('\n') && !draft.contains(' ')) {
+            draft.removePrefix("/")
+        } else {
+            null
+        }
+    }
+    val effectiveSlashOpen = showSlashMenu || draftSlashQuery != null
+    val slashItems = remember(meta?.availableCommands, draftSlashQuery, canSwitchToTerm) {
+        filterMobileSlashCommands(
+            available = meta?.availableCommands.orEmpty(),
+            query = draftSlashQuery.orEmpty(),
+            canSwitchToTerm = canSwitchToTerm,
+        )
+    }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -478,20 +505,48 @@ internal fun ChatTimelinePane(
                 .imePadding()
                 .navigationBarsPadding(),
         ) {
+            if (meta != null) {
+                SessionDockStrip(
+                    goal = meta.goal,
+                    tasks = meta.tasks,
+                    subagents = meta.subagents,
+                    backgroundJobs = meta.backgroundJobs,
+                )
+            }
+            if (!meta?.queuedMessages.isNullOrEmpty()) {
+                QueuedMessagesStrip(
+                    messages = meta!!.queuedMessages,
+                    onDelete = { msgId -> model.deleteQueuedMessage(agentId, msgId) },
+                )
+            }
             pendingApprovals.firstOrNull()?.let { approval ->
                 InlineApprovalBanner(
                     approval = approval,
                     onReply = { reply -> model.respondApproval(agentId, approval.id, reply) },
                 )
             }
-            if (showSlashMenu) {
+            if (effectiveSlashOpen && slashItems.isNotEmpty()) {
                 SlashQuickMenu(
+                    commands = slashItems,
                     onPick = { cmd ->
                         onDismissSlash()
-                        when (cmd) {
-                            "/abort" -> model.abortChat()
-                            "/terminal" -> if (canSwitchToTerm) model.setSessionMode(SessionPaneMode.TERMINAL)
-                            else -> model.sendChatPrompt(cmd, steer = false)
+                        when (cmd.name) {
+                            "abort" -> {
+                                draft = ""
+                                model.abortChat()
+                            }
+                            "terminal" -> {
+                                draft = ""
+                                if (canSwitchToTerm) model.setSessionMode(SessionPaneMode.TERMINAL)
+                            }
+                            else -> {
+                                if (!cmd.argumentHint.isNullOrBlank()) {
+                                    draft = "/${cmd.name} "
+                                } else {
+                                    draft = ""
+                                    model.sendChatPrompt("/${cmd.name}", steer = steerWhenStreaming)
+                                }
+                            }
                         }
                     },
                 )
@@ -501,10 +556,13 @@ internal fun ChatTimelinePane(
                 onDraftChange = { draft = it },
                 inputEnabled = meta?.supportsChatInput != false,
                 isStreaming = meta?.isStreaming == true,
+                steerWhenStreaming = steerWhenStreaming,
+                onToggleSteerMode = { steerWhenStreaming = !steerWhenStreaming },
                 contextUsed = meta?.contextUsedTokens,
                 contextWindow = meta?.contextWindowTokens,
-                costUsd = meta?.totalCostUsd,
-                slashOpen = showSlashMenu,
+                costUsd = meta?.totalCostUsd ?: meta?.stats?.totalCostUsd,
+                stats = meta?.stats,
+                slashOpen = effectiveSlashOpen,
                 onToggleSlash = onToggleSlash,
                 onSend = { steer ->
                     val text = draft.trim()
@@ -720,6 +778,17 @@ private fun AssistantMessageCard(entry: TimelineEntry.AssistantText) {
                         }
                     }
                 }
+            }
+        }
+        entry.usage?.let { usage ->
+            val summary = formatMessageUsage(usage)
+            if (summary.isNotEmpty()) {
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MuxFg2,
+                    fontFamily = MonoFamily,
+                )
             }
         }
     }
@@ -1132,29 +1201,259 @@ private fun InlineApprovalBanner(
 }
 
 @Composable
-private fun SlashQuickMenu(onPick: (String) -> Unit) {
+private fun SessionDockStrip(
+    goal: SessionGoal?,
+    tasks: List<SessionTask>,
+    subagents: List<SessionSubagent>,
+    backgroundJobs: List<BackgroundJob>,
+) {
+    val hasContent = goal != null || tasks.isNotEmpty() || subagents.isNotEmpty() || backgroundJobs.isNotEmpty()
+    if (!hasContent) return
+
+    var expanded by remember { mutableStateOf(false) }
+    val doneTasks = tasks.count { it.status == "completed" }
+    val runningSubagents = subagents.count { it.status == "running" || it.status == "queued" }
+    val runningJobs = backgroundJobs.count { it.status == "running" }
+
+    val summary = buildList {
+        if (goal != null) {
+            val rounds = if (goal.maxRounds > 0) " ${goal.rounds}/${goal.maxRounds}" else ""
+            add("目标: ${goal.objective.take(24)}$rounds")
+        }
+        if (tasks.isNotEmpty()) add("任务 $doneTasks/${tasks.size}")
+        if (subagents.isNotEmpty()) {
+            add(if (runningSubagents > 0) "子代理 $runningSubagents 运行中" else "子代理 ${subagents.size}")
+        }
+        if (backgroundJobs.isNotEmpty()) {
+            add(if (runningJobs > 0) "后台 $runningJobs 运行中" else "后台 ${backgroundJobs.size}")
+        }
+    }.joinToString(" · ")
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = Square,
         color = MuxBg1,
         border = BorderStroke(1.dp, MuxLine),
     ) {
-        Row(
+        Column(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    if (expanded) Icons.Outlined.KeyboardArrowDown else Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MuxAccent,
+                    modifier = Modifier.size(15.dp),
+                )
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MuxFg1,
+                    fontFamily = MonoFamily,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (runningSubagents > 0 || runningJobs > 0) {
+                    SquareStepIndicator(blockSize = 4.dp, gap = 2.dp, blockCount = 3)
+                }
+            }
+            if (expanded) {
+                HorizontalDivider(color = MuxLine)
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    goal?.let { g ->
+                        val rounds = if (g.maxRounds > 0) " (${g.rounds}/${g.maxRounds})" else ""
+                        Text(
+                            "GOAL [${g.status}]$rounds · ${g.objective}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MuxFg0,
+                        )
+                    }
+                    tasks.take(12).forEach { t ->
+                        val (mark, color) = when (t.status) {
+                            "completed" -> "[x]" to MuxGreen
+                            "in_progress" -> "[▸]" to MuxAccent
+                            else -> "[ ]" to MuxFg2
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(mark, style = MaterialTheme.typography.labelSmall, color = color, fontFamily = MonoFamily)
+                            Text(
+                                t.activeForm?.takeIf { t.status == "in_progress" && it.isNotBlank() } ?: t.subject,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MuxFg1,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    subagents.take(8).forEach { s ->
+                        val color = when (s.status) {
+                            "completed" -> MuxGreen
+                            "error" -> MuxRed
+                            "running", "queued" -> MuxAccent
+                            else -> MuxFg2
+                        }
+                        Text(
+                            "SUBAGENT ${s.agent} [${s.status}] · ${s.description}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = color,
+                            fontFamily = MonoFamily,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    backgroundJobs.take(8).forEach { j ->
+                        val color = when (j.status) {
+                            "completed" -> MuxGreen
+                            "failed" -> MuxRed
+                            "running" -> MuxAccent
+                            else -> MuxFg2
+                        }
+                        Text(
+                            "JOB ${j.name} [${j.status}] · ${j.description}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = color,
+                            fontFamily = MonoFamily,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueuedMessagesStrip(
+    messages: List<QueuedMessage>,
+    onDelete: (String) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = Square,
+        color = MuxBg1,
+        border = BorderStroke(1.dp, MuxLine),
+    ) {
+        Column(
             Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            listOf("/clear", "/compact", "/terminal", "/abort").forEach { cmd ->
-                Box(
+            Text(
+                "待发送队列 (${messages.size})",
+                style = MaterialTheme.typography.labelSmall,
+                color = MuxFg2,
+                fontFamily = MonoFamily,
+            )
+            messages.forEach { msg ->
+                val isSteer = msg.behavior == StreamingBehavior.STEER
+                Row(
                     Modifier
+                        .fillMaxWidth()
+                        .background(MuxBg2, Square)
+                        .border(BorderStroke(1.dp, MuxControlLine), Square)
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        if (isSteer) "插队" else "排队",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isSteer) MuxAccent else MuxFg2,
+                        fontFamily = MonoFamily,
+                    )
+                    Text(
+                        msg.text,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MuxFg0,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Box(
+                        Modifier
+                            .size(22.dp)
+                            .clickable { onDelete(msg.id) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Outlined.Close,
+                            contentDescription = "删除排队消息",
+                            tint = MuxFg2,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SlashQuickMenu(
+    commands: List<ChatSlashCommand>,
+    onPick: (ChatSlashCommand) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = Square,
+        color = MuxBg1,
+        border = BorderStroke(1.dp, MuxLine),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            commands.take(8).forEach { cmd ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
                         .background(MuxBg2, Square)
                         .border(BorderStroke(1.dp, MuxControlLine), Square)
                         .clickable { onPick(cmd) }
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(cmd, style = MaterialTheme.typography.labelMedium, color = MuxFg0, fontFamily = MonoFamily)
+                    Text(
+                        "/${cmd.name}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MuxFg0,
+                        fontFamily = MonoFamily,
+                    )
+                    val desc = cmd.description
+                    if (!desc.isNullOrBlank()) {
+                        Text(
+                            desc,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MuxFg2,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        Spacer(Modifier.weight(1f))
+                    }
+                    Text(
+                        cmd.kind.uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (cmd.kind == "skill") MuxAccent else MuxFg2,
+                        fontFamily = MonoFamily,
+                    )
                 }
             }
         }
@@ -1167,9 +1466,12 @@ private fun ChatComposerBar(
     onDraftChange: (String) -> Unit,
     inputEnabled: Boolean,
     isStreaming: Boolean,
+    steerWhenStreaming: Boolean,
+    onToggleSteerMode: () -> Unit,
     contextUsed: Long?,
     contextWindow: Long?,
     costUsd: Double?,
+    stats: SessionStats?,
     slashOpen: Boolean,
     onToggleSlash: () -> Unit,
     onSend: (Boolean) -> Unit,
@@ -1178,27 +1480,70 @@ private fun ChatComposerBar(
     Surface(color = MuxBg1, contentColor = MuxFg0) {
         Column(Modifier.fillMaxWidth()) {
             HorizontalDivider(color = MuxLine)
-            if (contextUsed != null || costUsd != null) {
+            val hasFooterInfo = contextUsed != null || costUsd != null || (stats != null && stats.turns > 0) || isStreaming
+            if (hasFooterInfo) {
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    val tokText = when {
-                        contextUsed != null && contextWindow != null && contextWindow > 0 ->
-                            "CTX ${contextUsed / 1000}k / ${contextWindow / 1000}k"
-                        contextUsed != null -> "CTX $contextUsed tok"
-                        else -> ""
-                    }
-                    Text(tokText, style = MaterialTheme.typography.labelSmall, color = MuxFg2, fontFamily = MonoFamily)
-                    costUsd?.let {
-                        Text(
-                            "$${"%.4f".format(it)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MuxFg2,
-                            fontFamily = MonoFamily,
-                        )
+                    val leftText = buildList {
+                        when {
+                            contextUsed != null && contextWindow != null && contextWindow > 0 ->
+                                add("CTX ${formatCompactTokens(contextUsed)}/${formatCompactTokens(contextWindow)}")
+                            contextUsed != null -> add("CTX ${formatCompactTokens(contextUsed)}")
+                        }
+                        if (stats != null && stats.turns > 0) {
+                            add("${stats.turns}T")
+                        }
+                        costUsd?.takeIf { it > 0.0 }?.let {
+                            add("$${"%.4f".format(it)}")
+                        }
+                    }.joinToString(" · ")
+                    Text(
+                        leftText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MuxFg2,
+                        fontFamily = MonoFamily,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (isStreaming && inputEnabled) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .background(if (steerWhenStreaming) MuxAccentBg else MuxBg2, Square)
+                                    .border(BorderStroke(1.dp, if (steerWhenStreaming) MuxAccent else MuxControlLine), Square)
+                                    .clickable(onClick = onToggleSteerMode)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                            ) {
+                                Text(
+                                    if (steerWhenStreaming) "模式: 插队" else "模式: 排队",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (steerWhenStreaming) MuxAccent else MuxFg1,
+                                    fontFamily = MonoFamily,
+                                )
+                            }
+                            if (draft.isNotBlank()) {
+                                Box(
+                                    Modifier
+                                        .background(MuxBg2, Square)
+                                        .border(BorderStroke(1.dp, MuxRed), Square)
+                                        .clickable(onClick = onAbort)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                ) {
+                                    Text(
+                                        stringResource(R.string.chat_abort),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MuxRed,
+                                        fontFamily = MonoFamily,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1258,20 +1603,81 @@ private fun ChatComposerBar(
                     ) { Text(stringResource(R.string.chat_abort), color = MuxRed) }
                 } else {
                     Button(
-                        onClick = { onSend(isStreaming) },
+                        onClick = { onSend(if (isStreaming) steerWhenStreaming else false) },
                         enabled = inputEnabled && draft.isNotBlank(),
                         shape = Square,
                         colors = ButtonDefaults.buttonColors(containerColor = MuxAccent),
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
                     ) {
                         Text(
-                            stringResource(if (isStreaming) R.string.chat_steer else R.string.chat_send),
+                            when {
+                                !isStreaming -> stringResource(R.string.chat_send)
+                                steerWhenStreaming -> stringResource(R.string.chat_steer)
+                                else -> "排队"
+                            },
                         )
                     }
                 }
             }
         }
     }
+}
+
+internal fun filterMobileSlashCommands(
+    available: List<ChatSlashCommand>,
+    query: String,
+    canSwitchToTerm: Boolean,
+): List<ChatSlashCommand> {
+    val builtins = buildList {
+        if (available.none { it.name == "clear" }) {
+            add(ChatSlashCommand(name = "clear", description = "清空当前上下文", kind = "command"))
+        }
+        if (available.none { it.name == "compact" }) {
+            add(ChatSlashCommand(name = "compact", description = "压缩对话上下文", kind = "command"))
+        }
+        if (canSwitchToTerm && available.none { it.name == "terminal" }) {
+            add(ChatSlashCommand(name = "terminal", description = "切换到终端视图", kind = "builtin"))
+        }
+        if (available.none { it.name == "abort" }) {
+            add(ChatSlashCommand(name = "abort", description = "中止当前生成", kind = "builtin"))
+        }
+    }
+    val combined = available + builtins
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return combined
+    return combined
+        .filter {
+            it.name.lowercase().contains(q) ||
+                it.description.orEmpty().lowercase().contains(q)
+        }
+        .sortedBy {
+            when {
+                it.name.lowercase() == q -> 0
+                it.name.lowercase().startsWith(q) -> 1
+                else -> 2
+            }
+        }
+}
+
+internal fun formatCompactTokens(tokens: Long): String = when {
+    tokens >= 1_000_000 -> "${"%.1f".format(tokens / 1_000_000.0)}M"
+    tokens >= 1_000 -> "${"%.1f".format(tokens / 1_000.0)}k"
+    else -> tokens.toString()
+}
+
+internal fun formatMessageUsage(usage: MessageUsage): String {
+    val parts = ArrayList<String>(4)
+    val total = if (usage.totalTokens > 0) usage.totalTokens else usage.inputTokens + usage.outputTokens
+    if (total > 0) {
+        parts.add("${formatCompactTokens(usage.inputTokens)}↑ ${formatCompactTokens(usage.outputTokens)}↓")
+    }
+    usage.durationMs?.takeIf { it > 0 }?.let { ms ->
+        parts.add(if (ms >= 1000) "${"%.1f".format(ms / 1000.0)}s" else "${ms}ms")
+    }
+    usage.costUsd?.takeIf { it > 0.0 }?.let { cost ->
+        parts.add("$${"%.4f".format(cost)}")
+    }
+    return parts.joinToString(" · ")
 }
 
 private fun toolSummary(entry: TimelineEntry.ToolCall): String {

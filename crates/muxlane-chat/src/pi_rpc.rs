@@ -394,11 +394,7 @@ impl PiRpcTranslator {
         meta: ChatSessionMeta,
         events: mpsc::UnboundedSender<DriverEvent>,
     ) -> Self {
-        let session_stats = meta
-            .stats
-            .as_deref()
-            .cloned()
-            .unwrap_or_default();
+        let session_stats = meta.stats.as_deref().cloned().unwrap_or_default();
         let goal_armed = meta.goal.as_deref().is_some_and(|g| g.armed);
         Self {
             agent: agent.to_string(),
@@ -426,11 +422,7 @@ impl PiRpcTranslator {
         }
     }
 
-    pub fn record_outgoing_prompt(
-        &mut self,
-        text: &str,
-        attachments: &[ChatAttachment],
-    ) {
+    pub fn record_outgoing_prompt(&mut self, text: &str, attachments: &[ChatAttachment]) {
         self.turn_seq += 1;
         let id = format!("user-{}", ulid::Ulid::new());
         let trimmed = text.trim().to_string();
@@ -1001,10 +993,11 @@ impl PiRpcTranslator {
         if let Some(usage) = record.get("usage") {
             let input = usage.get("input").and_then(|v| v.as_u64()).unwrap_or(0);
             let cache_read = usage.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0);
-            let cache_write = usage.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0);
-            let total = input
-                .saturating_add(cache_read)
-                .saturating_add(cache_write);
+            let cache_write = usage
+                .get("cacheWrite")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total = input.saturating_add(cache_read).saturating_add(cache_write);
             if total > 0 {
                 self.meta.context_used_tokens = Some(total);
             }
@@ -1047,8 +1040,9 @@ impl PiRpcTranslator {
                     return;
                 }
                 if self.active_msg_first_token_ms.is_none() {
-                    self.active_msg_first_token_ms =
-                        self.active_msg_started_at.map(|t| t.elapsed().as_millis() as u64);
+                    self.active_msg_first_token_ms = self
+                        .active_msg_started_at
+                        .map(|t| t.elapsed().as_millis() as u64);
                 }
                 let id = self.ensure_thinking_block(idx, &msg_prefix);
                 let _ = self
@@ -1111,8 +1105,9 @@ impl PiRpcTranslator {
                     return;
                 }
                 if self.active_msg_first_token_ms.is_none() {
-                    self.active_msg_first_token_ms =
-                        self.active_msg_started_at.map(|t| t.elapsed().as_millis() as u64);
+                    self.active_msg_first_token_ms = self
+                        .active_msg_started_at
+                        .map(|t| t.elapsed().as_millis() as u64);
                 }
                 let id = self.ensure_text_block(idx, &msg_prefix);
                 let _ = self
@@ -1231,8 +1226,10 @@ impl PiRpcTranslator {
         let entry_usage = if let Some(mut u) = parsed_usage {
             u.duration_ms = duration_ms;
             u.ttft_ms = ttft_ms;
-            self.session_stats.input_tokens =
-                self.session_stats.input_tokens.saturating_add(u.input_tokens);
+            self.session_stats.input_tokens = self
+                .session_stats
+                .input_tokens
+                .saturating_add(u.input_tokens);
             self.session_stats.output_tokens = self
                 .session_stats
                 .output_tokens
@@ -1249,8 +1246,10 @@ impl PiRpcTranslator {
                 .session_stats
                 .reasoning_tokens
                 .saturating_add(u.reasoning_tokens);
-            self.session_stats.total_tokens =
-                self.session_stats.total_tokens.saturating_add(u.total_tokens);
+            self.session_stats.total_tokens = self
+                .session_stats
+                .total_tokens
+                .saturating_add(u.total_tokens);
             if let Some(cost) = u.cost_usd {
                 self.session_stats.total_cost_usd =
                     Some(self.session_stats.total_cost_usd.unwrap_or(0.0) + cost);
@@ -1446,10 +1445,7 @@ impl PiRpcTranslator {
     }
 
     fn handle_custom_message(&mut self, msg: &Value) {
-        let custom_type = msg
-            .get("customType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let custom_type = msg.get("customType").and_then(|v| v.as_str()).unwrap_or("");
         let details = msg.get("details");
         let mut changed = false;
         match custom_type {
@@ -1484,9 +1480,7 @@ impl PiRpcTranslator {
                 }
             }
             "pie.goal-status" | "pie.goal-round" => {
-                if self.sync_pie_extension_state_from_session_file() {
-                    changed = true;
-                }
+                changed |= self.sync_pie_extension_state_from_session_file();
             }
             _ => {}
         }
@@ -1538,8 +1532,12 @@ impl PiRpcTranslator {
                     }
                 }
             }
-            "Agent" | "get_subagent_result" | "steer_subagent" | "stop_subagent"
-            | "TaskOutput" | "TaskStop" => {
+            "Agent"
+            | "get_subagent_result"
+            | "steer_subagent"
+            | "stop_subagent"
+            | "TaskOutput"
+            | "TaskStop" => {
                 if let Some(sub) = details.and_then(parse_subagent_record) {
                     self.upsert_subagent(sub);
                 }
@@ -1676,7 +1674,8 @@ impl PiRpcTranslator {
         if saw_subagents {
             for existing in &self.meta.subagents {
                 if let Some(disk_entry) = subagent_map.get_mut(&existing.id) {
-                    let existing_terminal = !matches!(existing.status.as_str(), "queued" | "running");
+                    let existing_terminal =
+                        !matches!(existing.status.as_str(), "queued" | "running");
                     let disk_terminal = !matches!(disk_entry.status.as_str(), "queued" | "running");
                     if (existing_terminal && !disk_terminal)
                         || (existing.finished_at_ms.unwrap_or(0)
@@ -2111,9 +2110,11 @@ fn sort_subagents(subagents: &mut [SessionSubagent]) {
     subagents.sort_by(|a, b| {
         let a_active = matches!(a.status.as_str(), "running" | "queued");
         let b_active = matches!(b.status.as_str(), "running" | "queued");
-        b_active
-            .cmp(&a_active)
-            .then_with(|| b.started_at_ms.unwrap_or(0).cmp(&a.started_at_ms.unwrap_or(0)))
+        b_active.cmp(&a_active).then_with(|| {
+            b.started_at_ms
+                .unwrap_or(0)
+                .cmp(&a.started_at_ms.unwrap_or(0))
+        })
     });
 }
 
@@ -2121,9 +2122,11 @@ fn sort_background_jobs(jobs: &mut [BackgroundJob]) {
     jobs.sort_by(|a, b| {
         let a_active = a.status == "running";
         let b_active = b.status == "running";
-        b_active
-            .cmp(&a_active)
-            .then_with(|| b.started_at_ms.unwrap_or(0).cmp(&a.started_at_ms.unwrap_or(0)))
+        b_active.cmp(&a_active).then_with(|| {
+            b.started_at_ms
+                .unwrap_or(0)
+                .cmp(&a.started_at_ms.unwrap_or(0))
+        })
     });
 }
 
@@ -2279,7 +2282,9 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            bash_tool.and_then(|v| v.get("command")).and_then(|v| v.as_str()),
+            bash_tool
+                .and_then(|v| v.get("command"))
+                .and_then(|v| v.as_str()),
             Some("cargo test --workspace")
         );
 
@@ -2296,7 +2301,10 @@ mod tests {
                 TimelineEntry::Notice { .. } => "notice",
             })
             .collect();
-        assert_eq!(kinds, vec!["user", "tool", "assistant", "user", "assistant"]);
+        assert_eq!(
+            kinds,
+            vec!["user", "tool", "assistant", "user", "assistant"]
+        );
     }
 
     #[test]
@@ -2394,7 +2402,9 @@ mod tests {
         tr.handle_record(json!({"type":"agent_start"}));
         tr.handle_record(json!({"type":"turn_start"}));
         tr.handle_record(json!({"type":"message_start","message":{"role":"user","content":"Run build in background"}}));
-        tr.handle_record(json!({"type":"message_start","message":{"role":"assistant","content":[]}}));
+        tr.handle_record(
+            json!({"type":"message_start","message":{"role":"assistant","content":[]}}),
+        );
         tr.handle_record(json!({
             "type":"tool_execution_start",
             "toolCallId":"bg-call-1",
@@ -2505,7 +2515,11 @@ mod tests {
         assert!(usage.duration_ms.is_some());
 
         // Verify session stats
-        let stats = state.meta.stats.as_deref().expect("session stats populated");
+        let stats = state
+            .meta
+            .stats
+            .as_deref()
+            .expect("session stats populated");
         assert_eq!(stats.turns, 1);
         assert_eq!(stats.steps, 1);
         assert_eq!(stats.tool_calls, 1);
@@ -2542,7 +2556,10 @@ mod tests {
         tr.enqueue_outgoing_prompt("Second steer", &[], StreamingBehavior::Steer);
         tr.enqueue_outgoing_prompt("Third steer", &[], StreamingBehavior::Steer);
         assert_eq!(tr.meta.queued_messages.len(), 3);
-        assert_eq!(tr.meta.queued_messages[0].behavior, StreamingBehavior::Steer);
+        assert_eq!(
+            tr.meta.queued_messages[0].behavior,
+            StreamingBehavior::Steer
+        );
 
         let second_id = tr.meta.queued_messages[1].id.clone();
         let remaining = tr.remove_queued_message(Some(&second_id));

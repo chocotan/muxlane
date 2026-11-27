@@ -754,8 +754,7 @@ impl ChatTimelineState {
             }
             ChatDeltaOp::SetAssistantUsage { entry_id, usage } => {
                 if let Some(&idx) = self.index.get(&entry_id) {
-                    if let TimelineEntry::AssistantText { usage: slot, .. } =
-                        &mut self.entries[idx]
+                    if let TimelineEntry::AssistantText { usage: slot, .. } = &mut self.entries[idx]
                     {
                         *slot = Some(usage);
                     }

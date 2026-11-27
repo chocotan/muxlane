@@ -155,4 +155,3 @@ pub fn derive_prompt_title(text: &str) -> Option<String> {
         Some(head)
     }
 }
-

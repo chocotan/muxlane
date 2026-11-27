@@ -60,8 +60,8 @@ export interface ToastItem {
 }
 
 export type TermStreamChunk =
-  | { kind: "reset"; bytes: Uint8Array }
-  | { kind: "append"; bytes: Uint8Array }
+  | { kind: "reset"; bytes: Uint8Array; isReplay?: boolean }
+  | { kind: "append"; bytes: Uint8Array; isReplay?: boolean }
   | { kind: "exit" };
 
 type TermListener = (chunk: TermStreamChunk) => void;
@@ -439,7 +439,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
           const listeners = termListenersRef.current.get(td.agent);
           if (listeners && listeners.size > 0) {
             const bytes = decodeBase64ToBytes(td.data_b64);
-            for (const fn of listeners) fn({ kind: "append", bytes });
+            for (const fn of listeners) fn({ kind: "append", bytes, isReplay: false });
           }
           break;
         }
@@ -448,7 +448,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
           const listeners = termListenersRef.current.get(tr.agent);
           if (listeners && listeners.size > 0) {
             const bytes = decodeBase64ToBytes(tr.replay_b64);
-            for (const fn of listeners) fn({ kind: "reset", bytes });
+            for (const fn of listeners) fn({ kind: "reset", bytes, isReplay: true });
           }
           break;
         }
@@ -458,7 +458,7 @@ export function useMuxlaneStore(options: MuxlaneStoreOptions = {}) {
           if (listeners && listeners.size > 0) {
             const bytes = decodeBase64ToBytes(rc.data_b64);
             const kind = rc.chunk_index === 0 ? "reset" : "append";
-            for (const fn of listeners) fn({ kind, bytes });
+            for (const fn of listeners) fn({ kind, bytes, isReplay: true });
           }
           break;
         }

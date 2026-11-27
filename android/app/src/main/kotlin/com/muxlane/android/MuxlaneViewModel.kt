@@ -26,6 +26,7 @@ import muxlane.chat.ChatDeltaOp
 import muxlane.chat.ChatDriverKind
 import muxlane.chat.ChatHistoryResult
 import muxlane.chat.ChatListResult
+import muxlane.chat.ChatQueueDeleteParams
 import muxlane.chat.ChatSendParams
 import muxlane.chat.ChatSessionSummary
 import muxlane.chat.ChatSpawnParams
@@ -63,6 +64,7 @@ import muxlane.protocol.TermDataEvent
 import muxlane.protocol.TermInputParams
 import muxlane.protocol.TermReplayChunkEvent
 import muxlane.protocol.TermResizeParams
+import muxlane.protocol.TermResyncEvent
 import muxlane.protocol.TermSubscribeParams
 import muxlane.protocol.TermSubscribeResult
 import muxlane.protocol.b64Decode
@@ -159,10 +161,10 @@ class MuxlaneSession(private val app: Application) {
                             }
                         }
                         Events.TERM_RESYNC -> {
-                            val data = muxlaneJson.decodeFromJsonElement(TermDataEvent.serializer(), event.params)
+                            val data = muxlaneJson.decodeFromJsonElement(TermResyncEvent.serializer(), event.params)
                             if (data.agent == _state.value.selectedAgent) {
                                 terminal.reset()
-                                terminal.write(b64Decode(data.dataB64))
+                                terminal.write(b64Decode(data.replayB64))
                                 redrawTerminal()
                             }
                         }
@@ -581,7 +583,7 @@ class MuxlaneSession(private val app: Application) {
         }
     }
 
-    fun sendChatPrompt(text: String, steer: Boolean = false) {
+    fun sendChatPrompt(text: String, steer: Boolean = true) {
         val agent = _state.value.selectedAgent ?: return
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
@@ -601,6 +603,19 @@ class MuxlaneSession(private val app: Application) {
                         text = trimmed,
                         streamingBehavior = behavior,
                     ),
+                ),
+            )
+            resp.error?.let { error(it.message) }
+        }
+    }
+
+    fun deleteQueuedMessage(agent: String, messageId: String) {
+        rpc {
+            val resp = client.call(
+                Methods.CHAT_QUEUE_DELETE,
+                encodeParams(
+                    ChatQueueDeleteParams.serializer(),
+                    ChatQueueDeleteParams(agent = agent, messageId = messageId),
                 ),
             )
             resp.error?.let { error(it.message) }
@@ -761,26 +776,40 @@ class MuxlaneSession(private val app: Application) {
 
     fun spawnChat(preset: AgentPreset, initialPrompt: String? = null) {
         val project = _state.value.spawnProject ?: return
-        val driver = when (preset.agentType) {
-            AgentType.PI, AgentType.PIE -> ChatDriverKind.PI_RPC
-            else -> ChatDriverKind.ACP
-        }
+        val driver = presetChatDriver(preset.agentType)
+        val prompt = initialPrompt?.trim()?.takeIf { it.isNotEmpty() }
         rpc {
-            val response = client.call(
-                Methods.CHAT_SPAWN,
-                encodeParams(
-                    ChatSpawnParams.serializer(),
-                    ChatSpawnParams(
-                        project = project,
-                        agentType = preset.agentType,
-                        program = preset.program,
-                        args = preset.args,
-                        presetName = preset.label,
-                        driver = driver,
-                        initialPrompt = initialPrompt,
+            val response = if (driver != null) {
+                client.call(
+                    Methods.CHAT_SPAWN,
+                    encodeParams(
+                        ChatSpawnParams.serializer(),
+                        ChatSpawnParams(
+                            project = project,
+                            agentType = preset.agentType,
+                            program = preset.program,
+                            args = preset.args,
+                            presetName = preset.label,
+                            driver = driver,
+                            initialPrompt = prompt,
+                        ),
                     ),
-                ),
-            )
+                )
+            } else {
+                client.call(
+                    Methods.AGENT_SPAWN,
+                    encodeParams(
+                        AgentSpawnParams.serializer(),
+                        AgentSpawnParams(
+                            project = project,
+                            agentType = preset.agentType,
+                            program = preset.program.takeIf { preset.id != "shell" },
+                            args = preset.args,
+                            presetName = preset.label,
+                        ),
+                    ),
+                )
+            }
             val spawned = muxlaneJson.decodeFromJsonElement(
                 AgentInstance.serializer(),
                 response.result ?: error(response.error?.message ?: "无法创建对话会话"),
@@ -789,6 +818,18 @@ class MuxlaneSession(private val app: Application) {
             refreshSnapshot()
             refreshChatList()
             openAgent(spawned.id)
+            if (driver == null && prompt != null) {
+                // For PTY dual-lane agents (Claude/Codex), dispatch optional initial prompt through chat.send.
+                runCatching {
+                    client.call(
+                        Methods.CHAT_SEND,
+                        encodeParams(
+                            ChatSendParams.serializer(),
+                            ChatSendParams(agent = spawned.id, text = prompt),
+                        ),
+                    )
+                }
+            }
         }
     }
 
@@ -1222,7 +1263,8 @@ class MuxlaneViewModel(app: Application) : AndroidViewModel(app) {
     fun setChatTextScale(scale: Float) = session.setChatTextScale(scale)
     fun setSessionMode(mode: SessionPaneMode) = session.setSessionMode(mode)
     fun closeAgent() = session.closeAgent()
-    fun sendChatPrompt(text: String, steer: Boolean = false) = session.sendChatPrompt(text, steer)
+    fun sendChatPrompt(text: String, steer: Boolean = true) = session.sendChatPrompt(text, steer)
+    fun deleteQueuedMessage(agent: String, messageId: String) = session.deleteQueuedMessage(agent, messageId)
     fun abortChat() = session.abortChat()
     fun configureChat(provider: String? = null, modelId: String? = null, thinkingLevel: String? = null) =
         session.configureChat(provider, modelId, thinkingLevel)
@@ -1242,6 +1284,12 @@ class MuxlaneViewModel(app: Application) : AndroidViewModel(app) {
     fun confirmDelete() = session.confirmDelete()
     fun markSeen(agent: String) = session.markSeen(agent)
     fun triggerBot(botId: String) = session.triggerBot(botId)
+}
+
+internal fun presetChatDriver(agentType: AgentType): ChatDriverKind? = when (agentType) {
+    AgentType.PI, AgentType.PIE -> ChatDriverKind.PI_RPC
+    AgentType.OPENCODE, AgentType.GEMINI, AgentType.QWEN, AgentType.KIMI, AgentType.AGY -> ChatDriverKind.ACP
+    else -> null
 }
 
 /** Legacy X10 wheel reports are understood by tmux with mouse mode enabled. */

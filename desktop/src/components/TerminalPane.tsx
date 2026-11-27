@@ -4,9 +4,34 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Methods, type TermSubscribeResult } from "../shared/protocol";
+import { parseOsc52Payload } from "../shared/osc52";
 import { resolveCustomTerminalSequence } from "../shared/terminalKeys";
 import { encodeStringToBase64, type TermStreamChunk } from "../state/useMuxlaneStore";
 import type { AppTheme } from "../state/useTheme";
+
+async function writeSystemClipboard(text: string, alsoSelection = true): Promise<void> {
+  if (!text) return;
+  try {
+    if (window.muxlane?.writeClipboardText) {
+      await window.muxlane.writeClipboardText(text, { alsoSelection });
+      return;
+    }
+  } catch {
+    // fall through to browser clipboard API
+  }
+  await navigator.clipboard?.writeText(text).catch(() => {});
+}
+
+async function readSystemClipboard(): Promise<string> {
+  try {
+    if (window.muxlane?.readClipboardText) {
+      return await window.muxlane.readClipboardText();
+    }
+  } catch {
+    // fall through to browser clipboard API
+  }
+  return (await navigator.clipboard?.readText().catch(() => "")) ?? "";
+}
 
 interface TerminalPaneProps {
   agentId: string;
@@ -217,34 +242,65 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         .catch(() => {});
     };
 
+    let isParsingReplay = false;
+    const writeBytes = (bytes: Uint8Array, isReplay: boolean) => {
+      if (bytes.length === 0) return;
+      if (isReplay) {
+        term.write("", () => {
+          isParsingReplay = true;
+        });
+        term.write(bytes, () => {
+          isParsingReplay = false;
+        });
+      } else {
+        term.write(bytes);
+      }
+    };
+
+    // Handle OSC 52 clipboard writes from remote tmux / TUI apps (vim, neovim, pi, claude, etc.)
+    const osc52Disposable = term.parser.registerOscHandler(52, (data) => {
+      if (isParsingReplay) return true;
+      const parsed = parseOsc52Payload(data);
+      if (parsed) {
+        void writeSystemClipboard(parsed.text, parsed.alsoSelection);
+      }
+      return true;
+    });
+
     // Fix @xterm/xterm Linux key encoding bugs (Alt+Arrow rewritten to Ctrl+Arrow, Shift+Enter -> \r, etc.)
     term.attachCustomKeyEventHandler((e) => {
       if (e.isComposing || e.keyCode === 229) return true;
 
-      // Linux terminal standard copy/paste (Ctrl+Shift+C / Ctrl+Shift+V)
-      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
-        const lower = e.key.toLowerCase();
-        if (lower === "c" && term.hasSelection()) {
-          if (e.type === "keydown") {
-            e.preventDefault();
-            e.stopPropagation();
-            void navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+      const lower = e.key.toLowerCase();
+      const isCtrlShift = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+      const isCtrlOnly = e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey;
+      const isMetaOnly = e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+
+      // Copy: Ctrl+Shift+C, Cmd+C, or Ctrl+C when terminal has an active selection
+      if (lower === "c" && (isCtrlShift || isMetaOnly || (isCtrlOnly && term.hasSelection()))) {
+        if (e.type === "keydown") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (term.hasSelection()) {
+            void writeSystemClipboard(term.getSelection(), true);
+            if (isCtrlOnly) {
+              term.clearSelection();
+            }
           }
-          return false;
         }
-        if (lower === "v") {
-          if (e.type === "keydown") {
-            e.preventDefault();
-            e.stopPropagation();
-            void navigator.clipboard
-              .readText()
-              .then((text) => {
-                if (text) term.paste(text);
-              })
-              .catch(() => {});
-          }
-          return false;
+        return false;
+      }
+
+      // Paste: Ctrl+Shift+V or Cmd+V
+      if (lower === "v" && (isCtrlShift || isMetaOnly)) {
+        if (e.type === "keydown") {
+          e.preventDefault();
+          e.stopPropagation();
+          void readSystemClipboard().then((text) => {
+            if (text) term.paste(text);
+          });
         }
+        return false;
       }
 
       const customSeq = resolveCustomTerminalSequence(e);
@@ -275,9 +331,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       if (disposed) return;
       if (chunk.kind === "reset") {
         term.reset();
-        if (chunk.bytes.length > 0) term.write(chunk.bytes);
+        writeBytes(chunk.bytes, chunk.isReplay !== false);
       } else if (chunk.kind === "append") {
-        if (chunk.bytes.length > 0) term.write(chunk.bytes);
+        writeBytes(chunk.bytes, chunk.isReplay === true);
       } else if (chunk.kind === "exit") {
         setExited(true);
         term.writeln("\r\n\x1b[33m[终端会话已退出]\x1b[0m");
@@ -307,7 +363,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             const bytes = new Uint8Array(bin.length);
             for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
             term.reset();
-            term.write(bytes);
+            writeBytes(bytes, true);
           }
           requestAnimationFrame(fitAndNotify);
         })
@@ -322,6 +378,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       disposed = true;
       unregister();
       resizeObserver.disconnect();
+      osc52Disposable.dispose();
       dataDisposable.dispose();
       if (subId) {
         void window.muxlane.rpc(Methods.TERM_UNSUBSCRIBE, { sub_id: subId }).catch(() => {});
